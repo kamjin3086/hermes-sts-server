@@ -1,0 +1,13 @@
+.venv-sts/
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+logs/
+models/
+
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
