@@ -169,6 +169,8 @@ class BaseOpenAIChatProvider:
             "回答要适合语音播报，通常控制在 1 到 3 句。"
             "除非用户明确要求详细说明，否则不要长篇自我介绍、不要列清单、不要使用 Markdown 表格。"
             "不要解释内部系统、模型、接口、内存、服务状态或运行限制。"
+            "如果需要 Reachy Mini 做动作、看相机、跟踪或调用外部能力，请使用可用工具。"
+            "不要把工具名、JSON 参数、动作枚举或表情标签写进要播报的文字里。"
         )
         if instructions:
             return f"{system}\n\nReachy 会话附加指令：\n{instructions[:2500]}"

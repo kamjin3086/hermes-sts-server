@@ -19,7 +19,7 @@ from hermes_sts.audio import Utterance, chunk_pcm16
 from hermes_sts.config import Settings
 from hermes_sts.llm import LLMProvider, LLMResponse, Message, ToolCall
 from hermes_sts.stt import SttProvider
-from hermes_sts.tools import ToolRegistry
+from hermes_sts.tools import ToolExecution, ToolRegistry
 from hermes_sts.tts import TtsProvider
 from hermes_sts.vad import VadProvider, build_vad
 
@@ -57,17 +57,24 @@ class RealtimeSession:
     active_response_id: str | None = None
     active_item_id: str | None = None
     active_metrics: TurnMetrics | None = None
+    pending_text_inputs: list[str] = field(default_factory=list)
+    pending_tool_results: list[Message] = field(default_factory=list)
+    pending_tool_context: list[Message] | None = None
+    next_response_instructions: str = ""
+    session_id: str = field(default_factory=lambda: f"sess_{uuid.uuid4().hex}")
 
     def __post_init__(self) -> None:
         self.vad = build_vad(self.settings)
+        self.tools = ToolRegistry()
 
     async def run(self) -> None:
         await self.websocket.accept()
+        logger.info("Realtime session connected session_id=%s", self.session_id)
         await self._send(
             {
                 "type": "session.created",
                 "event_id": self._event_id(),
-                "session": {"id": f"sess_{uuid.uuid4().hex}", "object": "realtime.session"},
+                "session": {"id": self.session_id, "object": "realtime.session"},
             }
         )
         try:
@@ -80,7 +87,7 @@ class RealtimeSession:
                     continue
                 await self._handle_message(payload)
         except WebSocketDisconnect:
-            logger.info("Realtime client disconnected")
+            logger.info("Realtime client disconnected session_id=%s", self.session_id)
         finally:
             await self._cancel_processing(send_done=False)
 
@@ -88,12 +95,12 @@ class RealtimeSession:
         msg_type = msg.get("type")
         if msg_type == "session.update":
             session = msg.get("session") or {}
-            self.instructions = str(session.get("instructions") or "")
+            self._apply_session_config(session)
             await self._send(
                 {
                     "type": "session.updated",
                     "event_id": self._event_id(),
-                    "session": {"id": f"sess_{uuid.uuid4().hex}", "object": "realtime.session"},
+                    "session": {"id": self.session_id, "object": "realtime.session"},
                 }
             )
             return
@@ -121,13 +128,43 @@ class RealtimeSession:
                     started_at=time.perf_counter(),
                     utterance_ms=utterance.duration_ms,
                 )
-                logger.info("VAD committed %s utterance_ms=%d", metrics.turn_id, metrics.utterance_ms)
+                logger.info(
+                    "VAD committed session_id=%s turn_id=%s utterance_ms=%d",
+                    self.session_id,
+                    metrics.turn_id,
+                    metrics.utterance_ms,
+                )
                 self.processing = asyncio.create_task(self._process_turn(utterance.pcm16, metrics))
             return
 
         if msg_type == "response.create":
+            response_config = msg.get("response") if isinstance(msg.get("response"), dict) else {}
+            if response_config:
+                self._apply_response_config(response_config)
             if not self.processing or self.processing.done():
-                self.processing = asyncio.create_task(self._send_response("I'm here.", transcript="I'm here."))
+                transcript = self._pop_pending_text()
+                if transcript:
+                    self.state = "processing"
+                    metrics = TurnMetrics(
+                        turn_id=f"turn_{uuid.uuid4().hex}",
+                        started_at=time.perf_counter(),
+                    )
+                    turn_instructions = self._consume_response_instructions()
+                    self.processing = asyncio.create_task(
+                        self._process_text_turn(transcript, metrics, instructions=turn_instructions)
+                    )
+                elif self.pending_tool_context and self.pending_tool_results:
+                    self.state = "processing"
+                    metrics = TurnMetrics(
+                        turn_id=f"turn_{uuid.uuid4().hex}",
+                        started_at=time.perf_counter(),
+                    )
+                    turn_instructions = self._consume_response_instructions()
+                    self.processing = asyncio.create_task(
+                        self._process_tool_result_turn(metrics, instructions=turn_instructions)
+                    )
+                else:
+                    self.processing = asyncio.create_task(self._send_response("I'm here.", transcript="I'm here."))
             return
 
         if msg_type == "response.cancel":
@@ -140,10 +177,107 @@ class RealtimeSession:
             return
 
         if msg_type == "conversation.item.create":
-            logger.debug("Ignoring conversation.item.create in minimal server: %s", msg)
+            self._handle_conversation_item(msg.get("item") or {})
             return
 
         logger.debug("Ignoring realtime client event: %s", msg_type)
+
+    def _apply_session_config(self, session: dict[str, Any]) -> None:
+        if "instructions" in session:
+            self.instructions = str(session.get("instructions") or "")
+        if isinstance(session.get("tools"), list):
+            self.tools.set_client_tools(session.get("tools"))
+        logger.info(
+            "Session updated session_id=%s instructions_chars=%d client_tools=%d local_tools=%d",
+            self.session_id,
+            len(self.instructions),
+            len(self.tools.client_tool_names()),
+            len(self.tools.local_tool_names()),
+        )
+
+    def _apply_response_config(self, response_config: dict[str, Any]) -> None:
+        instructions = response_config.get("instructions")
+        if isinstance(instructions, str) and instructions.strip():
+            self.next_response_instructions = instructions.strip()
+        if isinstance(response_config.get("tools"), list):
+            self.tools.set_client_tools(response_config.get("tools"))
+        logger.debug(
+            "Response config updated session_id=%s response_instructions_chars=%d client_tools=%d",
+            self.session_id,
+            len(self.next_response_instructions),
+            len(self.tools.client_tool_names()),
+        )
+
+    @staticmethod
+    def _merge_instructions(current: str, extra: str) -> str:
+        current = current.strip()
+        extra = extra.strip()
+        if not current:
+            return extra
+        if not extra or extra in current:
+            return current
+        return f"{current}\n\nResponse-specific instructions:\n{extra}"
+
+    def _handle_conversation_item(self, item: dict[str, Any]) -> None:
+        item_type = item.get("type")
+        if item_type == "function_call_output":
+            call_id = str(item.get("call_id") or "")
+            output = item.get("output")
+            if call_id:
+                self.pending_tool_results.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
+                    }
+                )
+                logger.info(
+                    "Queued tool result session_id=%s call_id=%s pending_results=%d",
+                    self.session_id,
+                    call_id,
+                    len(self.pending_tool_results),
+                )
+            return
+
+        text = self._extract_text_from_item(item)
+        if text:
+            self.pending_text_inputs.append(text)
+            logger.info(
+                "Queued text input session_id=%s chars=%d pending_text_items=%d",
+                self.session_id,
+                len(text),
+                len(self.pending_text_inputs),
+            )
+            return
+
+        logger.debug("Ignoring conversation.item.create item: %s", item_type)
+
+    @staticmethod
+    def _extract_text_from_item(item: dict[str, Any]) -> str:
+        content = item.get("content")
+        parts: list[str] = []
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in {"input_text", "text"} and isinstance(part.get("text"), str):
+                    parts.append(part["text"].strip())
+        if not parts and isinstance(item.get("text"), str):
+            parts.append(item["text"].strip())
+        return "\n".join(part for part in parts if part).strip()
+
+    def _pop_pending_text(self) -> str:
+        if not self.pending_text_inputs:
+            return ""
+        text = "\n".join(self.pending_text_inputs).strip()
+        self.pending_text_inputs.clear()
+        logger.debug("Popped pending text session_id=%s chars=%d", self.session_id, len(text))
+        return text
+
+    def _consume_response_instructions(self) -> str:
+        instructions = self.next_response_instructions
+        self.next_response_instructions = ""
+        return self._merge_instructions(self.instructions, instructions)
 
     async def _decode_audio_append(self, msg: dict[str, Any]) -> bytes | None:
         encoded = msg.get("audio")
@@ -193,7 +327,13 @@ class RealtimeSession:
             stt_ms = (time.perf_counter() - started) * 1000
             if metrics:
                 metrics.stt_ms = stt_ms
-            logger.info("STT completed in %.0f ms: %s", stt_ms, transcript)
+            logger.info(
+                "STT completed session_id=%s turn_id=%s stt_ms=%.0f transcript_chars=%d",
+                self.session_id,
+                metrics.turn_id if metrics else "-",
+                stt_ms,
+                len(transcript),
+            )
             await self._respond_with_agent_wait(transcript, metrics=metrics)
             self.state = "idle"
         except asyncio.CancelledError:
@@ -204,6 +344,63 @@ class RealtimeSession:
             logger.exception("Turn processing failed")
             await self._send_error("server_error", str(exc))
 
+    async def _process_text_turn(
+        self,
+        transcript: str,
+        metrics: TurnMetrics | None = None,
+        *,
+        instructions: str | None = None,
+    ) -> None:
+        try:
+            transcript = transcript.strip()
+            if not transcript:
+                self.state = "idle"
+                return
+            await self._respond_with_agent_wait(transcript, metrics=metrics, instructions=instructions)
+            self.state = "idle"
+        except asyncio.CancelledError:
+            self.state = "cancelled"
+            raise
+        except Exception as exc:
+            self.state = "idle"
+            logger.exception("Text turn processing failed")
+            await self._send_error("server_error", str(exc))
+
+    async def _process_tool_result_turn(
+        self,
+        metrics: TurnMetrics | None = None,
+        *,
+        instructions: str | None = None,
+    ) -> None:
+        context = self.pending_tool_context or []
+        results = list(self.pending_tool_results)
+        self.pending_tool_context = None
+        self.pending_tool_results.clear()
+        try:
+            started = time.perf_counter()
+            messages = [*context, *results]
+            if messages and messages[0].get("role") == "system":
+                messages[0] = {"role": "system", "content": self._tool_system_prompt(instructions=instructions)}
+            logger.info(
+                "Processing tool result turn session_id=%s context_messages=%d tool_results=%d",
+                self.session_id,
+                len(context),
+                len(results),
+            )
+            final = await self.llm.chat(messages=messages, instructions=instructions or self.instructions)
+            if metrics:
+                metrics.llm_ms = (time.perf_counter() - started) * 1000
+            text = final.text.strip() or "好的，已完成。"
+            await self._send_response(text, transcript=text, metrics=metrics)
+            self.state = "idle"
+        except asyncio.CancelledError:
+            self.state = "cancelled"
+            raise
+        except Exception as exc:
+            self.state = "idle"
+            logger.exception("Tool result turn processing failed")
+            await self._send_error("server_error", str(exc))
+
     @staticmethod
     def _is_meaningful_transcript(transcript: str) -> bool:
         text = transcript.strip()
@@ -211,10 +408,24 @@ class RealtimeSession:
             return False
         return bool(re.search(r"[0-9A-Za-z\u4e00-\u9fff]", text))
 
-    async def _respond_with_agent_wait(self, transcript: str, *, metrics: TurnMetrics | None = None) -> None:
-        llm_task = asyncio.create_task(self._ask_llm_with_tools(transcript, metrics=metrics))
+    async def _respond_with_agent_wait(
+        self,
+        transcript: str,
+        *,
+        metrics: TurnMetrics | None = None,
+        instructions: str | None = None,
+    ) -> None:
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
+        llm_task = asyncio.create_task(
+            self._ask_llm_with_tools(
+                transcript,
+                response_id=response_id,
+                item_id=item_id,
+                metrics=metrics,
+                instructions=instructions or self.instructions,
+            )
+        )
         filler_texts = self._filler_texts_for(transcript)
         filler_count = 0
         started = time.perf_counter()
@@ -273,52 +484,123 @@ class RealtimeSession:
         await self._send_text_segments(answer, response_id=response_id, item_id=item_id, metrics=metrics)
         await self._send_response_done(response_id=response_id, item_id=item_id, transcript=answer)
 
-    async def _ask_llm_with_tools(self, transcript: str, *, metrics: TurnMetrics | None = None) -> str:
+    async def _ask_llm_with_tools(
+        self,
+        transcript: str,
+        *,
+        response_id: str,
+        item_id: str,
+        metrics: TurnMetrics | None = None,
+        instructions: str | None = None,
+    ) -> str:
         started = time.perf_counter()
         response = await self.llm.chat(
             transcript,
-            instructions=self.instructions,
+            instructions=instructions or self.instructions,
             tools=self.tools.openai_tools(),
         )
         if metrics:
             metrics.llm_ms = (time.perf_counter() - started) * 1000
-        logger.info("LLM completed in %.0f ms", (time.perf_counter() - started) * 1000)
+        logger.info(
+            "LLM completed session_id=%s turn_id=%s llm_ms=%.0f tool_calls=%d text_chars=%d",
+            self.session_id,
+            metrics.turn_id if metrics else "-",
+            (time.perf_counter() - started) * 1000,
+            len(response.tool_calls),
+            len(response.text),
+        )
         if not response.tool_calls:
             return response.text
 
-        messages = self._tool_followup_messages(transcript, response)
+        messages = self._tool_followup_messages(transcript, response, instructions=instructions)
+        waiting_for_client_tool = False
         for tool_call in response.tool_calls:
-            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+            execution = await self.tools.execute(tool_call.name, tool_call.arguments)
+            if execution.forwarded:
+                await self._send_tool_call_event(
+                    tool_call=tool_call,
+                    execution=execution,
+                    response_id=response_id,
+                    item_id=item_id,
+                )
+                waiting_for_client_tool = True
+                continue
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": tool_call.name,
-                    "content": result,
+                    "content": execution.result,
                 }
             )
+        if waiting_for_client_tool:
+            self.pending_tool_context = messages
+            logger.info(
+                "Waiting for client tool result session_id=%s pending_context_messages=%d",
+                self.session_id,
+                len(messages),
+            )
+            return response.text.strip()
         final_started = time.perf_counter()
-        final = await self.llm.chat(messages=messages, instructions=self.instructions)
+        final = await self.llm.chat(messages=messages, instructions=instructions or self.instructions)
         if metrics:
             metrics.llm_ms += (time.perf_counter() - final_started) * 1000
         return final.text or self._fallback_text_for(transcript)
 
-    def _tool_followup_messages(self, transcript: str, response: LLMResponse) -> list[Message]:
+    async def _send_tool_call_event(
+        self,
+        *,
+        tool_call: ToolCall,
+        execution: ToolExecution,
+        response_id: str,
+        item_id: str,
+    ) -> None:
+        await self._send(
+            {
+                "type": "response.function_call_arguments.done",
+                "event_id": self._event_id(),
+                "response_id": response_id,
+                "item_id": item_id,
+                "output_index": 0,
+                "call_id": tool_call.id,
+                "name": execution.name,
+                "arguments": json.dumps(execution.arguments, ensure_ascii=False),
+            }
+        )
+        logger.info(
+            "Forwarded client tool call session_id=%s response_id=%s call_id=%s tool=%s args_keys=%s",
+            self.session_id,
+            response_id,
+            tool_call.id,
+            execution.name,
+            sorted(execution.arguments),
+        )
+
+    def _tool_followup_messages(
+        self,
+        transcript: str,
+        response: LLMResponse,
+        *,
+        instructions: str | None = None,
+    ) -> list[Message]:
         assistant_message: Message = {"role": "assistant", "content": response.text or ""}
         assistant_message["tool_calls"] = [self._tool_call_message(tool_call) for tool_call in response.tool_calls]
         return [
-            {"role": "system", "content": self._tool_system_prompt()},
+            {"role": "system", "content": self._tool_system_prompt(instructions=instructions)},
             {"role": "user", "content": transcript},
             assistant_message,
         ]
 
-    def _tool_system_prompt(self) -> str:
+    def _tool_system_prompt(self, *, instructions: str | None = None) -> str:
         base = (
             "你正在通过 Reachy Mini Lite 机器人和用户语音对话。"
             "请根据工具结果继续用用户语言给出简短、自然、适合语音播报的回答。"
+            "工具名、JSON、动作参数和表情标签不能作为语音内容读出来。"
+            "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
         )
-        if self.instructions:
-            return f"{base}\n\nReachy 会话附加指令：\n{self.instructions[:2500]}"
+        effective = instructions or self.instructions
+        if effective:
+            return f"{base}\n\nReachy 会话附加指令：\n{effective[:2500]}"
         return base
 
     @staticmethod
@@ -581,6 +863,12 @@ class RealtimeSession:
         )
         await self._send_response_done_status(response_id=response_id, status="completed")
         self._log_turn_metrics(self.active_metrics, status="completed")
+        logger.info(
+            "Response completed session_id=%s response_id=%s transcript_chars=%d",
+            self.session_id,
+            response_id,
+            len(transcript),
+        )
         self.active_response_id = None
         self.active_item_id = None
         self.active_metrics = None
@@ -602,6 +890,12 @@ class RealtimeSession:
             self.state = "cancelled"
             await self._send_response_done_status(response_id=response_id, status="cancelled", reason=reason)
             self._log_turn_metrics(self.active_metrics, status="cancelled")
+            logger.info(
+                "Response cancelled session_id=%s response_id=%s reason=%s",
+                self.session_id,
+                response_id,
+                reason,
+            )
         else:
             self.active_response_id = None
             self.active_item_id = None

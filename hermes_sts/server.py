@@ -11,6 +11,8 @@ from hermes_sts.stt import build_stt
 from hermes_sts.tools import ToolRegistry
 from hermes_sts.tts import build_tts
 
+logger = logging.getLogger(__name__)
+
 
 def create_app() -> FastAPI:
     settings.log_dir.mkdir(parents=True, exist_ok=True)
@@ -24,6 +26,18 @@ def create_app() -> FastAPI:
     tts = build_tts(settings)
     llm = build_llm(settings)
     tools = ToolRegistry()
+    logger.info(
+        (
+            "STS providers ready sample_rate=%d vad=%s stt=%s tts=%s llm=%s "
+            "response_chunk_ms=%d"
+        ),
+        settings.sample_rate,
+        settings.vad_provider,
+        settings.stt_provider,
+        settings.tts_provider,
+        settings.llm_provider,
+        settings.response_audio_chunk_ms,
+    )
 
     @app.get("/health")
     async def health() -> dict:
