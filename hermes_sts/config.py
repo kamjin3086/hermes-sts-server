@@ -4,7 +4,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    def load_dotenv(*_args, **_kwargs) -> bool:
+        return False
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +34,32 @@ def _float_env(name: str, default: float) -> float:
     if not raw:
         return default
     return float(raw)
+
+
+def _path_env(name: str, default: str = "") -> str:
+    raw = os.getenv(name, default).strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return str(path)
+
+
+def _path_list_env(name: str, default: str = "") -> str:
+    raw = os.getenv(name, default).strip()
+    if not raw:
+        return ""
+    resolved = []
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+        resolved.append(str(path))
+    return ",".join(resolved)
 
 
 @dataclass(frozen=True)
@@ -58,6 +88,12 @@ class Settings:
     hermes_fallback_texts: str = os.getenv("HERMES_FALLBACK_TEXTS", "")
     hermes_history_max_messages: int = _int_env("HERMES_HISTORY_MAX_MESSAGES", 40)
     hermes_history_max_chars: int = _int_env("HERMES_HISTORY_MAX_CHARS", 12000)
+    llm_provider: str = os.getenv("STS_LLM_PROVIDER", "hermes_agent")
+    llm_base_url: str = os.getenv("LLM_BASE_URL", os.getenv("HERMES_BASE_URL", "http://127.0.0.1:8642/v1"))
+    llm_model: str = os.getenv("LLM_MODEL", os.getenv("HERMES_MODEL", "hermes-agent"))
+    llm_api_key: str = os.getenv("LLM_API_KEY", os.getenv("HERMES_API_KEY", ""))
+    llm_max_tokens: int = _int_env("LLM_MAX_TOKENS", _int_env("HERMES_MAX_TOKENS", 220))
+    llm_timeout_seconds: float = _float_env("LLM_TIMEOUT_SECONDS", _float_env("HERMES_TIMEOUT_SECONDS", 45.0))
     llm_fallback_enabled: bool = _bool_env("LLM_FALLBACK_ENABLED", True)
     llm_fallback_base_url: str = os.getenv("LLM_FALLBACK_BASE_URL", "")
     llm_fallback_model: str = os.getenv("LLM_FALLBACK_MODEL", "")
@@ -67,39 +103,51 @@ class Settings:
 
     stt_provider: str = os.getenv("STS_STT_PROVIDER", "dev")
     dev_transcript: str = os.getenv("HERMES_STS_DEV_TRANSCRIPT", "hello")
-    funasr_model_dir: str = os.getenv("FUNASR_MODEL_DIR", "")
+    funasr_model_dir: str = _path_env("FUNASR_MODEL_DIR")
     funasr_quantize: bool = _bool_env("FUNASR_QUANTIZE", False)
     lemonade_base_url: str = os.getenv("LEMONADE_BASE_URL", "http://127.0.0.1:13305/api/v1")
     lemonade_api_key: str = os.getenv("LEMONADE_API_KEY", "nopass")
     lemonade_stt_model: str = os.getenv("LEMONADE_STT_MODEL", "Whisper-Large-v3-Turbo")
     lemonade_stt_language: str = os.getenv("LEMONADE_STT_LANGUAGE", "zh")
     lemonade_stt_timeout_seconds: float = _float_env("LEMONADE_STT_TIMEOUT_SECONDS", 60.0)
-    sherpa_sensevoice_model: str = os.getenv("SHERPA_SENSEVOICE_MODEL", "")
-    sherpa_sensevoice_tokens: str = os.getenv("SHERPA_SENSEVOICE_TOKENS", "")
+    sherpa_sensevoice_model: str = _path_env("SHERPA_SENSEVOICE_MODEL")
+    sherpa_sensevoice_tokens: str = _path_env("SHERPA_SENSEVOICE_TOKENS")
     sherpa_sensevoice_language: str = os.getenv("SHERPA_SENSEVOICE_LANGUAGE", "zh")
     sherpa_sensevoice_use_itn: bool = _bool_env("SHERPA_SENSEVOICE_USE_ITN", True)
 
     tts_provider: str = os.getenv("STS_TTS_PROVIDER", "sapi")
     sapi_voice: str = os.getenv("SAPI_VOICE", "")
-    sherpa_tts_model: str = os.getenv("SHERPA_TTS_MODEL", "")
-    sherpa_tts_tokens: str = os.getenv("SHERPA_TTS_TOKENS", "")
-    sherpa_tts_data_dir: str = os.getenv("SHERPA_TTS_DATA_DIR", "")
-    sherpa_kokoro_model: str = os.getenv("SHERPA_KOKORO_MODEL", "")
-    sherpa_kokoro_voices: str = os.getenv("SHERPA_KOKORO_VOICES", "")
-    sherpa_kokoro_tokens: str = os.getenv("SHERPA_KOKORO_TOKENS", "")
-    sherpa_kokoro_lexicon: str = os.getenv("SHERPA_KOKORO_LEXICON", "")
-    sherpa_kokoro_data_dir: str = os.getenv("SHERPA_KOKORO_DATA_DIR", "")
+    sherpa_tts_model: str = _path_env("SHERPA_TTS_MODEL")
+    sherpa_tts_tokens: str = _path_env("SHERPA_TTS_TOKENS")
+    sherpa_tts_data_dir: str = _path_env("SHERPA_TTS_DATA_DIR")
+    sherpa_kokoro_model: str = _path_env("SHERPA_KOKORO_MODEL")
+    sherpa_kokoro_voices: str = _path_env("SHERPA_KOKORO_VOICES")
+    sherpa_kokoro_tokens: str = _path_env("SHERPA_KOKORO_TOKENS")
+    sherpa_kokoro_lexicon: str = _path_list_env("SHERPA_KOKORO_LEXICON")
+    sherpa_kokoro_data_dir: str = _path_env("SHERPA_KOKORO_DATA_DIR")
     sherpa_kokoro_voice: int = _int_env("SHERPA_KOKORO_VOICE", 0)
     sherpa_kokoro_lang: str = os.getenv("SHERPA_KOKORO_LANG", "")
 
+    vad_provider: str = os.getenv("STS_VAD_PROVIDER", "energy")
     vad_energy_threshold: float = _float_env("VAD_ENERGY_THRESHOLD", 0.012)
     vad_start_ms: int = _int_env("VAD_START_MS", 160)
     vad_end_ms: int = _int_env("VAD_END_MS", 700)
     vad_min_utterance_ms: int = _int_env("VAD_MIN_UTTERANCE_MS", 300)
     vad_max_utterance_ms: int = _int_env("VAD_MAX_UTTERANCE_MS", 12000)
+    sherpa_silero_vad_model: str = _path_env("SHERPA_SILERO_VAD_MODEL")
+    vad_min_silence_seconds: float = _float_env("VAD_MIN_SILENCE_SECONDS", 0.5)
+    vad_buffer_seconds: float = _float_env("VAD_BUFFER_SECONDS", 30.0)
+    vad_threshold: float = _float_env("VAD_THRESHOLD", 0.5)
+    max_audio_chunk_bytes: int = _int_env("HERMES_STS_MAX_AUDIO_CHUNK_BYTES", 32000)
+    suppress_input_while_speaking: bool = _bool_env("STS_SUPPRESS_INPUT_WHILE_SPEAKING", True)
+    response_audio_chunk_ms: int = _int_env("STS_RESPONSE_AUDIO_CHUNK_MS", 80)
+    tts_segment_min_chars: int = _int_env("STS_TTS_SEGMENT_MIN_CHARS", 24)
+    tts_segment_max_chars: int = _int_env("STS_TTS_SEGMENT_MAX_CHARS", 90)
+    tts_strip_bracketed_cues: bool = _bool_env("STS_TTS_STRIP_BRACKETED_CUES", True)
+    latency_logging: bool = _bool_env("STS_LATENCY_LOGGING", True)
 
-    models_dir: Path = Path(os.getenv("MODELS_DIR", str(ROOT / "models")))
-    log_dir: Path = Path(os.getenv("LOG_DIR", str(ROOT / "logs")))
+    models_dir: Path = Path(_path_env("MODELS_DIR", str(ROOT / "models")))
+    log_dir: Path = Path(_path_env("LOG_DIR", str(ROOT / "logs")))
 
 
 settings = Settings()

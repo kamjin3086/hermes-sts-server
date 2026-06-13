@@ -62,16 +62,6 @@ if (!(Test-Path $Venv)) {
 }
 
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
-& $Uv pip install --python $VenvPython `
-  --no-cache `
-  --index-url $Mirror `
-  "fastapi>=0.115" `
-  "uvicorn[standard]>=0.30" `
-  "websockets>=12" `
-  "httpx>=0.27" `
-  "python-dotenv>=1.0" `
-  "numpy>=1.26,<2" `
-  "sherpa-onnx==1.13.2"
-& $Uv pip install --python $VenvPython --no-cache --index-url $Mirror -e $Root --no-deps
+& $Uv pip install --python $VenvPython --no-cache --index-url $Mirror -e "$Root[sherpa]"
 
 Write-Host "STS venv ready: $Venv"

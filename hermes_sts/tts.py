@@ -54,6 +54,14 @@ class WindowsSapiTts:
             wav_path.unlink(missing_ok=True)
 
 
+class ToneTts:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def synthesize(self, text: str) -> bytes:
+        return tone_pcm16(text=text, sample_rate=self.settings.sample_rate)
+
+
 class SherpaOnnxTts:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -160,6 +168,8 @@ def _resample_linear(samples, source_rate: int, target_rate: int):
 
 def build_tts(settings: Settings) -> TtsProvider:
     provider = settings.tts_provider.strip().lower()
+    if provider == "tone":
+        return ToneTts(settings)
     if provider == "sapi":
         return WindowsSapiTts(settings)
     if provider == "sherpa_onnx":

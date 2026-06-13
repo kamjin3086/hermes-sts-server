@@ -5,9 +5,10 @@ import logging
 from fastapi import FastAPI, WebSocket
 
 from hermes_sts.config import settings
-from hermes_sts.hermes import HermesClient
+from hermes_sts.llm import build_llm
 from hermes_sts.realtime import RealtimeSession
 from hermes_sts.stt import build_stt
+from hermes_sts.tools import ToolRegistry
 from hermes_sts.tts import build_tts
 
 
@@ -21,6 +22,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Hermes STS Server", version="0.1.0")
     stt = build_stt(settings)
     tts = build_tts(settings)
+    llm = build_llm(settings)
+    tools = ToolRegistry()
 
     @app.get("/health")
     async def health() -> dict:
@@ -28,8 +31,10 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "hermes-sts-server",
             "sample_rate": settings.sample_rate,
+            "vad_provider": settings.vad_provider,
             "stt_provider": settings.stt_provider,
             "tts_provider": settings.tts_provider,
+            "llm_provider": settings.llm_provider,
             "hermes_base_url": settings.hermes_base_url,
             "hermes_model": settings.hermes_model,
         }
@@ -41,7 +46,8 @@ def create_app() -> FastAPI:
             settings=settings,
             stt=stt,
             tts=tts,
-            hermes=HermesClient(settings),
+            llm=llm,
+            tools=tools,
         )
         await session.run()
 

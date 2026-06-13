@@ -15,12 +15,16 @@ function Get-DotenvValue($Name, $Default = "") {
   if (!$line) {
     return $Default
   }
-  return ($line -replace "^$Name=", "").Trim()
+  return (($line -replace "^$Name=", "").Trim().Trim('"'))
 }
 
 $HostName = Get-DotenvValue "HERMES_STS_HOST" "127.0.0.1"
+$ConnectHost = $HostName
+if ($ConnectHost -eq "0.0.0.0" -or $ConnectHost -eq "::") {
+  $ConnectHost = "127.0.0.1"
+}
 $Port = [int](Get-DotenvValue "HERMES_STS_PORT" "8765")
-$HealthUrl = "http://${HostName}:${Port}/health"
+$HealthUrl = "http://${ConnectHost}:${Port}/health"
 $HermesBaseUrl = (Get-DotenvValue "HERMES_BASE_URL" "http://127.0.0.1:8642/v1").TrimEnd("/")
 $HermesApiKey = Get-DotenvValue "HERMES_API_KEY" ""
 $HermesModelsUrl = "$HermesBaseUrl/models"
@@ -98,38 +102,35 @@ if ($LemonadeOk) {
   Write-Warning "Lemonade API is not reachable at $LemonadeModelsUrl. Hermes/local fallback may fail."
 }
 
-Write-Step "Checking STS service"
-if (Test-HttpOk $HealthUrl @{} 5) {
-  Write-Host "STS is already running: $HealthUrl"
-} else {
-  Stop-StsOnPortIfOwned
-  Write-Step "Starting STS server on ${HostName}:${Port}"
-  Start-Process `
-    -FilePath $Python `
-    -ArgumentList "-m", "hermes_sts" `
-    -WorkingDirectory $Root `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput $StdoutLog `
-    -RedirectStandardError $StderrLog
+Write-Step "Restarting STS service"
+Stop-StsOnPortIfOwned
 
-  $Started = $false
-  for ($i = 0; $i -lt 30; $i++) {
-    Start-Sleep -Seconds 1
-    if (Test-HttpOk $HealthUrl @{} 3) {
-      $Started = $true
-      break
-    }
+Write-Step "Starting STS server on ${HostName}:${Port}"
+Start-Process `
+  -FilePath $Python `
+  -ArgumentList "-m", "hermes_sts" `
+  -WorkingDirectory $Root `
+  -WindowStyle Hidden `
+  -RedirectStandardOutput $StdoutLog `
+  -RedirectStandardError $StderrLog
+
+$Started = $false
+for ($i = 0; $i -lt 30; $i++) {
+  Start-Sleep -Seconds 1
+  if (Test-HttpOk $HealthUrl @{} 3) {
+    $Started = $true
+    break
   }
-  if (!$Started) {
-    Write-Host ""
-    Write-Host "STDERR tail:"
-    if (Test-Path $StderrLog) {
-      Get-Content $StderrLog -Tail 40
-    }
-    throw "STS did not become healthy on $HealthUrl"
-  }
-  Write-Host "STS started: $HealthUrl"
 }
+if (!$Started) {
+  Write-Host ""
+  Write-Host "STDERR tail:"
+  if (Test-Path $StderrLog) {
+    Get-Content $StderrLog -Tail 40
+  }
+  throw "STS did not become healthy on $HealthUrl"
+}
+Write-Host "STS started: $HealthUrl"
 
 Write-Step "Current STS health"
 Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 5 | ConvertTo-Json -Depth 8
@@ -158,7 +159,7 @@ if ($connections.Count -gt 0) {
 
 Write-Host ""
 Write-Host "STS pipeline is ready."
-Write-Host "WebSocket endpoint: ws://${HostName}:${Port}/v1/realtime"
+Write-Host "WebSocket endpoint: ws://${ConnectHost}:${Port}/v1/realtime"
 Write-Host "Logs:"
 Write-Host "  $StdoutLog"
 Write-Host "  $StderrLog"

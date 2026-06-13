@@ -16,6 +16,10 @@ function Download-FileIfMissing($Url, $OutputPath) {
   }
 }
 
+Download-FileIfMissing `
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx" `
+  (Join-Path $ModelsDir "silero_vad.onnx")
+
 $SenseDir = Join-Path $ModelsDir "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
 New-Item -ItemType Directory -Force -Path $SenseDir | Out-Null
 $SenseBase = "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
