@@ -48,12 +48,13 @@ SETTING_SPECS: tuple[SettingSpec, ...] = (
     SettingSpec("HERMES_FALLBACK_TEXTS", "hermes_fallback_texts", "兜底回答候选", "等待/兜底", kind="textarea", help="多条用 | 分隔。建议保持中文。"),
     SettingSpec("HERMES_HISTORY_MAX_MESSAGES", "hermes_history_max_messages", "本地历史最大消息数", "上下文", kind="int", minimum=0, maximum=200),
     SettingSpec("HERMES_HISTORY_MAX_CHARS", "hermes_history_max_chars", "本地历史最大字符数", "上下文", kind="int", minimum=0, maximum=100000),
+    SettingSpec("HERMES_HISTORY_IDLE_RESET_SECONDS", "hermes_history_idle_reset_seconds", "上下文闲置重置秒数", "上下文", kind="float", minimum=0, maximum=86400, help="从最后一次 LLM 调用开始计时，0 表示不自动重置。"),
     SettingSpec("STS_VAD_PROVIDER", "vad_provider", "VAD Provider", "VAD 截句", choices=("sherpa_silero", "energy"), live=False),
     SettingSpec("SHERPA_SILERO_VAD_MODEL", "sherpa_silero_vad_model", "Silero VAD 模型", "VAD 截句", live=False),
-    SettingSpec("VAD_THRESHOLD", "vad_threshold", "Silero 阈值", "VAD 截句", kind="float", minimum=0.05, maximum=0.95),
-    SettingSpec("VAD_MIN_SILENCE_SECONDS", "vad_min_silence_seconds", "最小静音秒数", "VAD 截句", kind="float", minimum=0.1, maximum=3),
-    SettingSpec("VAD_ENERGY_THRESHOLD", "vad_energy_threshold", "能量兜底阈值", "VAD 截句", kind="float", minimum=0.001, maximum=0.2),
-    SettingSpec("VAD_END_MS", "vad_end_ms", "静音结束毫秒", "VAD 截句", kind="int", minimum=100, maximum=3000),
+    SettingSpec("VAD_THRESHOLD", "vad_threshold", "说话灵敏度", "听人说话", kind="float", choices=("0.30", "0.35", "0.45", "0.55"), minimum=0.05, maximum=0.95),
+    SettingSpec("VAD_MIN_SILENCE_SECONDS", "vad_min_silence_seconds", "说完多久回应", "听人说话", kind="float", choices=("0.35", "0.45", "0.60", "0.80"), minimum=0.1, maximum=3),
+    SettingSpec("VAD_ENERGY_THRESHOLD", "vad_energy_threshold", "环境底噪", "听人说话", kind="float", choices=("0.003", "0.004", "0.007", "0.012"), minimum=0.001, maximum=0.2),
+    SettingSpec("VAD_END_MS", "vad_end_ms", "补充判定等待", "听人说话", kind="int", choices=("450", "600", "800", "1000"), minimum=100, maximum=3000),
     SettingSpec("VAD_MIN_UTTERANCE_MS", "vad_min_utterance_ms", "最短语音毫秒", "VAD 截句", kind="int", minimum=100, maximum=3000),
     SettingSpec("VAD_MAX_UTTERANCE_MS", "vad_max_utterance_ms", "最长语音毫秒", "VAD 截句", kind="int", minimum=1000, maximum=60000),
     SettingSpec("STS_STT_PROVIDER", "stt_provider", "STT Provider", "STT", choices=("sherpa_sensevoice", "funasr_onnx", "lemonade_whisper", "dev"), live=False),
@@ -89,15 +90,16 @@ DISPLAY_SETTING_ENVS = {
     "HERMES_MAX_FILLERS",
     "HERMES_ALLOW_FALLBACK",
     "HERMES_FALLBACK_TEXTS",
+    "HERMES_HISTORY_IDLE_RESET_SECONDS",
+    "VAD_THRESHOLD",
     "VAD_MIN_SILENCE_SECONDS",
     "VAD_ENERGY_THRESHOLD",
-    "VAD_END_MS",
     "SHERPA_KOKORO_VOICE",
     "STS_TTS_SEGMENT_MAX_CHARS",
     "STS_SUPPRESS_INPUT_WHILE_SPEAKING",
 }
 
-UI_OVERRIDES: dict[str, dict[str, str]] = {
+UI_OVERRIDES: dict[str, dict[str, Any]] = {
     "HERMES_MAX_TOKENS": {
         "category": "回答长度",
         "label": "最大输出 Token",
@@ -117,20 +119,38 @@ UI_OVERRIDES: dict[str, dict[str, str]] = {
         "label": "兜底回答候选",
         "help": "多条用 | 分隔，建议保持中文、短句、自然。",
     },
+    "VAD_THRESHOLD": {
+        "category": "听人说话",
+        "label": "说话灵敏度",
+        "help": "安静房间建议选“灵敏”。如果机器人听不到正常音量，就往更灵敏调；如果老被杂音叫醒，就往更稳调。",
+        "choice_labels": {
+            "0.30": "很灵敏：轻声也容易听到",
+            "0.35": "灵敏：推荐，普通说话即可",
+            "0.45": "均衡：有一点背景声",
+            "0.55": "稳一点：环境比较吵",
+        },
+    },
     "VAD_MIN_SILENCE_SECONDS": {
-        "category": "听写截句",
-        "label": "停顿多久算说完",
-        "help": "感觉反应慢就调低；经常抢话或截断就调高。",
+        "category": "听人说话",
+        "label": "说完多久回应",
+        "help": "越快越容易抢话，越慢越会等你继续说。安静的一问一答建议选“稍快”。",
+        "choice_labels": {
+            "0.35": "很快：短暂停顿就回应",
+            "0.45": "稍快：推荐，日常对话",
+            "0.60": "稳一点：不容易抢话",
+            "0.80": "多等一下：适合慢慢说",
+        },
     },
     "VAD_ENERGY_THRESHOLD": {
-        "category": "听写截句",
-        "label": "环境噪声阈值",
-        "help": "环境吵、误触发多就调高；听不见轻声说话就调低。",
-    },
-    "VAD_END_MS": {
-        "category": "听写截句",
-        "label": "静音结束毫秒",
-        "help": "能量兜底的结束等待时间，通常 500-900 比较自然。",
+        "category": "听人说话",
+        "label": "环境底噪",
+        "help": "安静房间选“安静”。如果没有人说话也会触发，说明需要调到“普通”或“嘈杂”。",
+        "choice_labels": {
+            "0.003": "非常安静：很容易被唤起",
+            "0.004": "安静：推荐，家里/办公室",
+            "0.007": "普通：有轻微背景声",
+            "0.012": "嘈杂：优先避免误触发",
+        },
     },
     "SHERPA_KOKORO_VOICE": {
         "category": "声音",
@@ -258,13 +278,14 @@ def _settings_payload(settings: Settings) -> list[dict[str, Any]]:
                 "value": value,
                 "help": override.get("help", spec.help),
                 "choices": list(spec.choices),
+                "choice_labels": override.get("choice_labels", {}),
                 "min": spec.minimum,
                 "max": spec.maximum,
                 "live": spec.live,
                 "secret": spec.secret,
             }
         )
-    order = ["回答长度", "等待体验", "听写截句", "声音", "交互"]
+    order = ["回答长度", "等待体验", "上下文", "听人说话", "声音", "交互"]
     return [{"name": name, "settings": categories[name]} for name in order if name in categories]
 
 
@@ -575,7 +596,8 @@ function renderField(item) {
   if (item.kind === "bool") {
     input = `<div class="boolControl"><input data-env="${item.env}" data-kind="${item.kind}" type="checkbox" ${value ? "checked" : ""}></div>`;
   } else if (item.choices && item.choices.length) {
-    input = `<select data-env="${item.env}" data-kind="${item.kind}">${item.choices.map(choice => `<option value="${escapeAttr(choice)}" ${String(value) === String(choice) ? "selected" : ""}>${escapeHtml(choice)}</option>`).join("")}</select>`;
+    const labels = item.choice_labels || {};
+    input = `<select data-env="${item.env}" data-kind="${item.kind}">${item.choices.map(choice => `<option value="${escapeAttr(choice)}" ${String(value) === String(choice) ? "selected" : ""}>${escapeHtml(labels[choice] || choice)}</option>`).join("")}</select>`;
   } else if (item.kind === "textarea") {
     input = `<textarea data-env="${item.env}" data-kind="${item.kind}">${escapeHtml(value ?? "")}</textarea>`;
   } else {

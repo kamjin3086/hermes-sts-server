@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import random
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -49,6 +51,7 @@ class RealtimeSession:
     tts: TtsProvider
     llm: LLMProvider
     tools: ToolRegistry
+    turn_gate: asyncio.Lock | None = None
     instructions: str = ""
     state: SessionState = "idle"
     vad: VadProvider = field(init=False)
@@ -134,7 +137,10 @@ class RealtimeSession:
                     metrics.turn_id,
                     metrics.utterance_ms,
                 )
-                self.processing = asyncio.create_task(self._process_turn(utterance.pcm16, metrics))
+                self.processing = self._create_processing_task(
+                    lambda: self._process_turn(utterance.pcm16, metrics),
+                    metrics=metrics,
+                )
             return
 
         if msg_type == "response.create":
@@ -150,8 +156,9 @@ class RealtimeSession:
                         started_at=time.perf_counter(),
                     )
                     turn_instructions = self._consume_response_instructions()
-                    self.processing = asyncio.create_task(
-                        self._process_text_turn(transcript, metrics, instructions=turn_instructions)
+                    self.processing = self._create_processing_task(
+                        lambda: self._process_text_turn(transcript, metrics, instructions=turn_instructions),
+                        metrics=metrics,
                     )
                 elif self.pending_tool_context and self.pending_tool_results:
                     self.state = "processing"
@@ -160,11 +167,14 @@ class RealtimeSession:
                         started_at=time.perf_counter(),
                     )
                     turn_instructions = self._consume_response_instructions()
-                    self.processing = asyncio.create_task(
-                        self._process_tool_result_turn(metrics, instructions=turn_instructions)
+                    self.processing = self._create_processing_task(
+                        lambda: self._process_tool_result_turn(metrics, instructions=turn_instructions),
+                        metrics=metrics,
                     )
                 else:
-                    self.processing = asyncio.create_task(self._send_response("I'm here.", transcript="I'm here."))
+                    self.processing = self._create_processing_task(
+                        lambda: self._send_response("I'm here.", transcript="I'm here."),
+                    )
             return
 
         if msg_type == "response.cancel":
@@ -181,6 +191,38 @@ class RealtimeSession:
             return
 
         logger.debug("Ignoring realtime client event: %s", msg_type)
+
+    def _create_processing_task(
+        self,
+        factory: Callable[[], Awaitable[None]],
+        *,
+        metrics: TurnMetrics | None = None,
+    ) -> asyncio.Task[None]:
+        return asyncio.create_task(self._run_serialized_turn(factory, metrics=metrics))
+
+    async def _run_serialized_turn(
+        self,
+        factory: Callable[[], Awaitable[None]],
+        *,
+        metrics: TurnMetrics | None = None,
+    ) -> None:
+        if self.turn_gate is None:
+            await factory()
+            return
+
+        waited_started = time.perf_counter()
+        if self.turn_gate.locked():
+            logger.info("Waiting for STS serial turn gate session_id=%s", self.session_id)
+        async with self.turn_gate:
+            waited_ms = int((time.perf_counter() - waited_started) * 1000)
+            if waited_ms > 250:
+                logger.info(
+                    "Acquired STS serial turn gate session_id=%s turn_id=%s waited_ms=%s",
+                    self.session_id,
+                    metrics.turn_id if metrics else "",
+                    waited_ms,
+                )
+            await factory()
 
     def _apply_session_config(self, session: dict[str, Any]) -> None:
         if "instructions" in session:
@@ -434,55 +476,72 @@ class RealtimeSession:
             first_filler_pcm_task = asyncio.create_task(self._synthesize_tts(filler_texts[0], metrics=metrics))
 
         try:
-            answer = await asyncio.wait_for(
-                asyncio.shield(llm_task),
-                timeout=max(0.0, self.settings.hermes_first_filler_delay_seconds),
-            )
-            if first_filler_pcm_task and not first_filler_pcm_task.done():
-                first_filler_pcm_task.cancel()
-            await self._send_response(answer, transcript=answer, metrics=metrics)
-            return
-        except asyncio.TimeoutError:
-            pass
-
-        await self._send_response_created(response_id, item_id, metrics=metrics)
-        if first_filler_pcm_task is not None:
-            await self._send_pcm_segment(
-                await first_filler_pcm_task,
-                response_id=response_id,
-                item_id=item_id,
-                metrics=metrics,
-            )
-            filler_count = 1
-
-        answer: str | None = None
-        while not llm_task.done():
-            elapsed = time.perf_counter() - started
-            remaining = self.settings.hermes_agent_max_wait_seconds - elapsed
-            if remaining <= 0:
-                llm_task.cancel()
-                answer = self._fallback_text_for(transcript)
-                break
-
-            timeout = min(self.settings.hermes_filler_interval_seconds, remaining)
             try:
-                answer = await asyncio.wait_for(asyncio.shield(llm_task), timeout=timeout)
-                break
+                answer = await asyncio.wait_for(
+                    asyncio.shield(llm_task),
+                    timeout=max(0.0, self.settings.hermes_first_filler_delay_seconds),
+                )
+                if first_filler_pcm_task and not first_filler_pcm_task.done():
+                    first_filler_pcm_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await first_filler_pcm_task
+                await self._send_response(answer, transcript=answer, metrics=metrics)
+                return
             except asyncio.TimeoutError:
-                if filler_count < self.settings.hermes_max_fillers and filler_count < len(filler_texts):
-                    await self._send_audio_segment(
-                        filler_texts[filler_count],
-                        response_id=response_id,
-                        item_id=item_id,
-                        metrics=metrics,
-                    )
-                    filler_count += 1
+                pass
 
-        if answer is None:
-            answer = await llm_task
+            await self._send_response_created(response_id, item_id, metrics=metrics)
+            if first_filler_pcm_task is not None:
+                await self._send_pcm_segment(
+                    await first_filler_pcm_task,
+                    response_id=response_id,
+                    item_id=item_id,
+                    metrics=metrics,
+                )
+                filler_count = 1
 
-        await self._send_text_segments(answer, response_id=response_id, item_id=item_id, metrics=metrics)
-        await self._send_response_done(response_id=response_id, item_id=item_id, transcript=answer)
+            answer: str | None = None
+            while not llm_task.done():
+                elapsed = time.perf_counter() - started
+                remaining = self.settings.hermes_agent_max_wait_seconds - elapsed
+                if remaining <= 0:
+                    llm_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await llm_task
+                    answer = self._fallback_text_for(transcript)
+                    break
+
+                timeout = min(self.settings.hermes_filler_interval_seconds, remaining)
+                try:
+                    answer = await asyncio.wait_for(asyncio.shield(llm_task), timeout=timeout)
+                    break
+                except asyncio.TimeoutError:
+                    if filler_count < self.settings.hermes_max_fillers and filler_count < len(filler_texts):
+                        await self._send_audio_segment(
+                            filler_texts[filler_count],
+                            response_id=response_id,
+                            item_id=item_id,
+                            metrics=metrics,
+                        )
+                        filler_count += 1
+
+            if answer is None:
+                answer = await llm_task
+
+            await self._send_text_segments(answer, response_id=response_id, item_id=item_id, metrics=metrics)
+            await self._send_response_done(response_id=response_id, item_id=item_id, transcript=answer)
+        except asyncio.CancelledError:
+            logger.info("Cancelling in-flight LLM turn session_id=%s response_id=%s", self.session_id, response_id)
+            raise
+        finally:
+            if not llm_task.done():
+                llm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await llm_task
+            if first_filler_pcm_task is not None and not first_filler_pcm_task.done():
+                first_filler_pcm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await first_filler_pcm_task
 
     async def _ask_llm_with_tools(
         self,

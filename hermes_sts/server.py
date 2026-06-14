@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 
 from fastapi import FastAPI, WebSocket
 
@@ -8,6 +9,7 @@ from hermes_sts.admin import create_admin_router
 from hermes_sts.config import settings
 from hermes_sts.llm import build_llm
 from hermes_sts.realtime import RealtimeSession
+from hermes_sts.singleton import acquire_singleton_lock
 from hermes_sts.stt import build_stt
 from hermes_sts.tools import ToolRegistry
 from hermes_sts.tts import build_tts
@@ -20,10 +22,13 @@ def _build_components(app: FastAPI) -> None:
     app.state.tts = build_tts(settings)
     app.state.llm = build_llm(settings)
     app.state.tools = ToolRegistry()
+    if not hasattr(app.state, "turn_gate"):
+        app.state.turn_gate = asyncio.Lock()
 
 
 def create_app() -> FastAPI:
     settings.log_dir.mkdir(parents=True, exist_ok=True)
+    acquire_singleton_lock(settings.log_dir / "sts-server.lock")
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -80,6 +85,7 @@ def create_app() -> FastAPI:
             tts=websocket.app.state.tts,
             llm=websocket.app.state.llm,
             tools=websocket.app.state.tools,
+            turn_gate=websocket.app.state.turn_gate,
         )
         await session.run()
 

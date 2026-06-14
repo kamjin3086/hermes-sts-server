@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -44,6 +46,8 @@ class BaseOpenAIChatProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.history: list[Message] = []
+        self.last_llm_call_started_at: float | None = None
+        self._request_gate = asyncio.Semaphore(max(1, settings.llm_max_concurrent_requests))
 
     async def chat(
         self,
@@ -53,6 +57,30 @@ class BaseOpenAIChatProvider:
         instructions: str | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
+        queued_at = time.monotonic()
+        async with self._request_gate:
+            queue_ms = int((time.monotonic() - queued_at) * 1000)
+            if queue_ms > 250:
+                logger.info("LLM request waited %sms for local concurrency gate", queue_ms)
+            return await self._chat_once(
+                transcript=transcript,
+                messages=messages,
+                instructions=instructions,
+                tools=tools,
+            )
+
+    async def _chat_once(
+        self,
+        *,
+        transcript: str | None,
+        messages: list[Message] | None,
+        instructions: str | None,
+        tools: list[dict[str, Any]] | None,
+    ) -> LLMResponse:
+        now = time.monotonic()
+        self._reset_history_if_idle(now)
+        self.last_llm_call_started_at = now
+
         prompt_messages = messages or self._messages_for_transcript(transcript or "", instructions)
         body: dict[str, Any] = {
             "model": self.model,
@@ -161,6 +189,19 @@ class BaseOpenAIChatProvider:
         messages.append({"role": "user", "content": transcript})
         return messages
 
+    def reset_history(self, reason: str = "manual") -> None:
+        if self.history:
+            logger.info("Resetting local LLM history reason=%s messages=%s", reason, len(self.history))
+        self.history.clear()
+
+    def _reset_history_if_idle(self, now: float) -> None:
+        idle_limit = max(0.0, self.settings.hermes_history_idle_reset_seconds)
+        if not self.history or idle_limit <= 0 or self.last_llm_call_started_at is None:
+            return
+        idle_seconds = now - self.last_llm_call_started_at
+        if idle_seconds >= idle_limit:
+            self.reset_history(reason=f"idle_{int(idle_seconds)}s")
+
     @staticmethod
     def _system_prompt(instructions: str | None) -> str:
         system = (
@@ -231,90 +272,6 @@ class BaseOpenAIChatProvider:
                 break
             kept_reversed.append(message)
         return list(reversed(kept_reversed))
-
-    async def _ask_llm_fallback(self, messages: list[Message], original_exc: Exception) -> str:
-        if not self.settings.llm_fallback_base_url or not self.settings.llm_fallback_model:
-            return ""
-
-        logger.warning("Primary LLM request failed, trying fallback: %s", original_exc)
-        fallback_messages = list(messages)
-        fallback_messages[0] = {
-            "role": "system",
-            "content": (
-                str(fallback_messages[0]["content"])
-                + "\n\n主 LLM 暂时没有返回可用结果。"
-                + "请直接作为机器人回答用户，继续使用用户的语言；如果用户使用中文，就用中文。"
-                + "不要提到 fallback、错误、API 或内部系统。"
-                + "回答保持简短，适合语音播报。"
-            ),
-        }
-        body = {
-            "model": self.settings.llm_fallback_model,
-            "messages": fallback_messages,
-            "stream": False,
-            "max_tokens": self.settings.llm_fallback_max_tokens,
-        }
-        headers = {}
-        if self.settings.llm_fallback_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.llm_fallback_api_key}"
-        try:
-            async with httpx.AsyncClient(timeout=self.settings.llm_fallback_timeout_seconds) as client:
-                resp = await client.post(
-                    f"{self.settings.llm_fallback_base_url.rstrip('/')}/chat/completions",
-                    json=body,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:
-            logger.warning("Fallback LLM failed: %s", exc)
-            return ""
-
-        text = (data["choices"][0].get("message", {}).get("content") or "").strip()
-        if text:
-            last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-            if last_user:
-                self.history.append(last_user)
-            self.history.append({"role": "assistant", "content": text})
-        return text
-
-    @staticmethod
-    def _system_prompt(instructions: str | None) -> str:
-        system = (
-            "你正在通过 Reachy Mini Lite 机器人和用户语音对话。"
-            "请用用户正在使用的语言自然、简短地回答；如果用户说中文，就优先使用中文。"
-            "回答要适合语音播报，通常控制在 1 到 3 句。"
-            "除非用户明确要求详细说明，否则不要长篇自我介绍、不要列清单、不要使用 Markdown 表格。"
-            "不要解释内部系统、模型、接口、内存、服务状态或运行限制。"
-            "如果需要 Reachy Mini 做动作、看相机、跟踪或调用外部能力，请使用可用工具。"
-            "不要把工具名、JSON 参数、动作枚举或表情标签写进要播报的文字里。"
-        )
-        if instructions:
-            return f"{system}\n\nReachy 会话附加指令：\n{instructions[:2500]}"
-        return system
-
-    def _static_fallback_text(self, messages: list[Message]) -> str:
-        configured = [
-            item.strip()
-            for item in self.settings.hermes_fallback_texts.split("|")
-            if item.strip()
-        ]
-        if configured:
-            return random.choice(configured)
-
-        last_user = next(
-            (str(message.get("content", "")) for message in reversed(messages) if message.get("role") == "user"),
-            "",
-        )
-        if any("\u4e00" <= char <= "\u9fff" for char in last_user):
-            return random.choice(
-                [
-                    "我这边还没有等到完整结果，不过本地语音链路正常。你可以再问一次，我会继续接。",
-                    "这次后端响应有点慢，我先不断开。你再说一遍或者稍等一下都可以。",
-                    "我还在等处理结果，当前听和说都正常，我们可以继续。",
-                ]
-            )
-        return self.settings.hermes_fallback_text
 
     @property
     def base_url(self) -> str:

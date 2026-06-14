@@ -33,11 +33,52 @@ function Get-ProcessCommandLine($ProcessId) {
   return ""
 }
 
+function Stop-StsProcessTreeForRoot {
+  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  if ($all.Count -eq 0) {
+    return $false
+  }
+
+  $ids = New-Object 'System.Collections.Generic.HashSet[int]'
+  foreach ($proc in $all) {
+    $cmd = [string]$proc.CommandLine
+    $exe = [string]$proc.ExecutablePath
+    if (($cmd -like "*hermes_sts*") -and (($cmd -like "*$Root*") -or ($exe -like "$Root*"))) {
+      [void]$ids.Add([int]$proc.ProcessId)
+    }
+  }
+
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($proc in $all) {
+      if ($ids.Contains([int]$proc.ParentProcessId) -and -not $ids.Contains([int]$proc.ProcessId)) {
+        [void]$ids.Add([int]$proc.ProcessId)
+        $changed = $true
+      }
+    }
+  }
+
+  foreach ($pidToStop in @($ids)) {
+    if ($pidToStop -eq $PID) {
+      continue
+    }
+    Write-Step "Stopping residual STS process for this workspace (PID $pidToStop)"
+    Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue
+  }
+  return ($ids.Count -gt 0)
+}
+
 $Port = [int](Get-DotenvValue "HERMES_STS_PORT" "8765")
 $owners = Get-PortOwners $Port
 
 if ($owners.Count -eq 0) {
-  Write-Host "STS is not listening on port $Port."
+  $stoppedResidual = Stop-StsProcessTreeForRoot
+  if ($stoppedResidual) {
+    Write-Host "STS residual process tree stopped."
+  } else {
+    Write-Host "STS is not listening on port $Port, and no residual STS process was found."
+  }
   exit 0
 }
 
@@ -52,6 +93,7 @@ foreach ($ownerPid in $owners) {
     throw "Port $Port is occupied by a non-STS process (PID $ownerPid): $cmd"
   }
 }
+$stopped = (Stop-StsProcessTreeForRoot) -or $stopped
 
 if ($stopped) {
   Write-Host "STS stopped on port $Port."

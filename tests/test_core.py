@@ -13,6 +13,28 @@ from hermes_sts.tools import ToolRegistry
 from hermes_sts.vad import EnergyVad, build_vad
 
 
+class DummyChatProvider(BaseOpenAIChatProvider):
+    @property
+    def base_url(self) -> str:
+        return "http://127.0.0.1:1/v1"
+
+    @property
+    def model(self) -> str:
+        return "dummy"
+
+    @property
+    def api_key(self) -> str:
+        return ""
+
+    @property
+    def max_tokens(self) -> int:
+        return 16
+
+    @property
+    def timeout(self) -> float:
+        return 1.0
+
+
 def pcm_tone(sample_rate: int, duration_s: float, amplitude: float = 0.2) -> bytes:
     frames = int(sample_rate * duration_s)
     out = bytearray()
@@ -69,6 +91,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].name, "current_time")
 
+    def test_llm_history_resets_after_idle_limit(self) -> None:
+        provider = DummyChatProvider(Settings(hermes_history_idle_reset_seconds=10))
+        provider.history = [
+            {"role": "user", "content": "第一句"},
+            {"role": "assistant", "content": "第一答"},
+        ]
+        provider.last_llm_call_started_at = 5.0
+
+        provider._reset_history_if_idle(14.9)
+        self.assertEqual(len(provider.history), 2)
+
+        provider._reset_history_if_idle(15.0)
+        self.assertEqual(provider.history, [])
+
     def test_tool_registry_executes_registered_tool(self) -> None:
         result = asyncio.run(ToolRegistry().execute("noop", "{}"))
         self.assertEqual(result.result, "noop completed")
@@ -109,6 +145,31 @@ class CoreTests(unittest.TestCase):
             ],
         }
         self.assertEqual(RealtimeSession._extract_text_from_item(item), "你好\n请点头")
+
+    def test_realtime_turn_gate_serializes_sessions(self) -> None:
+        async def run_test() -> list[str]:
+            gate = asyncio.Lock()
+            first = bare_session()
+            second = bare_session()
+            first.turn_gate = gate
+            second.turn_gate = gate
+            events: list[str] = []
+
+            async def factory(name: str) -> None:
+                events.append(f"{name}:start")
+                await asyncio.sleep(0.01)
+                events.append(f"{name}:end")
+
+            await asyncio.gather(
+                first._run_serialized_turn(lambda: factory("first")),
+                second._run_serialized_turn(lambda: factory("second")),
+            )
+            return events
+
+        self.assertEqual(
+            asyncio.run(run_test()),
+            ["first:start", "first:end", "second:start", "second:end"],
+        )
 
     def test_decode_audio_append_rejects_invalid_chunks(self) -> None:
         session = bare_session()
