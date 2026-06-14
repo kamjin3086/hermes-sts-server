@@ -837,6 +837,143 @@ class RealtimeSession:
         }
         return cue in cue_words
 
+    def _tool_system_prompt(self, *, instructions: str | None = None) -> str:
+        base = (
+            "你正在通过 Reachy Mini Lite 机器人和用户语音对话。"
+            "请根据工具结果继续用用户语言给出简短、自然、适合语音播报的回答。"
+            "工具名、JSON、动作参数和表情标签不能作为语音内容读出来。"
+            "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
+        )
+        effective = instructions or self.instructions
+        if effective:
+            return f"{base}\n\nReachy 会话附加指令：\n{effective[:2500]}"
+        return base
+
+    def _filler_texts_for(self, transcript: str) -> list[str]:
+        if any("\u4e00" <= char <= "\u9fff" for char in transcript):
+            texts = [
+                "我想一下，稍等。",
+                "这个我需要多确认一点。",
+                "还在处理，马上好。",
+                "我正在查，先别急。",
+                "收到，我再核对一下。",
+            ]
+            random.shuffle(texts)
+            return texts
+        return [
+            "Let me think for a moment.",
+            "I'm checking that now.",
+            "I'm still working on it.",
+        ]
+
+    def _fallback_text_for(self, transcript: str) -> str:
+        configured = [
+            item.strip()
+            for item in self.settings.hermes_fallback_texts.split("|")
+            if item.strip()
+        ]
+        if configured:
+            return random.choice(configured)
+        if any("\u4e00" <= char <= "\u9fff" for char in transcript):
+            return random.choice(
+                [
+                    "我这边还没有等到 Hermes 的结果，不过语音链路是正常的。你可以再问一次，我会继续接。",
+                    "Hermes 这次响应有点慢，我先保留现场。你再说一遍或者稍等一下都可以。",
+                    "我还在等后端返回，当前本地语音连接没问题。我们可以继续对话。",
+                ]
+            )
+        return self.settings.hermes_fallback_text
+
+    def _split_tts_segments(self, text: str) -> list[str]:
+        min_chars = max(8, self.settings.tts_segment_min_chars)
+        max_chars = max(min_chars, self.settings.tts_segment_max_chars)
+        pieces = [piece.strip() for piece in re.split(r"(?<=[。！？!?.\n])\s*", text) if piece.strip()]
+        if not pieces:
+            return []
+
+        segments: list[str] = []
+        current = ""
+        for piece in pieces:
+            if current and len(current) + len(piece) > max_chars and len(current) >= min_chars:
+                segments.append(current)
+                current = piece
+            else:
+                current = f"{current}{piece}" if current else piece
+        if current:
+            segments.append(current)
+        return [part for segment in segments for part in self._split_long_tts_segment(segment, max_chars)]
+
+    @staticmethod
+    def _split_long_tts_segment(text: str, max_chars: int) -> list[str]:
+        if len(text) <= max_chars:
+            return [text]
+
+        pieces = [piece.strip() for piece in re.split(r"(?<=[，,；;、])\s*", text) if piece.strip()]
+        if len(pieces) == 1:
+            return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+
+        segments: list[str] = []
+        current = ""
+        for piece in pieces:
+            if current and len(current) + len(piece) > max_chars:
+                segments.append(current)
+                current = piece
+            else:
+                current = f"{current}{piece}" if current else piece
+        if current:
+            segments.append(current)
+        return segments
+
+    def _sanitize_tts_text(self, text: str) -> str:
+        if not self.settings.tts_strip_bracketed_cues:
+            return text.strip()
+
+        bracketed = re.compile(r"[\[【（(](.*?)[\]】）)]")
+
+        def replace(match: re.Match[str]) -> str:
+            cue = match.group(1).strip()
+            if self._looks_like_tts_cue(cue):
+                logger.debug("Stripping TTS cue: %s", match.group(0))
+                return ""
+            return match.group(0)
+
+        cleaned = bracketed.sub(replace, text)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = re.sub(r"\s+([。！？!?，,；;、])", r"\1", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _looks_like_tts_cue(cue: str) -> bool:
+        if not cue or len(cue) > 12:
+            return False
+        if re.search(r"[A-Za-z0-9]", cue):
+            return False
+        cue_words = {
+            "呲牙",
+            "龙牙",
+            "微笑",
+            "笑",
+            "大笑",
+            "苦笑",
+            "偷笑",
+            "眨眼",
+            "鼓掌",
+            "点头",
+            "摇头",
+            "叹气",
+            "沉思",
+            "开心",
+            "惊讶",
+            "害羞",
+            "害怕",
+            "卖萌",
+            "调皮",
+            "思考",
+            "流泪",
+            "哭",
+        }
+        return cue in cue_words
+
     async def _send_response_done(self, *, response_id: str, item_id: str, transcript: str) -> None:
         if self.active_response_id != response_id:
             return

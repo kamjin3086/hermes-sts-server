@@ -80,7 +80,10 @@ class SherpaSileroVad:
     vad: object = field(init=False)
     window_size: int = field(init=False)
     buffer: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    pre_roll: bytearray = field(default_factory=bytearray)
+    current: bytearray = field(default_factory=bytearray)
     started: bool = False
+    silence_ms: int = 0
     pending: list[Utterance] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -113,6 +116,22 @@ class SherpaSileroVad:
             return None, None
 
         event: str | None = None
+        frame_ms = int(samples.size / self.settings.sample_rate * 1000)
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        energy_voiced = rms >= self.settings.vad_energy_threshold
+
+        max_pre_roll_bytes = int(self.settings.sample_rate * 2 * 0.5)
+        if not self.started:
+            self.pre_roll.extend(raw_pcm16)
+            if len(self.pre_roll) > max_pre_roll_bytes:
+                del self.pre_roll[: len(self.pre_roll) - max_pre_roll_bytes]
+        else:
+            self.current.extend(raw_pcm16)
+            if energy_voiced:
+                self.silence_ms = 0
+            else:
+                self.silence_ms += frame_ms
+
         self.buffer = np.concatenate([self.buffer, samples])
         offset = 0
         while offset + self.window_size <= len(self.buffer):
@@ -120,20 +139,35 @@ class SherpaSileroVad:
             offset += self.window_size
             if not self.started and self.vad.is_speech_detected():
                 self.started = True
+                self.current.extend(self.pre_roll)
+                self.pre_roll.clear()
+                self.silence_ms = 0
                 event = event or "speech_started"
 
             while not self.vad.empty():
                 segment = self.vad.front
                 self.vad.pop()
                 utterance = self._segment_to_utterance(np.asarray(segment.samples, dtype=np.float32))
+                if utterance is None:
+                    utterance = self._finish_current(rms)
                 if utterance is not None:
                     self.pending.append(utterance)
-                self.started = False
+                self._clear_current()
 
         if offset:
             self.buffer = self.buffer[offset:]
         if not self.started and len(self.buffer) > self.window_size * 10:
             self.buffer = self.buffer[-self.window_size * 10 :]
+
+        fallback_end_ms = max(
+            self.settings.vad_end_ms,
+            int(self.settings.vad_min_silence_seconds * 1000),
+        )
+        if self.started and self.silence_ms >= fallback_end_ms:
+            utterance = self._finish_current(rms)
+            if utterance is not None:
+                self.pending.append(utterance)
+            self._clear_current()
 
         if self.pending:
             return "speech_stopped", self.pending.pop(0)
@@ -150,9 +184,24 @@ class SherpaSileroVad:
         raw = (pcm16 * 32767.0).astype(np.int16).tobytes()
         return Utterance(pcm16=raw, duration_ms=duration_ms, rms=rms)
 
+    def _finish_current(self, rms: float) -> Utterance | None:
+        raw = bytes(self.current)
+        duration_ms = int(len(raw) / 2 / self.settings.sample_rate * 1000)
+        if duration_ms < self.settings.vad_min_utterance_ms:
+            return None
+        return Utterance(pcm16=raw, duration_ms=duration_ms, rms=rms)
+
+    def _clear_current(self) -> None:
+        self.started = False
+        self.silence_ms = 0
+        self.current.clear()
+
     def reset(self) -> None:
         self.buffer = np.zeros(0, dtype=np.float32)
+        self.pre_roll.clear()
+        self.current.clear()
         self.started = False
+        self.silence_ms = 0
         self.pending.clear()
         if hasattr(self.vad, "reset"):
             self.vad.reset()
