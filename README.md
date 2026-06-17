@@ -83,6 +83,27 @@ Stop the service:
 ./scripts/stop_sts_pipeline.sh
 ```
 
+Install as a user-level systemd service:
+
+```bash
+./scripts/install_user_service.sh
+systemctl --user status hermes-sts-server.service
+journalctl --user -u hermes-sts-server.service -f
+```
+
+Manage it later:
+
+```bash
+systemctl --user restart hermes-sts-server.service
+systemctl --user stop hermes-sts-server.service
+```
+
+Uninstall the user service:
+
+```bash
+./scripts/uninstall_user_service.sh
+```
+
 If `uv` is missing:
 
 ```bash
