@@ -81,6 +81,7 @@ class Settings:
     hermes_history_max_messages: int = _int_env("HERMES_HISTORY_MAX_MESSAGES", 40)
     hermes_history_max_chars: int = _int_env("HERMES_HISTORY_MAX_CHARS", 12000)
     hermes_history_idle_reset_seconds: float = _float_env("HERMES_HISTORY_IDLE_RESET_SECONDS", 900.0)
+    hermes_voice_no_think: bool = _bool_env("HERMES_VOICE_NO_THINK", True)
     llm_provider: str = os.getenv("STS_LLM_PROVIDER", "hermes_agent")
     llm_max_concurrent_requests: int = _int_env("STS_LLM_MAX_CONCURRENT_REQUESTS", 1)
     llm_base_url: str = os.getenv("LLM_BASE_URL", os.getenv("HERMES_BASE_URL", "http://127.0.0.1:8642/v1"))

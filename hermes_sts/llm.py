@@ -81,7 +81,7 @@ class BaseOpenAIChatProvider:
         self._reset_history_if_idle(now)
         self.last_llm_call_started_at = now
 
-        prompt_messages = messages or self._messages_for_transcript(transcript or "", instructions)
+        prompt_messages = self._prepare_messages(messages or self._messages_for_transcript(transcript or "", instructions))
         body: dict[str, Any] = {
             "model": self.model,
             "messages": prompt_messages,
@@ -187,6 +187,9 @@ class BaseOpenAIChatProvider:
         messages: list[Message] = [{"role": "system", "content": self._system_prompt(instructions)}]
         messages.extend(self._history_for_prompt())
         messages.append({"role": "user", "content": transcript})
+        return messages
+
+    def _prepare_messages(self, messages: list[Message]) -> list[Message]:
         return messages
 
     def reset_history(self, reason: str = "manual") -> None:
@@ -295,6 +298,21 @@ class BaseOpenAIChatProvider:
 
 
 class HermesAgentProvider(BaseOpenAIChatProvider):
+    def _prepare_messages(self, messages: list[Message]) -> list[Message]:
+        if not self.settings.hermes_voice_no_think:
+            return messages
+        prepared = [dict(message) for message in messages]
+        for message in reversed(prepared):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                stripped = content.lstrip()
+                if not stripped.startswith("/no_think"):
+                    message["content"] = f"/no_think\n{content}"
+            break
+        return prepared
+
     @property
     def base_url(self) -> str:
         return self.settings.hermes_base_url

@@ -440,7 +440,7 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
     data = store.settings_dict()
     visible = {
         "server": ["host", "port", "log_level"],
-        "llm": ["hermes_base_url", "hermes_model", "hermes_api_key", "hermes_max_tokens"],
+        "llm": ["hermes_base_url", "hermes_model", "hermes_api_key", "hermes_max_tokens", "hermes_voice_no_think"],
         "stt": ["stt_provider", "sherpa_sensevoice_model", "sherpa_sensevoice_tokens"],
         "tts": [
             "tts_provider",

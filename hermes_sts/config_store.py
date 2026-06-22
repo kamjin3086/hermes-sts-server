@@ -38,6 +38,7 @@ ENV_TO_ATTR: dict[str, str] = {
     "HERMES_HISTORY_MAX_MESSAGES": "hermes_history_max_messages",
     "HERMES_HISTORY_MAX_CHARS": "hermes_history_max_chars",
     "HERMES_HISTORY_IDLE_RESET_SECONDS": "hermes_history_idle_reset_seconds",
+    "HERMES_VOICE_NO_THINK": "hermes_voice_no_think",
     "STS_LLM_PROVIDER": "llm_provider",
     "STS_LLM_MAX_CONCURRENT_REQUESTS": "llm_max_concurrent_requests",
     "LLM_BASE_URL": "llm_base_url",

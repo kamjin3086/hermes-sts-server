@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from hermes_sts.admin import _settings_payload, _validate_settings_patch
 from hermes_sts.config import Settings
 from hermes_sts.config_store import ConfigStore
-from hermes_sts.llm import BaseOpenAIChatProvider, LLMResponse, ToolCall
+from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
 from hermes_sts.tts import QwenTtsCpp, TtsVoice, build_tts
 from hermes_sts.tools import ToolRegistry
@@ -107,6 +107,30 @@ class CoreTests(unittest.TestCase):
         prompt = BaseOpenAIChatProvider._system_prompt("你是端庄新闻播报员。")
         self.assertIn("当前人格和表达风格", prompt)
         self.assertIn("端庄新闻播报员", prompt)
+
+    def test_hermes_voice_no_think_prefixes_last_user_message(self) -> None:
+        provider = HermesAgentProvider(Settings(hermes_voice_no_think=True))
+        messages = [
+            {"role": "system", "content": "系统"},
+            {"role": "user", "content": "你好"},
+        ]
+
+        prepared = provider._prepare_messages(messages)
+
+        self.assertEqual(messages[-1]["content"], "你好")
+        self.assertEqual(prepared[-1]["content"], "/no_think\n你好")
+
+    def test_hermes_voice_no_think_can_be_disabled(self) -> None:
+        provider = HermesAgentProvider(Settings(hermes_voice_no_think=False))
+        messages = [{"role": "user", "content": "你好"}]
+
+        self.assertEqual(provider._prepare_messages(messages), messages)
+
+    def test_hermes_voice_no_think_does_not_duplicate_prefix(self) -> None:
+        provider = HermesAgentProvider(Settings(hermes_voice_no_think=True))
+        messages = [{"role": "user", "content": "/no_think\n你好"}]
+
+        self.assertEqual(provider._prepare_messages(messages)[0]["content"], "/no_think\n你好")
 
     def test_llm_history_resets_after_idle_limit(self) -> None:
         provider = DummyChatProvider(Settings(hermes_history_idle_reset_seconds=10))

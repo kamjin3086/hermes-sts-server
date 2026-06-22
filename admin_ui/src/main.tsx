@@ -1072,6 +1072,15 @@ function Advanced({ state, patch, busy }: { state: AdminState; patch: (v: Settin
       </section>
       <section className="panel span-6">
         <span className="eyebrow"><Gauge size={15} /> 对话细节</span>
+        <label className="field">
+          <span>Hermes 语音快答</span>
+          <SwitchControl
+            checked={values.hermes_voice_no_think !== false}
+            onChange={(checked) => patch({ hermes_voice_no_think: checked })}
+            onLabel="开启"
+            offLabel="关闭"
+          />
+        </label>
         <EditableField label="首次等待提示延迟（秒）" value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} />
         <EditableField label="每段最多字符" value={values.tts_segment_max_chars ?? 90} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} />
         <EditableField label="VAD 阈值" value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} />
