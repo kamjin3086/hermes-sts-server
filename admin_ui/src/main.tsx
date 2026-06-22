@@ -7,9 +7,7 @@ import {
   Bot,
   Check,
   CheckCircle2,
-  ChevronLeft,
   ChevronDown,
-  ChevronRight,
   Clock3,
   Cpu,
   Download,
@@ -19,7 +17,6 @@ import {
   Maximize2,
   Mic2,
   Minimize2,
-  Music2,
   Play,
   Plus,
   RefreshCw,
@@ -91,10 +88,11 @@ const speakerNames: Record<string, string> = {
 };
 
 const waveStyles = [
-  { id: "bars", name: "脉冲条" },
-  { id: "halo", name: "声场环" },
   { id: "scanner", name: "扫描线" },
-  { id: "minimal", name: "细线谱" },
+  { id: "bars", name: "能量条" },
+  { id: "core", name: "呼吸核心" },
+  { id: "ribbon", name: "轨迹带" },
+  { id: "needles", name: "声纹针列" },
 ] as const;
 
 function App() {
@@ -116,14 +114,21 @@ function App() {
 
   const patch = async (values: SettingsValues) => {
     setBusy("saving");
-    const data = await api<{ state: AdminState }>("/api/settings", {
-      method: "PATCH",
-      body: JSON.stringify({ values }),
-    });
-    setState(data.state);
-    setBusy("");
-    setNotice("已保存并热更新");
-    window.setTimeout(() => setNotice(""), 1800);
+    try {
+      const data = await api<{ state: AdminState }>("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ values }),
+      });
+      setState(data.state);
+      setNotice("已保存并热更新");
+      window.setTimeout(() => setNotice(""), 1800);
+    } catch (err) {
+      setNotice(`保存失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3600);
+      throw err;
+    } finally {
+      setBusy("");
+    }
   };
 
   if (!state) {
@@ -192,44 +197,11 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
   const currentPersona = state.personas.find((p) => p.id === state.settings.values.sts_persona_preset);
   const qwenReady = Object.values(state.qwen.models).filter((m) => m.installed).length;
   const [fullscreen, setFullscreen] = useState(false);
-  const musicInputRef = useRef<HTMLInputElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [tracks, setTracks] = useState<Array<{ name: string; url: string }>>([]);
-  const [trackIndex, setTrackIndex] = useState(0);
-  const [musicPlaying, setMusicPlaying] = useState(false);
   const previewEvents = state.metrics.filter((item) => item.kind === "tts_preview").length;
-  const waveStyle = state.settings.values.dashboard_wave_style || "bars";
+  const rawWaveStyle = state.settings.values.dashboard_wave_style || "scanner";
+  const waveStyle = waveStyles.some((item) => item.id === rawWaveStyle) ? rawWaveStyle : "scanner";
   const waveIndex = Math.max(0, waveStyles.findIndex((item) => item.id === waveStyle));
-  const switchWave = (direction: number) => {
-    const next = waveStyles[(waveIndex + direction + waveStyles.length) % waveStyles.length];
-    patch({ dashboard_wave_style: next.id });
-  };
-  const pickTracks = (files: FileList | null) => {
-    if (!files?.length) return;
-    setTracks(Array.from(files).map((file) => ({ name: file.name.replace(/\.[^.]+$/, ""), url: URL.createObjectURL(file) })));
-    setTrackIndex(0);
-    setMusicPlaying(false);
-  };
-  const toggleMusic = async () => {
-    if (!tracks.length) {
-      musicInputRef.current?.click();
-      return;
-    }
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (audio.paused) {
-      await audio.play();
-      setMusicPlaying(true);
-    } else {
-      audio.pause();
-      setMusicPlaying(false);
-    }
-  };
-  const nextTrack = () => {
-    if (!tracks.length) return;
-    setTrackIndex((index) => (index + 1) % tracks.length);
-    setMusicPlaying(false);
-  };
+  const selectWave = (id: string) => patch({ dashboard_wave_style: id });
   return (
     <div className={fullscreen ? "cockpit fullscreen" : "cockpit"}>
       <motion.section className="cockpit-hero panel" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
@@ -249,9 +221,15 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
           </button>
           <WaveMeter variant={waveStyle} />
           <div className="wave-switcher">
-            <button className="icon-btn" onClick={() => switchWave(-1)} title="上一种波形"><ChevronLeft size={18} /></button>
-            <strong>{waveStyles[waveIndex]?.name ?? "脉冲条"}</strong>
-            <button className="icon-btn" onClick={() => switchWave(1)} title="下一种波形"><ChevronRight size={18} /></button>
+            {waveStyles.map((item) => (
+              <button
+                key={item.id}
+                className={waveStyles[waveIndex]?.id === item.id ? "selected" : ""}
+                onClick={() => selectWave(item.id)}
+                title={item.name}
+                aria-label={item.name}
+              />
+            ))}
           </div>
         </div>
       </motion.section>
@@ -294,20 +272,6 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
           <strong>调角色声线</strong>
           <span>音色工坊、A/B seed、完整角色</span>
         </button>
-        <div className="music-dock">
-          <div>
-            <span className="eyebrow"><Music2 size={15} /> Music bay</span>
-            <strong>{tracks[trackIndex]?.name || "本地音乐"}</strong>
-            <span>{tracks.length ? `${trackIndex + 1}/${tracks.length}` : "选择音频文件后在本页播放"}</span>
-          </div>
-          <div className="music-controls">
-            <button className="icon-btn" onClick={() => musicInputRef.current?.click()} title="选择音乐"><Plus size={17} /></button>
-            <button className="icon-btn" onClick={toggleMusic} title={musicPlaying ? "暂停" : "播放"}><Play size={17} /></button>
-            <button className="icon-btn" onClick={nextTrack} title="下一首"><ChevronRight size={17} /></button>
-          </div>
-          <input ref={musicInputRef} hidden type="file" accept="audio/*" multiple onChange={(event) => pickTracks(event.target.files)} />
-          {tracks[trackIndex] && <audio ref={audioRef} src={tracks[trackIndex].url} onEnded={nextTrack} onPause={() => setMusicPlaying(false)} onPlay={() => setMusicPlaying(true)} />}
-        </div>
         <button className="action-card muted-action" onClick={() => setFullscreen(true)}>
           <Clock3 size={21} />
           <strong>近期节奏</strong>
@@ -420,6 +384,21 @@ function Studio({
     setPrompt("你是 Hermes 的语音助手。保持回答自然、简洁、有分寸，先理解用户意图，再给出清晰可执行的回应。");
   };
 
+  const switchTtsProvider = async (provider: "qwen3tts" | "sherpa_kokoro") => {
+    if (values.tts_provider === provider || busy === "tts-provider") return;
+    setBusy("tts-provider");
+    try {
+      await patch({ tts_provider: provider });
+      await reload();
+      setNotice(provider === "qwen3tts" ? "已切换到 Qwen3TTS" : "已切换到 Kokoro");
+      window.setTimeout(() => setNotice(""), 1800);
+    } catch {
+      window.setTimeout(() => setNotice(""), 3600);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const preview = async () => {
     setBusy("preview");
     const data = await api<{ audio_wav_base64: string; elapsed_ms: number }>("/api/tts/preview", {
@@ -499,8 +478,8 @@ function Studio({
             <h2>引擎与音色</h2>
           </div>
           <div className="segmented compact">
-            <button className={values.tts_provider === "qwen3tts" ? "selected" : ""} onClick={() => patch({ tts_provider: "qwen3tts" })}>Qwen3TTS</button>
-            <button className={values.tts_provider === "sherpa_kokoro" ? "selected" : ""} onClick={() => patch({ tts_provider: "sherpa_kokoro" })}>Kokoro</button>
+            <button disabled={busy === "tts-provider"} className={values.tts_provider === "qwen3tts" ? "selected" : ""} onClick={() => switchTtsProvider("qwen3tts")}>Qwen3TTS</button>
+            <button disabled={busy === "tts-provider"} className={values.tts_provider === "sherpa_kokoro" ? "selected" : ""} onClick={() => switchTtsProvider("sherpa_kokoro")}>Kokoro</button>
           </div>
         </div>
         {values.tts_provider === "qwen3tts" ? (
@@ -555,11 +534,17 @@ function QwenVoice({
   const [queuedSeeds, setQueuedSeeds] = useState<number[]>([]);
   const [workshopBrief, setWorkshopBrief] = useState("冷静、清晰、有一点未来感，适合长期陪伴的中文语音助手");
   const [workshopSuggestion, setWorkshopSuggestion] = useState<Record<string, any> | null>(null);
+  const [designBrief, setDesignBrief] = useState("自然、清晰、冷静一点，适合中文语音助手长期陪伴");
+  const [designDraft, setDesignDraft] = useState(String(values.qwentts_cpp_voice_design || ""));
   const customVoiceReady = Boolean(state.qwen.models.customvoice?.installed);
   const voiceDesignReady = Boolean(state.qwen.models.voicedesign?.installed);
   const allSeedVoices = state.voices.filter((voice) => voice.mode === "seed");
   const seedTags = Array.from(new Set(allSeedVoices.flatMap((voice) => splitTags(voice.tags))));
   const seedVoices = tagFilter ? allSeedVoices.filter((voice) => splitTags(voice.tags).includes(tagFilter)) : allSeedVoices;
+
+  useEffect(() => {
+    setDesignDraft(String(values.qwentts_cpp_voice_design || ""));
+  }, [values.qwentts_cpp_voice_design]);
 
   const previewVoice = async (payload: Record<string, any>, message = "音色试听完成") => {
     setBusy("voice-preview");
@@ -649,13 +634,46 @@ function QwenVoice({
 
   const suggestVoice = async () => {
     setBusy("workshop");
-    const data = await api<{ suggestion: Record<string, any> }>("/api/qwen/workshop/suggest", {
-      method: "POST",
-      body: JSON.stringify({ brief: workshopBrief, persona_hint: state.health.persona_prompt || "" }),
-    });
-    setWorkshopSuggestion(data.suggestion);
-    setBusy("");
-    setNotice("AI 已生成音色方案");
+    try {
+      const data = await api<{ suggestion: Record<string, any> }>("/api/qwen/workshop/suggest", {
+        method: "POST",
+        body: JSON.stringify({ brief: workshopBrief, persona_hint: state.health.persona_prompt || "" }),
+      });
+      setWorkshopSuggestion(data.suggestion);
+      setNotice("AI 已生成音色方案");
+      window.setTimeout(() => setNotice(""), 1800);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const generateDesignPrompt = async () => {
+    const brief = designBrief.trim() || "自然、清晰、适合中文语音助手";
+    setBusy("design-ai");
+    try {
+      const data = await api<{ suggestion: Record<string, any> }>("/api/qwen/workshop/suggest", {
+        method: "POST",
+        body: JSON.stringify({ brief: `只生成 VoiceDesign 音色描述。目标气质：${brief}`, persona_hint: state.health.persona_prompt || "" }),
+      });
+      const prompt = String(data.suggestion.design_prompt || "").trim() || `natural Mandarin voice, clear articulation, ${brief}, calm tone, comfortable pace`;
+      setDesignDraft(prompt);
+      setNotice("AI 已生成音色描述，确认后再应用");
+      window.setTimeout(() => setNotice(""), 2200);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const applyDesignDraft = async () => {
+    const prompt = designDraft.trim();
+    if (!prompt) {
+      setNotice("先填写或生成音色描述");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    await patch({ qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: prompt });
+    await reload();
+    setNotice("描述造声已应用");
     window.setTimeout(() => setNotice(""), 1800);
   };
 
@@ -717,12 +735,24 @@ function QwenVoice({
     await reload();
   };
 
+  const switchQwenMode = async (mode: string) => {
+    const valuesToPatch: SettingsValues = { qwentts_cpp_voice_mode: mode };
+    if (mode === "preset" && !values.qwentts_cpp_voice_preset) {
+      valuesToPatch.qwentts_cpp_voice_preset = "vivian";
+    }
+    if (mode === "design" && !values.qwentts_cpp_voice_design) {
+      valuesToPatch.qwentts_cpp_voice_design = "clear, calm, natural Mandarin voice with a cool and reliable tone";
+    }
+    await patch(valuesToPatch);
+    await reload();
+  };
+
   return (
     <div className="voice-layout">
       <div>
         <div className="mode-grid">
           {state.qwen.modes.map((mode) => (
-            <button key={mode} className={values.qwentts_cpp_voice_mode === mode ? "mode selected" : "mode"} onClick={() => patch({ qwentts_cpp_voice_mode: mode })}>
+            <button key={mode} className={values.qwentts_cpp_voice_mode === mode ? "mode selected" : "mode"} onClick={() => switchQwenMode(mode)}>
               <strong>{modeLabels[mode]?.title ?? mode}</strong>
               <span>{modeLabels[mode]?.text}</span>
             </button>
@@ -739,7 +769,7 @@ function QwenVoice({
             <label className="field">
               <span>预设 speaker</span>
               <div className="select-wrap">
-                <select value={values.qwentts_cpp_voice_preset || "vivian"} onChange={(e) => patch({ qwentts_cpp_voice_preset: e.target.value })}>
+                <select value={values.qwentts_cpp_voice_preset || "vivian"} onChange={(e) => patch({ qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: e.target.value })}>
                   {state.qwen.speakers.map((speaker) => <option key={speaker} value={speaker}>{speakerNames[speaker] ?? speaker}</option>)}
                 </select>
                 <ChevronDown size={16} />
@@ -799,16 +829,31 @@ function QwenVoice({
           </div>
         )}
         {values.qwentts_cpp_voice_mode === "design" && (
-          <label className="field">
+          <div className="design-panel">
             {!voiceDesignReady && (
               <div className="missing-model">
                 <span>描述造声需要 VoiceDesign 模型。</span>
                 <button className="link-btn" onClick={goSetup}>去模型设置</button>
               </div>
             )}
-            <span>音色描述</span>
-            <textarea value={values.qwentts_cpp_voice_design || ""} onChange={(e) => patch({ qwentts_cpp_voice_design: e.target.value })} placeholder="例如：female, young adult, sweet voice, taiwan mandarin accent" />
-          </label>
+            <label className="field">
+              <span>想要的声音</span>
+              <input value={designBrief} onChange={(e) => setDesignBrief(e.target.value)} placeholder="例如：温柔但不甜腻，中文清晰，语速自然" />
+            </label>
+            <button className="secondary" onClick={generateDesignPrompt} disabled={busy === "design-ai"}>
+              <Wand2 size={16} />{busy === "design-ai" ? "生成中" : "AI 生成描述"}
+            </button>
+            <label className="field">
+              <span>音色描述</span>
+              <textarea value={designDraft} onChange={(e) => setDesignDraft(e.target.value)} placeholder="例如：female, young adult, clear warm Mandarin voice, natural pace, soft tone" />
+            </label>
+            <div className="design-actions">
+              <button className="primary" onClick={applyDesignDraft}><Check size={16} />应用描述</button>
+              <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: designDraft }, "描述造声试听完成")} disabled={!designDraft.trim() || !voiceDesignReady}>
+                <Play size={16} />试听
+              </button>
+            </div>
+          </div>
         )}
         {values.qwentts_cpp_voice_mode === "clone" && (
           <div className="clone-box">
@@ -981,6 +1026,27 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
         </button>
       </section>
       <section className="panel span-12">
+        <span className="eyebrow"><CheckCircle2 size={15} /> 部署边界</span>
+        <h2>新机器先跑脚本，再进界面</h2>
+        <div className="deploy-grid">
+          <div className="deploy-step">
+            <strong>1. 系统和编译环境</strong>
+            <code>./scripts/bootstrap_fedora_amd.sh --system</code>
+            <span>安装 Fedora/Vulkan/构建依赖，适合脚本阶段。</span>
+          </div>
+          <div className="deploy-step">
+            <strong>2. Python、模型实验室、前端</strong>
+            <code>./scripts/bootstrap_fedora_amd.sh</code>
+            <span>准备 `.venv-sts`、Kokoro/SenseVoice、hermes-tts-lab、控制台构建。</span>
+          </div>
+          <div className="deploy-step">
+            <strong>3. 运行期配置</strong>
+            <code>http://127.0.0.1:8765/</code>
+            <span>LLM 地址、API Key、TTS 引擎、声线和提示词放在界面里保存。</span>
+          </div>
+        </div>
+      </section>
+      <section className="panel span-12">
         <span className="eyebrow"><Check size={15} /> 完成</span>
         <h2>{state.setup.complete ? "设置向导已完成" : "确认后进入日常控制台"}</h2>
         <p className="muted">以后配置会从 SQLite 自动读取；这个项目不再使用 `.env` 文件。</p>
@@ -1030,11 +1096,22 @@ function EditableField({ label, value, secret, onSave }: { label: string; value:
   );
 }
 
-function WaveMeter({ variant = "bars" }: { variant?: string }) {
+function WaveMeter({ variant = "scanner" }: { variant?: string }) {
+  const count = ({ scanner: 46, core: 36, ribbon: 42, needles: 52 } as Record<string, number>)[variant] ?? 34;
+  const delayStep = ({ scanner: 42, core: 86, ribbon: 58, needles: 38 } as Record<string, number>)[variant] ?? 70;
+  const heightStep = ({ scanner: 11, core: 19, ribbon: 13, needles: 9 } as Record<string, number>)[variant] ?? 17;
   return (
     <div className={`wave wave-${variant}`} aria-hidden="true">
-      {Array.from({ length: 34 }).map((_, index) => (
-        <span key={index} style={{ animationDelay: `${index * 55}ms`, height: `${22 + ((index * 17) % 58)}%` }} />
+      {Array.from({ length: count }).map((_, index) => (
+        <span
+          key={index}
+          style={{
+            animationDelay: `${index * delayStep}ms`,
+            height: `${18 + ((index * heightStep) % 62)}%`,
+            ["--i" as string]: index,
+            ["--n" as string]: count,
+          }}
+        />
       ))}
     </div>
   );
@@ -1079,6 +1156,19 @@ async function api<T = any>(path: string, init: RequestInit & { raw?: boolean } 
     throw new Error(text || response.statusText);
   }
   return response.json();
+}
+
+function errorMessage(err: unknown) {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const parsed = JSON.parse(raw);
+    const detail = parsed?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) return detail.map((item) => item.msg || item.type || "配置错误").join("；");
+  } catch {
+    // Plain text errors are already usable enough for the toast.
+  }
+  return raw.length > 160 ? `${raw.slice(0, 160)}...` : raw;
 }
 
 function chartMetrics(metrics: Metric[]) {

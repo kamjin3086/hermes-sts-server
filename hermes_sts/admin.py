@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from hermes_sts.config import ROOT, Settings
-from hermes_sts.config_store import ATTR_TO_ENV, ConfigStore
+from hermes_sts.config_store import ATTR_TO_ENV, ENV_TO_ATTR, ConfigStore
 from hermes_sts.persona import build_persona_instructions
 from hermes_sts.tts import TtsVoice, build_tts
 
@@ -157,10 +157,21 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
     @router.patch("/api/settings")
     async def patch_settings(payload: SettingsPatch) -> dict[str, Any]:
         _validate_settings_patch(payload.values)
+        previous = {
+            ENV_TO_ATTR.get(key, key): getattr(settings, ENV_TO_ATTR.get(key, key))
+            for key in payload.values
+            if hasattr(settings, ENV_TO_ATTR.get(key, key))
+        }
         changed = store.set_settings(payload.values)
         current = refresh_settings()
         if _requires_rebuild(changed):
-            rebuild_components()
+            try:
+                rebuild_components()
+            except Exception as exc:
+                if previous:
+                    store.set_settings(previous)
+                    refresh_settings()
+                raise HTTPException(status_code=500, detail=f"component rebuild failed: {exc}") from exc
         return {
             "changed": changed,
             "restart_required": [],

@@ -515,9 +515,35 @@ class CoreTests(unittest.TestCase):
 
             settings = store.load_settings()
 
-        self.assertEqual(settings.qwentts_cpp_voice_mode, "default")
+        self.assertEqual(settings.qwentts_cpp_voice_mode, "preset")
         self.assertEqual(settings.qwentts_cpp_speaker, "")
         self.assertEqual(settings.qwentts_cpp_model, str(base_model))
+
+    def test_config_store_keeps_clone_mode_without_selected_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "settings.sqlite3"
+            base_model = Path(tmp) / "base.gguf"
+            codec = Path(tmp) / "codec.gguf"
+            base_model.touch()
+            codec.touch()
+
+            store = ConfigStore(db)
+            store.set_settings(
+                {
+                    "tts_provider": "qwen3tts",
+                    "qwentts_cpp_voice_mode": "clone",
+                    "qwentts_cpp_clone_voice_id": "",
+                    "qwentts_cpp_base_model": str(base_model),
+                    "qwentts_cpp_codec": str(codec),
+                }
+            )
+
+            settings = store.load_settings()
+
+        self.assertEqual(settings.qwentts_cpp_voice_mode, "clone")
+        self.assertEqual(settings.qwentts_cpp_model, str(base_model))
+        self.assertEqual(settings.qwentts_cpp_ref_wav, "")
+        self.assertEqual(settings.qwentts_cpp_ref_spk, "")
 
     def test_admin_state_exposes_ui_required_values_and_validates_qwen_speaker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -584,6 +610,15 @@ class CoreTests(unittest.TestCase):
 
             self.assertIsNone(store.persona_profile("news_anchor"))
             self.assertGreaterEqual(len(store.persona_profiles()), 1)
+
+    def test_config_store_seeds_kokoro_defaults_for_ui_switching(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+            settings = store.load_settings()
+
+        self.assertTrue(settings.sherpa_kokoro_model.endswith("models/kokoro-multi-lang-v1_0/model.onnx"))
+        self.assertTrue(settings.sherpa_kokoro_voices.endswith("models/kokoro-multi-lang-v1_0/voices.bin"))
+        self.assertIn("lexicon-zh.txt", settings.sherpa_kokoro_lexicon)
 
     def test_realtime_turn_metrics_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

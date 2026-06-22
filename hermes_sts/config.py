@@ -183,6 +183,7 @@ class Settings:
     tts_segment_max_chars: int = _int_env("STS_TTS_SEGMENT_MAX_CHARS", 90)
     tts_strip_bracketed_cues: bool = _bool_env("STS_TTS_STRIP_BRACKETED_CUES", True)
     latency_logging: bool = _bool_env("STS_LATENCY_LOGGING", True)
+    dashboard_wave_style: str = os.getenv("DASHBOARD_WAVE_STYLE", "scanner")
 
     models_dir: Path = Path(_path_env("MODELS_DIR", str(ROOT / "models")))
     log_dir: Path = Path(_path_env("LOG_DIR", str(ROOT / "logs")))

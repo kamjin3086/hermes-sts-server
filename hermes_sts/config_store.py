@@ -295,7 +295,24 @@ class ConfigStore:
                 "tts_provider": "qwen3tts",
                 "tts_voice_source": "settings",
                 "qwentts_cpp_seed": 42,
-                "dashboard_wave_style": "bars",
+                "dashboard_wave_style": "scanner",
+            }.items():
+                conn.execute(
+                    "insert or ignore into settings values (?, ?, ?)",
+                    (key, json.dumps(value, ensure_ascii=False), now),
+                )
+            kokoro_dir = ROOT / "models" / "kokoro-multi-lang-v1_0"
+            for key, value in {
+                "sherpa_kokoro_model": str(kokoro_dir / "model.onnx"),
+                "sherpa_kokoro_voices": str(kokoro_dir / "voices.bin"),
+                "sherpa_kokoro_tokens": str(kokoro_dir / "tokens.txt"),
+                "sherpa_kokoro_lexicon": ",".join(
+                    [
+                        str(kokoro_dir / "lexicon-us-en.txt"),
+                        str(kokoro_dir / "lexicon-zh.txt"),
+                    ]
+                ),
+                "sherpa_kokoro_data_dir": str(kokoro_dir / "espeak-ng-data"),
             }.items():
                 conn.execute(
                     "insert or ignore into settings values (?, ?, ?)",
@@ -340,17 +357,33 @@ class ConfigStore:
         base_model = kwargs.get("qwentts_cpp_base_model", base.qwentts_cpp_base_model)
         custom_model = kwargs.get("qwentts_cpp_customvoice_model", base.qwentts_cpp_customvoice_model)
         design_model = kwargs.get("qwentts_cpp_voicedesign_model", base.qwentts_cpp_voicedesign_model)
-        if voice_mode == "preset" and kwargs.get("qwentts_cpp_voice_preset") and _path_exists(custom_model):
-            kwargs["qwentts_cpp_model"] = custom_model
-            kwargs["qwentts_cpp_speaker"] = kwargs.get("qwentts_cpp_voice_preset", "")
+        kwargs["qwentts_cpp_voice_mode"] = voice_mode
+        if voice_mode == "preset":
+            preset = str(kwargs.get("qwentts_cpp_voice_preset") or "")
+            if preset and _path_exists(custom_model):
+                kwargs["qwentts_cpp_model"] = custom_model
+                kwargs["qwentts_cpp_speaker"] = preset
+            else:
+                kwargs["qwentts_cpp_model"] = base_model
+                kwargs["qwentts_cpp_speaker"] = ""
             kwargs["qwentts_cpp_instruct"] = ""
             kwargs["qwentts_cpp_ref_wav"] = ""
+            kwargs["qwentts_cpp_ref_text"] = ""
             kwargs["qwentts_cpp_ref_spk"] = ""
             kwargs["qwentts_cpp_ref_rvq"] = ""
-        elif voice_mode == "design" and kwargs.get("qwentts_cpp_voice_design") and _path_exists(design_model):
-            kwargs["qwentts_cpp_model"] = design_model
-            kwargs["qwentts_cpp_instruct"] = kwargs.get("qwentts_cpp_voice_design", "")
+        elif voice_mode == "design":
+            design_prompt = str(kwargs.get("qwentts_cpp_voice_design") or "")
+            if design_prompt and _path_exists(design_model):
+                kwargs["qwentts_cpp_model"] = design_model
+                kwargs["qwentts_cpp_instruct"] = design_prompt
+            else:
+                kwargs["qwentts_cpp_model"] = base_model
+                kwargs["qwentts_cpp_instruct"] = ""
             kwargs["qwentts_cpp_speaker"] = ""
+            kwargs["qwentts_cpp_ref_wav"] = ""
+            kwargs["qwentts_cpp_ref_text"] = ""
+            kwargs["qwentts_cpp_ref_spk"] = ""
+            kwargs["qwentts_cpp_ref_rvq"] = ""
         elif voice_mode == "clone":
             clone = self.voice_profile(str(kwargs.get("qwentts_cpp_clone_voice_id", "")))
             kwargs["qwentts_cpp_model"] = base_model
@@ -360,8 +393,6 @@ class ConfigStore:
                 kwargs["qwentts_cpp_ref_spk"] = clone.get("ref_spk", "")
                 kwargs["qwentts_cpp_ref_rvq"] = clone.get("ref_rvq", "")
             else:
-                kwargs["qwentts_cpp_voice_mode"] = "default"
-                kwargs["qwentts_cpp_clone_voice_id"] = ""
                 kwargs["qwentts_cpp_ref_wav"] = ""
                 kwargs["qwentts_cpp_ref_text"] = ""
                 kwargs["qwentts_cpp_ref_spk"] = ""
@@ -370,11 +401,13 @@ class ConfigStore:
             kwargs["qwentts_cpp_instruct"] = ""
         else:
             kwargs["qwentts_cpp_voice_mode"] = "default"
-            kwargs["qwentts_cpp_voice_preset"] = ""
-            kwargs["qwentts_cpp_voice_design"] = ""
             kwargs["qwentts_cpp_model"] = base_model
             kwargs["qwentts_cpp_speaker"] = ""
             kwargs["qwentts_cpp_instruct"] = ""
+            kwargs["qwentts_cpp_ref_wav"] = ""
+            kwargs["qwentts_cpp_ref_text"] = ""
+            kwargs["qwentts_cpp_ref_spk"] = ""
+            kwargs["qwentts_cpp_ref_rvq"] = ""
         return Settings(**kwargs)
 
     def settings_dict(self) -> dict[str, Any]:

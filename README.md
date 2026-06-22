@@ -53,8 +53,6 @@ The console includes:
 - Seed A/B deck: generate five Qwen Base voice seeds, preview candidates,
   collect the good ones with tags, filter saved voices, and delete with
   confirmation.
-- Music bay: select local audio files in the browser and play them from the
-  dashboard while monitoring the assistant.
 - Source switches: choose whether persona and voice are controlled by the
   console or by Reachy WebSocket profile/session data.
 - First setup: fill Hermes/LLM, STT, TTS, and Qwen model paths from the browser.
@@ -141,13 +139,11 @@ Implemented:
 - One-click save/apply of AI-generated complete roles.
 - Tagged saved voice seeds with filtering and delete confirmation.
 - Five-slot A/B seed audition deck.
-- Dashboard waveform style switching, uptime, turn latency, and local browser
-  music bay.
+- Dashboard waveform style switching, uptime, turn latency, and Qwen model
+  readiness.
 
 Still worth doing:
 
-- Server-side music library under `data/music/`, persistent playlists, and
-  optional voice ducking while the assistant speaks.
 - Richer voice profile metadata such as rating, notes, last-used time, and
   favorite sorting.
 - Server-side pre-render/cache for A/B candidates so five voices can be prepared
@@ -167,14 +163,20 @@ moved to `scripts/windows/` and are kept only as compatibility references.
 Install Python 3.12 and `uv`, then run:
 
 ```bash
-./scripts/dev/setup_venv.sh
-./scripts/dev/download_models.sh
-./scripts/qwen/setup_qwentts_lab.sh
-cd admin_ui && npm install && npm run build && cd ..
+./scripts/bootstrap_fedora_amd.sh --system
 ./scripts/service/start_sts_pipeline.sh
 ```
 
 Then open `http://127.0.0.1:8765/` and finish configuration in the console.
+On a machine where Fedora packages are already installed, omit `--system`.
+
+Deployment boundary:
+
+- Script stage: Fedora packages, Python venv, Kokoro/SenseVoice model download,
+  qwentts.cpp build, Qwen Base/codec download, and admin UI build.
+- Console stage: Hermes/LLM URL and API key, TTS engine, Qwen voice mode,
+  persona prompts, saved voices, model paths, VAD, and low-frequency runtime
+  tuning.
 
 Stop the service:
 

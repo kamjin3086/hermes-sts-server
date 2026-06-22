@@ -259,6 +259,8 @@ class QwenTtsCpp(CommandWavTts):
                 raise RuntimeError(f"{name} does not exist: {value}")
 
     def _model_path(self) -> str:
+        if self.settings.qwentts_cpp_model:
+            return self.settings.qwentts_cpp_model
         mode = self.settings.qwentts_cpp_voice_mode.strip().lower()
         if mode == "preset":
             return self.settings.qwentts_cpp_customvoice_model or self.settings.qwentts_cpp_model
