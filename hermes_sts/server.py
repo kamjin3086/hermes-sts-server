@@ -7,6 +7,7 @@ from fastapi import FastAPI, WebSocket
 
 from hermes_sts.admin import create_admin_router
 from hermes_sts.config import settings
+from hermes_sts.config_store import ConfigStore
 from hermes_sts.llm import build_llm
 from hermes_sts.realtime import RealtimeSession
 from hermes_sts.singleton import acquire_singleton_lock
@@ -28,6 +29,7 @@ def _build_components(app: FastAPI) -> None:
 
 def create_app() -> FastAPI:
     settings.log_dir.mkdir(parents=True, exist_ok=True)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
     acquire_singleton_lock(settings.log_dir / "sts-server.lock")
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -35,6 +37,7 @@ def create_app() -> FastAPI:
     )
 
     app = FastAPI(title="Hermes STS Server", version="0.1.0")
+    app.state.config_store = ConfigStore.default()
     _build_components(app)
     logger.info(
         (

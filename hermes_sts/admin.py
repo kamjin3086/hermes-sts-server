@@ -1,243 +1,405 @@
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+import asyncio
+import base64
+import json
+import logging
+import re
+import shutil
+import subprocess
+import time
+import uuid
+import wave
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.request import urlretrieve
 
 import httpx
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from hermes_sts.config import ROOT, Settings
+from hermes_sts.config_store import ATTR_TO_ENV, ConfigStore
+from hermes_sts.persona import build_persona_instructions
+from hermes_sts.tts import TtsVoice, build_tts
 
+logger = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
-class SettingSpec:
-    env: str
-    attr: str
-    label: str
-    category: str
-    kind: str = "text"
-    help: str = ""
-    choices: tuple[str, ...] = ()
-    minimum: float | None = None
-    maximum: float | None = None
-    live: bool = True
-    secret: bool = False
+QWEN_SPEAKERS = [
+    "serena",
+    "vivian",
+    "uncle_fu",
+    "ryan",
+    "aiden",
+    "ono_anna",
+    "sohee",
+    "eric",
+    "dylan",
+]
 
-
-SETTING_SPECS: tuple[SettingSpec, ...] = (
-    SettingSpec("HERMES_STS_HOST", "host", "STS 监听地址", "连接", help="通常保持 127.0.0.1。", live=False),
-    SettingSpec("HERMES_STS_PORT", "port", "STS 端口", "连接", kind="int", minimum=1, maximum=65535, live=False),
-    SettingSpec("HERMES_STS_LOG_LEVEL", "log_level", "日志等级", "连接", choices=("DEBUG", "INFO", "WARNING", "ERROR")),
-    SettingSpec("HERMES_STS_SAMPLE_RATE", "sample_rate", "采样率", "连接", kind="int", choices=("16000",), live=False),
-    SettingSpec("STS_LLM_PROVIDER", "llm_provider", "LLM Provider", "Hermes/LLM", choices=("hermes_agent", "openai_compatible"), live=False),
-    SettingSpec("HERMES_BASE_URL", "hermes_base_url", "Hermes Base URL", "Hermes/LLM"),
-    SettingSpec("HERMES_MODEL", "hermes_model", "Hermes 模型", "Hermes/LLM"),
-    SettingSpec("HERMES_API_KEY", "hermes_api_key", "Hermes API Key", "Hermes/LLM", kind="password", secret=True),
-    SettingSpec("HERMES_MAX_TOKENS", "hermes_max_tokens", "Hermes 最大输出 Token", "Hermes/LLM", kind="int", minimum=16, maximum=2000),
-    SettingSpec("HERMES_CONNECT_TIMEOUT_SECONDS", "hermes_connect_timeout_seconds", "连接超时秒数", "Hermes/LLM", kind="float", minimum=0.5, maximum=60),
-    SettingSpec("HERMES_READ_TIMEOUT_SECONDS", "hermes_read_timeout_seconds", "读取超时秒数", "Hermes/LLM", kind="float", minimum=5, maximum=600),
-    SettingSpec("HERMES_AGENT_MAX_WAIT_SECONDS", "hermes_agent_max_wait_seconds", "最长等待 Hermes 秒数", "Hermes/LLM", kind="float", minimum=5, maximum=600),
-    SettingSpec("HERMES_FIRST_FILLER_DELAY_SECONDS", "hermes_first_filler_delay_seconds", "首次等待语延迟", "等待/兜底", kind="float", minimum=0, maximum=30),
-    SettingSpec("HERMES_FILLER_INTERVAL_SECONDS", "hermes_filler_interval_seconds", "等待语间隔", "等待/兜底", kind="float", minimum=1, maximum=120),
-    SettingSpec("HERMES_MAX_FILLERS", "hermes_max_fillers", "最多等待语次数", "等待/兜底", kind="int", minimum=0, maximum=10),
-    SettingSpec("HERMES_ALLOW_FALLBACK", "hermes_allow_fallback", "允许本地兜底回答", "等待/兜底", kind="bool"),
-    SettingSpec("HERMES_FALLBACK_TEXTS", "hermes_fallback_texts", "兜底回答候选", "等待/兜底", kind="textarea", help="多条用 | 分隔。建议保持中文。"),
-    SettingSpec("HERMES_HISTORY_MAX_MESSAGES", "hermes_history_max_messages", "本地历史最大消息数", "上下文", kind="int", minimum=0, maximum=200),
-    SettingSpec("HERMES_HISTORY_MAX_CHARS", "hermes_history_max_chars", "本地历史最大字符数", "上下文", kind="int", minimum=0, maximum=100000),
-    SettingSpec("HERMES_HISTORY_IDLE_RESET_SECONDS", "hermes_history_idle_reset_seconds", "上下文闲置重置秒数", "上下文", kind="float", minimum=0, maximum=86400, help="从最后一次 LLM 调用开始计时，0 表示不自动重置。"),
-    SettingSpec("STS_VAD_PROVIDER", "vad_provider", "VAD Provider", "VAD 截句", choices=("sherpa_silero", "energy"), live=False),
-    SettingSpec("SHERPA_SILERO_VAD_MODEL", "sherpa_silero_vad_model", "Silero VAD 模型", "VAD 截句", live=False),
-    SettingSpec("VAD_THRESHOLD", "vad_threshold", "说话灵敏度", "听人说话", kind="float", choices=("0.30", "0.35", "0.45", "0.55"), minimum=0.05, maximum=0.95),
-    SettingSpec("VAD_MIN_SILENCE_SECONDS", "vad_min_silence_seconds", "说完多久回应", "听人说话", kind="float", choices=("0.35", "0.45", "0.60", "0.80"), minimum=0.1, maximum=3),
-    SettingSpec("VAD_ENERGY_THRESHOLD", "vad_energy_threshold", "环境底噪", "听人说话", kind="float", choices=("0.003", "0.004", "0.007", "0.012"), minimum=0.001, maximum=0.2),
-    SettingSpec("VAD_END_MS", "vad_end_ms", "补充判定等待", "听人说话", kind="int", choices=("450", "600", "800", "1000"), minimum=100, maximum=3000),
-    SettingSpec("VAD_MIN_UTTERANCE_MS", "vad_min_utterance_ms", "最短语音毫秒", "VAD 截句", kind="int", minimum=100, maximum=3000),
-    SettingSpec("VAD_MAX_UTTERANCE_MS", "vad_max_utterance_ms", "最长语音毫秒", "VAD 截句", kind="int", minimum=1000, maximum=60000),
-    SettingSpec("STS_STT_PROVIDER", "stt_provider", "STT Provider", "STT", choices=("sherpa_sensevoice", "funasr_onnx", "lemonade_whisper", "dev"), live=False),
-    SettingSpec("SHERPA_SENSEVOICE_MODEL", "sherpa_sensevoice_model", "SenseVoice 模型", "STT", live=False),
-    SettingSpec("SHERPA_SENSEVOICE_TOKENS", "sherpa_sensevoice_tokens", "SenseVoice tokens", "STT", live=False),
-    SettingSpec("SHERPA_SENSEVOICE_LANGUAGE", "sherpa_sensevoice_language", "SenseVoice 语言", "STT", choices=("zh", "en", "auto")),
-    SettingSpec("SHERPA_SENSEVOICE_USE_ITN", "sherpa_sensevoice_use_itn", "数字/文本规整 ITN", "STT", kind="bool"),
-    SettingSpec("HERMES_STS_DEV_TRANSCRIPT", "dev_transcript", "开发转写文本", "STT"),
-    SettingSpec("STS_TTS_PROVIDER", "tts_provider", "TTS Provider", "TTS 声音", choices=("sherpa_kokoro", "sapi", "tone", "sherpa_onnx"), live=False),
-    SettingSpec("SHERPA_KOKORO_MODEL", "sherpa_kokoro_model", "Kokoro 模型", "TTS 声音", live=False),
-    SettingSpec("SHERPA_KOKORO_VOICES", "sherpa_kokoro_voices", "Kokoro voices.bin", "TTS 声音", live=False),
-    SettingSpec("SHERPA_KOKORO_TOKENS", "sherpa_kokoro_tokens", "Kokoro tokens", "TTS 声音", live=False),
-    SettingSpec("SHERPA_KOKORO_LEXICON", "sherpa_kokoro_lexicon", "Kokoro 词典", "TTS 声音", live=False),
-    SettingSpec("SHERPA_KOKORO_DATA_DIR", "sherpa_kokoro_data_dir", "Kokoro data dir", "TTS 声音", live=False),
-    SettingSpec("SHERPA_KOKORO_VOICE", "sherpa_kokoro_voice", "Kokoro 声线 ID", "TTS 声音", kind="int", minimum=0, maximum=52, help="中文推荐 45-52，当前 47 为 zf_xiaoxiao。"),
-    SettingSpec("SHERPA_KOKORO_LANG", "sherpa_kokoro_lang", "Kokoro 语言", "TTS 声音", help="通常留空自动。"),
-    SettingSpec("SAPI_VOICE", "sapi_voice", "Windows SAPI 声音", "TTS 声音"),
-    SettingSpec("STS_RESPONSE_AUDIO_CHUNK_MS", "response_audio_chunk_ms", "音频分片毫秒", "TTS 声音", kind="int", minimum=20, maximum=500),
-    SettingSpec("STS_TTS_SEGMENT_MIN_CHARS", "tts_segment_min_chars", "TTS 最小分句字符", "TTS 声音", kind="int", minimum=4, maximum=120),
-    SettingSpec("STS_TTS_SEGMENT_MAX_CHARS", "tts_segment_max_chars", "TTS 最大分句字符", "TTS 声音", kind="int", minimum=8, maximum=300),
-    SettingSpec("STS_TTS_STRIP_BRACKETED_CUES", "tts_strip_bracketed_cues", "清理括号表情标签", "TTS 声音", kind="bool"),
-    SettingSpec("STS_SUPPRESS_INPUT_WHILE_SPEAKING", "suppress_input_while_speaking", "说话时抑制输入", "交互", kind="bool"),
-    SettingSpec("STS_LATENCY_LOGGING", "latency_logging", "记录延迟日志", "交互", kind="bool"),
-)
-
-SPECS_BY_ENV = {spec.env: spec for spec in SETTING_SPECS}
-
-DISPLAY_SETTING_ENVS = {
-    "HERMES_MAX_TOKENS",
-    "HERMES_AGENT_MAX_WAIT_SECONDS",
-    "HERMES_FIRST_FILLER_DELAY_SECONDS",
-    "HERMES_FILLER_INTERVAL_SECONDS",
-    "HERMES_MAX_FILLERS",
-    "HERMES_ALLOW_FALLBACK",
-    "HERMES_FALLBACK_TEXTS",
-    "HERMES_HISTORY_IDLE_RESET_SECONDS",
-    "VAD_THRESHOLD",
-    "VAD_MIN_SILENCE_SECONDS",
-    "VAD_ENERGY_THRESHOLD",
-    "SHERPA_KOKORO_VOICE",
-    "STS_TTS_SEGMENT_MAX_CHARS",
-    "STS_SUPPRESS_INPUT_WHILE_SPEAKING",
+QWEN_MODEL_FILES = {
+    "base": "qwen-talker-1.7b-base-Q4_K_M.gguf",
+    "customvoice": "qwen-talker-1.7b-customvoice-Q4_K_M.gguf",
+    "voicedesign": "qwen-talker-1.7b-voicedesign-Q4_K_M.gguf",
+    "codec": "qwen-tokenizer-12hz-Q4_K_M.gguf",
 }
-
-UI_OVERRIDES: dict[str, dict[str, Any]] = {
-    "HERMES_MAX_TOKENS": {
-        "category": "回答长度",
-        "label": "最大输出 Token",
-        "help": "想让回答更短就调低，例如 80-120；想更完整就调高。",
-    },
-    "HERMES_AGENT_MAX_WAIT_SECONDS": {
-        "category": "等待体验",
-        "label": "最长等待秒数",
-        "help": "Hermes 超过这个时间仍无结果时，改用本地兜底。",
-    },
-    "HERMES_FIRST_FILLER_DELAY_SECONDS": {"category": "等待体验", "label": "首次等待语延迟"},
-    "HERMES_FILLER_INTERVAL_SECONDS": {"category": "等待体验", "label": "等待语间隔"},
-    "HERMES_MAX_FILLERS": {"category": "等待体验", "label": "最多等待语次数"},
-    "HERMES_ALLOW_FALLBACK": {"category": "等待体验", "label": "允许本地兜底"},
-    "HERMES_FALLBACK_TEXTS": {
-        "category": "等待体验",
-        "label": "兜底回答候选",
-        "help": "多条用 | 分隔，建议保持中文、短句、自然。",
-    },
-    "VAD_THRESHOLD": {
-        "category": "听人说话",
-        "label": "说话灵敏度",
-        "help": "安静房间建议选“灵敏”。如果机器人听不到正常音量，就往更灵敏调；如果老被杂音叫醒，就往更稳调。",
-        "choice_labels": {
-            "0.30": "很灵敏：轻声也容易听到",
-            "0.35": "灵敏：推荐，普通说话即可",
-            "0.45": "均衡：有一点背景声",
-            "0.55": "稳一点：环境比较吵",
-        },
-    },
-    "VAD_MIN_SILENCE_SECONDS": {
-        "category": "听人说话",
-        "label": "说完多久回应",
-        "help": "越快越容易抢话，越慢越会等你继续说。安静的一问一答建议选“稍快”。",
-        "choice_labels": {
-            "0.35": "很快：短暂停顿就回应",
-            "0.45": "稍快：推荐，日常对话",
-            "0.60": "稳一点：不容易抢话",
-            "0.80": "多等一下：适合慢慢说",
-        },
-    },
-    "VAD_ENERGY_THRESHOLD": {
-        "category": "听人说话",
-        "label": "环境底噪",
-        "help": "安静房间选“安静”。如果没有人说话也会触发，说明需要调到“普通”或“嘈杂”。",
-        "choice_labels": {
-            "0.003": "非常安静：很容易被唤起",
-            "0.004": "安静：推荐，家里/办公室",
-            "0.007": "普通：有轻微背景声",
-            "0.012": "嘈杂：优先避免误触发",
-        },
-    },
-    "SHERPA_KOKORO_VOICE": {
-        "category": "声音",
-        "label": "声音 ID",
-        "help": "中文推荐 45-52，当前推荐 47 zf_xiaoxiao。",
-    },
-    "STS_TTS_SEGMENT_MAX_CHARS": {
-        "category": "声音",
-        "label": "每段最多字符",
-        "help": "调低会更快开口但更碎；调高会更完整但首声更慢。",
-    },
-    "STS_SUPPRESS_INPUT_WHILE_SPEAKING": {
-        "category": "交互",
-        "label": "说话时忽略麦克风",
-        "help": "开启可避免机器人把自己的声音听进去；想支持打断可关闭。",
-    },
-}
+QWEN_MODEL_REPO = "https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main"
+SERVER_STARTED_AT = time.time()
 
 
 class SettingsPatch(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
 
+class PersonaPatch(BaseModel):
+    id: str
+    name: str
+    prompt: str
+    voice_mode: str = "default"
+    voice_ref: str = ""
+    apply: bool = True
+
+
+class ModelInstallRequest(BaseModel):
+    kinds: list[str] = Field(default_factory=list)
+
+
+class CloneEncodeRequest(BaseModel):
+    voice_id: str
+
+
+class SeedVoiceRequest(BaseModel):
+    name: str = "收藏声线"
+    seed: int
+    tags: list[str] = Field(default_factory=list)
+
+
+class ApplyVoiceRequest(BaseModel):
+    voice_id: str
+
+
+class WorkshopSuggestRequest(BaseModel):
+    brief: str
+    persona_hint: str = ""
+
+
+class PreviewRequest(BaseModel):
+    text: str = "你好，我是 Hermes STS。现在使用当前角色和音色进行试听。"
+    voice_mode: str | None = None
+    speaker: str | None = None
+    design_prompt: str | None = None
+    clone_voice_id: str | None = None
+    seed: int | None = None
+
+
 def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
+    store = ConfigStore.default()
     router = APIRouter()
 
+    def refresh_settings() -> Settings:
+        new_settings = store.load_settings()
+        for key, value in vars(new_settings).items():
+            object.__setattr__(settings, key, value)
+        return settings
+
     @router.get("/", response_class=HTMLResponse)
-    async def index() -> HTMLResponse:
-        return HTMLResponse(_admin_html())
+    async def index():
+        index_path = ROOT / "admin_ui" / "dist" / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        return HTMLResponse(_fallback_html())
+
+    @router.get("/assets/{path:path}")
+    async def admin_asset(path: str):
+        asset = (ROOT / "admin_ui" / "dist" / "assets" / path).resolve()
+        assets_root = (ROOT / "admin_ui" / "dist" / "assets").resolve()
+        if not str(asset).startswith(str(assets_root)) or not asset.exists():
+            raise HTTPException(status_code=404, detail="asset not found")
+        return FileResponse(asset)
+
+    @router.get("/api/admin/state")
+    async def admin_state() -> dict[str, Any]:
+        current = refresh_settings()
+        return {
+            "health": _health(current),
+            "settings": _settings_payload(current, store),
+            "setup": {
+                "complete": store.setup_complete(),
+                "env_imported": False,
+            },
+            "runtime": {
+                "started_at": SERVER_STARTED_AT,
+                "uptime_seconds": max(0, int(time.time() - SERVER_STARTED_AT)),
+            },
+            "personas": store.persona_profiles(),
+            "voices": store.voice_profiles(),
+            "qwen": {
+                "speakers": QWEN_SPEAKERS,
+                "models": _qwen_model_status(current),
+                "modes": ["default", "preset", "design", "clone"],
+            },
+            "kokoro_voices": _kokoro_voice_options(),
+            "metrics": store.metrics(80),
+        }
 
     @router.get("/api/settings")
-    async def get_settings() -> dict[str, Any]:
+    async def legacy_settings() -> dict[str, Any]:
+        current = refresh_settings()
         return {
-            "health": _health(settings),
-            "categories": _settings_payload(settings),
+            "health": _health(current),
+            "categories": _legacy_categories(current, store),
             "kokoro_voices": _kokoro_voice_options(),
-            "env_path": str(ROOT / ".env"),
+            "config_db": str(settings.config_db),
         }
 
     @router.patch("/api/settings")
     async def patch_settings(payload: SettingsPatch) -> dict[str, Any]:
-        changed: dict[str, Any] = {}
-        restart_required: list[str] = []
-        rebuild_required = False
-
-        env_values = _read_env(ROOT / ".env")
-        for env_name, raw_value in payload.values.items():
-            spec = SPECS_BY_ENV.get(env_name)
-            if not spec:
-                continue
-            try:
-                value = _coerce_value(spec, raw_value)
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            old_value = getattr(settings, spec.attr)
-            if old_value == value:
-                continue
-            object.__setattr__(settings, spec.attr, value)
-            env_values[env_name] = _format_env_value(spec, value)
-            changed[env_name] = value
-            if not spec.live:
-                restart_required.append(env_name)
-            if env_name in {
-                "STS_STT_PROVIDER",
-                "STS_TTS_PROVIDER",
-                "STS_LLM_PROVIDER",
-                "SHERPA_KOKORO_MODEL",
-                "SHERPA_KOKORO_VOICES",
-                "SHERPA_KOKORO_TOKENS",
-                "SHERPA_KOKORO_LEXICON",
-                "SHERPA_KOKORO_DATA_DIR",
-                "SHERPA_SENSEVOICE_MODEL",
-                "SHERPA_SENSEVOICE_TOKENS",
-            }:
-                rebuild_required = True
-
-        if changed:
-            _write_env(ROOT / ".env", env_values)
-            _sync_os_environ(changed)
-            if rebuild_required:
-                rebuild_components()
-
+        _validate_settings_patch(payload.values)
+        changed = store.set_settings(payload.values)
+        current = refresh_settings()
+        if _requires_rebuild(changed):
+            rebuild_components()
         return {
             "changed": changed,
-            "restart_required": restart_required,
-            "health": _health(settings),
+            "restart_required": [],
+            "rebuild_required": _requires_rebuild(changed),
+            "health": _health(current),
+            "state": await admin_state(),
         }
+
+    @router.post("/api/setup/import-env")
+    async def import_env() -> dict[str, Any]:
+        refresh_settings()
+        return {"ok": False, "deprecated": True, "state": await admin_state()}
+
+    @router.post("/api/setup/complete")
+    async def complete_setup() -> dict[str, Any]:
+        store.set_setup_value("complete", True)
+        return {"ok": True}
+
+    @router.post("/api/personas")
+    async def upsert_persona(payload: PersonaPatch) -> dict[str, Any]:
+        if payload.voice_mode not in {"default", "preset", "design", "clone"}:
+            raise HTTPException(status_code=422, detail=f"unsupported qwen voice mode: {payload.voice_mode}")
+        if payload.voice_mode == "preset" and payload.voice_ref and payload.voice_ref not in QWEN_SPEAKERS:
+            raise HTTPException(status_code=422, detail=f"unsupported qwen speaker: {payload.voice_ref}")
+        profile = payload.model_dump()
+        profile.pop("apply", None)
+        store.upsert_persona(profile)
+        if not payload.apply:
+            return {"ok": True, "applied": False, "state": await admin_state()}
+        values = {
+            "sts_persona_preset": payload.id,
+            "sts_persona_custom": payload.prompt,
+            "qwentts_cpp_voice_mode": payload.voice_mode,
+        }
+        voice_ref_key = _voice_ref_key(payload.voice_mode)
+        if voice_ref_key:
+            values[voice_ref_key] = payload.voice_ref
+        changed = store.set_settings(values)
+        refresh_settings()
+        if _requires_rebuild(changed):
+            rebuild_components()
+        return {"ok": True, "applied": True, "state": await admin_state()}
+
+    @router.delete("/api/personas/{persona_id}")
+    async def delete_persona(persona_id: str) -> dict[str, Any]:
+        if not store.persona_profile(persona_id):
+            raise HTTPException(status_code=404, detail="persona not found")
+        if len(store.persona_profiles()) <= 1:
+            raise HTTPException(status_code=422, detail="cannot delete the last persona")
+        if not store.delete_persona(persona_id):
+            raise HTTPException(status_code=404, detail="persona not found")
+        current = refresh_settings()
+        changed: dict[str, Any] = {}
+        if current.sts_persona_preset == persona_id:
+            fallback = store.persona_profiles()[0]
+            values = {
+                "sts_persona_preset": fallback["id"],
+                "sts_persona_custom": fallback["prompt"],
+                "qwentts_cpp_voice_mode": fallback.get("voice_mode", "default"),
+            }
+            voice_ref_key = _voice_ref_key(values["qwentts_cpp_voice_mode"])
+            if voice_ref_key:
+                values[voice_ref_key] = fallback.get("voice_ref", "")
+            changed = store.set_settings(values)
+            refresh_settings()
+        if _requires_rebuild(changed):
+            rebuild_components()
+        return {"ok": True, "state": await admin_state()}
+
+    @router.post("/api/qwen/models/install")
+    async def install_qwen_models(payload: ModelInstallRequest | None = None) -> dict[str, Any]:
+        current = refresh_settings()
+        models_dir = Path(current.qwentts_cpp_base_model).parent
+        models_dir.mkdir(parents=True, exist_ok=True)
+        kinds = payload.kinds if payload and payload.kinds else list(QWEN_MODEL_FILES)
+        unsupported = sorted(set(kinds) - set(QWEN_MODEL_FILES))
+        if unsupported:
+            raise HTTPException(status_code=422, detail=f"unsupported qwen model kind: {', '.join(unsupported)}")
+        for kind in kinds:
+            filename = QWEN_MODEL_FILES[kind]
+            target = models_dir / filename
+            if target.exists():
+                continue
+            url = f"{QWEN_MODEL_REPO}/{filename}"
+            logger.info("Downloading Qwen model %s", url)
+            await asyncio.to_thread(urlretrieve, url, target)
+        store.set_settings(
+            {
+                "qwentts_cpp_base_model": str(models_dir / QWEN_MODEL_FILES["base"]),
+                "qwentts_cpp_customvoice_model": str(models_dir / QWEN_MODEL_FILES["customvoice"]),
+                "qwentts_cpp_voicedesign_model": str(models_dir / QWEN_MODEL_FILES["voicedesign"]),
+                "qwentts_cpp_codec": str(models_dir / QWEN_MODEL_FILES["codec"]),
+            }
+        )
+        refresh_settings()
+        return {"ok": True, "models": _qwen_model_status(settings), "state": await admin_state()}
+
+    @router.post("/api/qwen/clone/upload")
+    async def upload_clone(
+        name: str = Form(...),
+        reference_text: str = Form(""),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        safe_id = f"voice_{uuid.uuid4().hex[:12]}"
+        voice_dir = settings.data_dir / "voices" / safe_id
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = voice_dir / "reference.wav"
+        text_path = voice_dir / "reference.txt"
+        with wav_path.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+        text_path.write_text(reference_text.strip(), encoding="utf-8")
+        profile = {
+            "id": safe_id,
+            "name": name.strip() or "克隆音色",
+            "provider": "qwen3tts",
+            "mode": "clone",
+            "ref_wav": str(wav_path),
+            "ref_text": str(text_path),
+        }
+        store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(safe_id), "state": await admin_state()}
+
+    @router.post("/api/qwen/clone/encode")
+    async def encode_clone(payload: CloneEncodeRequest) -> dict[str, Any]:
+        current = refresh_settings()
+        voice = store.voice_profile(payload.voice_id)
+        if not voice:
+            raise HTTPException(status_code=404, detail="voice not found")
+        ref_wav = Path(voice["ref_wav"])
+        if not ref_wav.exists():
+            raise HTTPException(status_code=422, detail="reference wav missing")
+        codec_bin = Path(current.qwentts_cpp_bin).with_name("qwen-codec")
+        if not codec_bin.exists():
+            raise HTTPException(status_code=422, detail=f"qwen-codec not found: {codec_bin}")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                str(codec_bin),
+                "--model",
+                current.qwentts_cpp_codec,
+                "--talker",
+                current.qwentts_cpp_base_model,
+                "-i",
+                str(ref_wav),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(ref_wav.parent),
+            env={**__import__("os").environ, "GGML_BACKEND": current.qwentts_cpp_backend},
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=result.stderr[-1200:])
+        spk = ref_wav.with_suffix(".spk")
+        rvq = ref_wav.with_suffix(".rvq")
+        profile = dict(voice)
+        profile.update({"ref_spk": str(spk), "ref_rvq": str(rvq)})
+        store.upsert_voice(profile)
+        store.set_settings({"qwentts_cpp_voice_mode": "clone", "qwentts_cpp_clone_voice_id": payload.voice_id})
+        refresh_settings()
+        rebuild_components()
+        return {"ok": True, "voice": store.voice_profile(payload.voice_id), "state": await admin_state()}
+
+    @router.post("/api/qwen/voices/seed")
+    async def save_seed_voice(payload: SeedVoiceRequest) -> dict[str, Any]:
+        voice_id = f"seed_{uuid.uuid4().hex[:12]}"
+        profile = {
+            "id": voice_id,
+            "name": payload.name.strip() or f"Seed {payload.seed}",
+            "provider": "qwen3tts",
+            "mode": "seed",
+            "seed": int(payload.seed),
+            "tags": ",".join(_normalize_tags(payload.tags)),
+        }
+        store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
+
+    @router.post("/api/qwen/voices/apply")
+    async def apply_voice(payload: ApplyVoiceRequest) -> dict[str, Any]:
+        voice = store.voice_profile(payload.voice_id)
+        if not voice:
+            raise HTTPException(status_code=404, detail="voice not found")
+        values = _settings_for_voice_profile(voice)
+        changed = store.set_settings(values)
+        refresh_settings()
+        if _requires_rebuild(changed):
+            rebuild_components()
+        return {"ok": True, "voice": voice, "state": await admin_state()}
+
+    @router.delete("/api/qwen/voices/{voice_id}")
+    async def delete_voice(voice_id: str) -> dict[str, Any]:
+        if voice_id == "qwen-default":
+            raise HTTPException(status_code=422, detail="default voice cannot be deleted")
+        if not store.delete_voice(voice_id):
+            raise HTTPException(status_code=404, detail="voice not found")
+        current = refresh_settings()
+        active_clone = current.qwentts_cpp_voice_mode == "clone" and current.qwentts_cpp_clone_voice_id == voice_id
+        if active_clone:
+            store.set_settings({"qwentts_cpp_voice_mode": "default", "qwentts_cpp_clone_voice_id": ""})
+            refresh_settings()
+            rebuild_components()
+        return {"ok": True, "state": await admin_state()}
+
+    @router.post("/api/qwen/workshop/suggest")
+    async def suggest_voice(payload: WorkshopSuggestRequest) -> dict[str, Any]:
+        current = refresh_settings()
+        suggestion = await _suggest_voice_with_llm(payload, current)
+        return {"ok": True, "suggestion": suggestion}
+
+    @router.post("/api/tts/preview")
+    async def tts_preview(payload: PreviewRequest) -> dict[str, Any]:
+        current = refresh_settings()
+        preview_settings = replace(current, qwentts_cpp_seed=payload.seed) if payload.seed is not None else current
+        voice = _preview_voice(payload, preview_settings, store)
+        started = time.perf_counter()
+        pcm = await build_tts(preview_settings).synthesize(payload.text, voice=voice)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        wav = _pcm_to_wav_bytes(pcm, preview_settings.sample_rate)
+        audio_seconds = len(pcm) / 2 / preview_settings.sample_rate
+        store.add_metric(
+            "tts_preview",
+            {
+                "elapsed_ms": elapsed_ms,
+                "audio_seconds": audio_seconds,
+                "rtf": elapsed_ms / 1000 / max(audio_seconds, 0.001),
+                "seed": preview_settings.qwentts_cpp_seed,
+            },
+        )
+        return {
+            "ok": True,
+            "elapsed_ms": elapsed_ms,
+            "audio_seconds": audio_seconds,
+            "seed": preview_settings.qwentts_cpp_seed,
+            "audio_wav_base64": base64.b64encode(wav).decode("ascii"),
+        }
+
+    @router.get("/api/metrics")
+    async def metrics() -> dict[str, Any]:
+        return {"metrics": store.metrics(120)}
 
     @router.get("/api/logs")
     async def logs(lines: int = 120) -> dict[str, str]:
@@ -249,12 +411,13 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
 
     @router.get("/api/diagnostics/hermes")
     async def hermes_diagnostics() -> dict[str, Any]:
+        current = refresh_settings()
         headers = {}
-        if settings.hermes_api_key:
-            headers["Authorization"] = f"Bearer {settings.hermes_api_key}"
+        if current.hermes_api_key:
+            headers["Authorization"] = f"Bearer {current.hermes_api_key}"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{settings.hermes_base_url.rstrip('/')}/models", headers=headers)
+                resp = await client.get(f"{current.hermes_base_url.rstrip('/')}/models", headers=headers)
                 return {"ok": resp.is_success, "status_code": resp.status_code, "body": resp.json()}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -262,31 +425,76 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
     return router
 
 
-def _settings_payload(settings: Settings) -> list[dict[str, Any]]:
-    categories: dict[str, list[dict[str, Any]]] = {}
-    for spec in SETTING_SPECS:
-        if spec.env not in DISPLAY_SETTING_ENVS:
-            continue
-        override = UI_OVERRIDES.get(spec.env, {})
-        value = getattr(settings, spec.attr)
-        category = override.get("category", spec.category)
-        categories.setdefault(category, []).append(
-            {
-                "env": spec.env,
-                "label": override.get("label", spec.label),
-                "kind": spec.kind,
-                "value": value,
-                "help": override.get("help", spec.help),
-                "choices": list(spec.choices),
-                "choice_labels": override.get("choice_labels", {}),
-                "min": spec.minimum,
-                "max": spec.maximum,
-                "live": spec.live,
-                "secret": spec.secret,
-            }
-        )
-    order = ["回答长度", "等待体验", "上下文", "听人说话", "声音", "交互"]
-    return [{"name": name, "settings": categories[name]} for name in order if name in categories]
+def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
+    data = store.settings_dict()
+    visible = {
+        "server": ["host", "port", "log_level"],
+        "llm": ["hermes_base_url", "hermes_model", "hermes_api_key", "hermes_max_tokens"],
+        "stt": ["stt_provider", "sherpa_sensevoice_model", "sherpa_sensevoice_tokens"],
+        "tts": [
+            "tts_provider",
+            "tts_voice_source",
+            "sts_persona_source",
+            "sts_persona_preset",
+            "sts_persona_custom",
+            "qwentts_cpp_voice_mode",
+            "qwentts_cpp_voice_preset",
+            "qwentts_cpp_voice_design",
+            "qwentts_cpp_clone_voice_id",
+            "qwentts_cpp_backend",
+            "qwentts_cpp_seed",
+            "dashboard_wave_style",
+            "sherpa_kokoro_voice",
+        ],
+        "conversation": [
+            "vad_threshold",
+            "vad_min_silence_seconds",
+            "hermes_first_filler_delay_seconds",
+            "suppress_input_while_speaking",
+            "tts_segment_min_chars",
+            "tts_segment_max_chars",
+        ],
+        "advanced": [
+            "qwentts_cpp_bin",
+            "qwentts_cpp_base_model",
+            "qwentts_cpp_customvoice_model",
+            "qwentts_cpp_voicedesign_model",
+            "qwentts_cpp_codec",
+            "qwentts_cpp_extra_args",
+            "qwentts_cpp_seed",
+        ],
+    }
+    return {
+        "values": {key: getattr(settings, key) for keys in visible.values() for key in keys if hasattr(settings, key)},
+        "groups": visible,
+        "raw": data,
+    }
+
+
+def _legacy_categories(settings: Settings, store: ConfigStore) -> list[dict[str, Any]]:
+    payload = _settings_payload(settings, store)
+    return [
+        {
+            "name": group,
+            "settings": [
+                {
+                    "env": ATTR_TO_ENV.get(key, key),
+                    "key": key,
+                    "label": _label_for(key),
+                    "kind": "password" if key.endswith("api_key") else "text",
+                    "value": str(value),
+                    "help": "",
+                    "choices": [],
+                    "choice_labels": {},
+                    "live": True,
+                    "secret": key.endswith("api_key"),
+                }
+                for key, value in payload["values"].items()
+                if key in keys
+            ],
+        }
+        for group, keys in payload["groups"].items()
+    ]
 
 
 def _health(settings: Settings) -> dict[str, Any]:
@@ -299,80 +507,222 @@ def _health(settings: Settings) -> dict[str, Any]:
         "llm_provider": settings.llm_provider,
         "hermes_base_url": settings.hermes_base_url,
         "hermes_model": settings.hermes_model,
+        "persona_source": settings.sts_persona_source,
+        "persona_preset": settings.sts_persona_preset,
+        "persona_prompt": build_persona_instructions(settings),
         "voice": settings.sherpa_kokoro_voice,
+        "tts_voice_source": settings.tts_voice_source,
+        "qwen_voice_mode": settings.qwentts_cpp_voice_mode,
+        "qwen_speaker": settings.qwentts_cpp_voice_preset or settings.qwentts_cpp_speaker,
+        "qwen_backend": settings.qwentts_cpp_backend,
+        "qwen_clone": bool(settings.qwentts_cpp_ref_wav or settings.qwentts_cpp_ref_spk or settings.qwentts_cpp_ref_rvq),
     }
 
 
-def _read_env(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
+def _qwen_model_status(settings: Settings) -> dict[str, Any]:
+    paths = {
+        "base": settings.qwentts_cpp_base_model,
+        "customvoice": settings.qwentts_cpp_customvoice_model,
+        "voicedesign": settings.qwentts_cpp_voicedesign_model,
+        "codec": settings.qwentts_cpp_codec,
+    }
+    return {
+        key: {"path": value, "installed": bool(value and Path(value).exists())}
+        for key, value in paths.items()
+    }
 
 
-def _write_env(path: Path, values: dict[str, str]) -> None:
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    seen: set[str] = set()
-    output: list[str] = []
-    for line in existing:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            output.append(line)
-            continue
-        key = stripped.split("=", 1)[0].strip()
-        if key in values:
-            output.append(f"{key}={values[key]}")
-            seen.add(key)
-        else:
-            output.append(line)
-    for spec in SETTING_SPECS:
-        if spec.env in values and spec.env not in seen:
-            output.append(f"{spec.env}={values[spec.env]}")
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+def _requires_rebuild(changed: dict[str, Any]) -> bool:
+    keys = set(changed)
+    rebuild_keys = {
+        "stt_provider",
+        "tts_provider",
+        "llm_provider",
+        "qwentts_cpp_voice_mode",
+        "qwentts_cpp_voice_preset",
+        "qwentts_cpp_voice_design",
+        "qwentts_cpp_clone_voice_id",
+        "qwentts_cpp_bin",
+        "qwentts_cpp_base_model",
+        "qwentts_cpp_customvoice_model",
+        "qwentts_cpp_voicedesign_model",
+        "qwentts_cpp_codec",
+        "qwentts_cpp_backend",
+        "qwentts_cpp_seed",
+        "sherpa_kokoro_model",
+        "sherpa_kokoro_voices",
+        "sherpa_kokoro_tokens",
+        "sherpa_kokoro_lexicon",
+        "sherpa_kokoro_data_dir",
+        "sherpa_sensevoice_model",
+        "sherpa_sensevoice_tokens",
+    }
+    return bool(keys & rebuild_keys)
 
 
-def _sync_os_environ(changed: dict[str, Any]) -> None:
-    for env_name, value in changed.items():
-        spec = SPECS_BY_ENV[env_name]
-        os.environ[env_name] = _format_env_value(spec, value)
+def _validate_settings_patch(values: dict[str, Any]) -> None:
+    mode = values.get("qwentts_cpp_voice_mode")
+    if mode is not None and mode not in {"default", "preset", "design", "clone"}:
+        raise HTTPException(status_code=422, detail=f"unsupported qwen voice mode: {mode}")
+    speaker = values.get("qwentts_cpp_voice_preset")
+    if speaker and speaker not in QWEN_SPEAKERS:
+        raise HTTPException(status_code=422, detail=f"unsupported qwen speaker: {speaker}")
+    seed = values.get("qwentts_cpp_seed")
+    if seed is not None:
+        try:
+            int(seed)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="qwen seed must be an integer") from exc
+    provider = values.get("tts_provider")
+    if provider is not None and provider not in {"qwen3tts", "sherpa_kokoro", "tone", "sapi", "sherpa_onnx"}:
+        raise HTTPException(status_code=422, detail=f"unsupported tts provider: {provider}")
 
 
-def _coerce_value(spec: SettingSpec, value: Any) -> Any:
-    if spec.kind == "bool":
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-    if spec.kind == "int":
-        coerced = int(value)
-    elif spec.kind == "float":
-        coerced = float(value)
+def _voice_ref_key(mode: str) -> str:
+    if mode == "preset":
+        return "qwentts_cpp_voice_preset"
+    if mode == "design":
+        return "qwentts_cpp_voice_design"
+    if mode == "clone":
+        return "qwentts_cpp_clone_voice_id"
+    return ""
+
+
+def _settings_for_voice_profile(voice: dict[str, Any]) -> dict[str, Any]:
+    mode = str(voice.get("mode") or "default")
+    if mode == "seed":
+        return {"qwentts_cpp_voice_mode": "default", "qwentts_cpp_seed": int(voice.get("seed") or 42)}
+    if mode == "preset":
+        return {"qwentts_cpp_voice_mode": "preset", "qwentts_cpp_voice_preset": voice.get("speaker", "")}
+    if mode == "design":
+        return {"qwentts_cpp_voice_mode": "design", "qwentts_cpp_voice_design": voice.get("design_prompt", "")}
+    if mode == "clone":
+        return {"qwentts_cpp_voice_mode": "clone", "qwentts_cpp_clone_voice_id": voice.get("id", "")}
+    return {"qwentts_cpp_voice_mode": "default"}
+
+
+async def _suggest_voice_with_llm(payload: WorkshopSuggestRequest, settings: Settings) -> dict[str, Any]:
+    brief = payload.brief.strip()
+    if not brief:
+        raise HTTPException(status_code=422, detail="brief is required")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是语音助手音色设计师。根据用户想要的气质，生成 Qwen3TTS 可用的音色方案。"
+                "只返回 JSON，不要 Markdown。字段必须包含："
+                "name, persona_prompt, voice_mode, design_prompt, seed, tags, preview_text, notes。"
+                "voice_mode 只能是 default 或 design。"
+                "design_prompt 用英文短语，适合 Qwen3TTS VoiceDesign，例如 gender, age, pitch, tone, accent, pace。"
+                "seed 是 1 到 2147483647 的整数，用于 Base 默认音色微调。"
+                "persona_prompt 用中文，适合语音助手系统提示词，克制、明确、可长期使用。"
+                "tags 是 2 到 4 个中文短标签，例如：沉稳、清晰、冷感、亲和、播报、低频、甜、快速。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"需求：{brief}\n当前人格参考：{payload.persona_hint[:1200]}",
+        },
+    ]
+    body = {
+        "model": settings.hermes_model or settings.llm_model,
+        "messages": messages,
+        "stream": False,
+        "max_tokens": min(max(settings.hermes_max_tokens, 300), 900),
+        "temperature": 0.7,
+    }
+    headers = {}
+    if settings.hermes_api_key:
+        headers["Authorization"] = f"Bearer {settings.hermes_api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=settings.hermes_timeout_seconds) as client:
+            resp = await client.post(f"{settings.hermes_base_url.rstrip('/')}/chat/completions", json=body, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM suggestion failed: {exc}") from exc
+
+    content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+    try:
+        parsed = json.loads(_extract_json_object(content))
+    except Exception:
+        parsed = {}
+    seed = parsed.get("seed")
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError):
+        seed = int(time.time() * 1000) % 2147483647 or 42
+    seed = max(1, min(seed, 2147483647))
+    mode = str(parsed.get("voice_mode") or "design").strip().lower()
+    if mode not in {"default", "design"}:
+        mode = "design"
+    return {
+        "name": str(parsed.get("name") or "AI 音色方案")[:80],
+        "persona_prompt": str(parsed.get("persona_prompt") or "").strip(),
+        "voice_mode": mode,
+        "design_prompt": str(parsed.get("design_prompt") or "").strip(),
+        "seed": seed,
+        "tags": _normalize_tags(parsed.get("tags")),
+        "preview_text": str(parsed.get("preview_text") or "你好，我正在用新的声线和你说话。").strip(),
+        "notes": str(parsed.get("notes") or "").strip(),
+        "raw": content,
+    }
+
+
+def _extract_json_object(text: str) -> str:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+def _normalize_tags(tags: Any) -> list[str]:
+    if isinstance(tags, str):
+        raw_tags: list[Any] = re.split(r"[，,\s]+", tags)
+    elif isinstance(tags, list):
+        raw_tags = tags
     else:
-        coerced = str(value).strip()
-
-    if isinstance(coerced, (int, float)):
-        if spec.minimum is not None and coerced < spec.minimum:
-            raise ValueError(f"{spec.env} must be >= {spec.minimum}")
-        if spec.maximum is not None and coerced > spec.maximum:
-            raise ValueError(f"{spec.env} must be <= {spec.maximum}")
-    return coerced
-
-
-def _format_env_value(spec: SettingSpec, value: Any) -> str:
-    if spec.kind == "bool":
-        return "true" if value else "false"
-    return str(value)
+        raw_tags = []
+    normalized: list[str] = []
+    for tag in raw_tags:
+        value = str(tag).strip().replace(",", " ")
+        if value and value not in normalized:
+            normalized.append(value[:12])
+        if len(normalized) >= 6:
+            break
+    return normalized
 
 
-def _tail(path: Path, lines: int) -> str:
-    if not path.exists():
-        return ""
-    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+def _preview_voice(payload: PreviewRequest, settings: Settings, store: ConfigStore) -> TtsVoice:
+    mode = (payload.voice_mode or settings.qwentts_cpp_voice_mode).strip().lower()
+    if mode == "preset":
+        return TtsVoice(speaker=payload.speaker or settings.qwentts_cpp_voice_preset)
+    if mode == "design":
+        return TtsVoice(instruct=payload.design_prompt or settings.qwentts_cpp_voice_design)
+    if mode == "clone":
+        voice_id = payload.clone_voice_id or settings.qwentts_cpp_clone_voice_id
+        voice = store.voice_profile(voice_id)
+        if voice:
+            return TtsVoice(
+                ref_wav=voice.get("ref_wav", ""),
+                ref_text=voice.get("ref_text", ""),
+                ref_spk=voice.get("ref_spk", ""),
+                ref_rvq=voice.get("ref_rvq", ""),
+            )
+    return TtsVoice.from_settings(settings)
+
+
+def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
+    import io
+
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return out.getvalue()
 
 
 def _kokoro_voice_options() -> list[dict[str, Any]]:
@@ -388,317 +738,24 @@ def _kokoro_voice_options() -> list[dict[str, Any]]:
     ]
 
 
-def _admin_html() -> str:
-    return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hermes STS 控制台</title>
-  <style>{_admin_css()}</style>
-</head>
-<body>
-  <header>
-    <div>
-      <h1>Hermes STS 控制台</h1>
-      <p id="subtitle">Reachy Mini Lite 本地语音链路参数面板</p>
-    </div>
-    <div class="status">
-      <span id="statusDot"></span>
-      <span id="healthText">加载中</span>
-    </div>
-  </header>
-  <main>
-    <aside class="nav">
-      <button class="tab active" data-tab="settings">设置</button>
-      <button class="tab" data-tab="voices">声线</button>
-      <button class="tab" data-tab="diagnostics">诊断</button>
-      <button class="tab" data-tab="logs">日志</button>
-    </aside>
-    <section id="content"></section>
-  </main>
-  <div id="toast"></div>
-  <script>{_admin_js()}</script>
-</body>
-</html>"""
+def _label_for(key: str) -> str:
+    return key.replace("_", " ").title()
 
 
-def _admin_css() -> str:
+def _tail(path: Path, lines: int) -> str:
+    if not path.exists():
+        return ""
+    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+
+
+def _fallback_html() -> str:
     return """
-:root { color-scheme: light; --bg:#f6f7f9; --panel:#ffffff; --text:#1d2430; --muted:#667085; --line:#d8dee8; --soft:#eef3f8; --accent:#2563eb; --ok:#13976b; --warn:#b7791f; --bad:#c2410c; }
-* { box-sizing: border-box; }
-body { margin: 0; font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: var(--bg); }
-header { min-height: 76px; display:flex; align-items:center; justify-content:space-between; padding: 16px 28px; border-bottom:1px solid var(--line); background: var(--panel); }
-h1 { margin:0; font-size:21px; letter-spacing:0; }
-p { margin:4px 0 0; color:var(--muted); }
-.status { display:flex; gap:8px; align-items:center; font-weight:600; }
-#statusDot { width:10px; height:10px; border-radius:50%; background:var(--warn); }
-main { display:grid; grid-template-columns: 168px minmax(0, 1fr); min-height: calc(100vh - 76px); }
-.nav { padding:18px 12px; border-right:1px solid var(--line); background:#eef2f7; }
-.tab { width:100%; height:38px; border:0; background:transparent; color:var(--text); text-align:left; padding:0 12px; border-radius:6px; cursor:pointer; font-weight:600; }
-.tab.active, .tab:hover { background:#dfe7f2; }
-#content { padding:22px 28px 36px; max-width:1180px; }
-.toolbar { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:16px; }
-.toolbar h2 { margin:0; font-size:20px; }
-.toolbar p { max-width:720px; }
-.actions { display:flex; gap:10px; flex-wrap:wrap; }
-button.primary, button.secondary { height:36px; border-radius:6px; padding:0 14px; font-weight:700; cursor:pointer; }
-button.primary { border:1px solid var(--accent); background:var(--accent); color:white; }
-button.secondary { border:1px solid var(--line); background:white; color:var(--text); }
-.overview { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:10px; margin-bottom:16px; }
-.metric { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-height:72px; }
-.metricLabel { color:var(--muted); font-size:12px; font-weight:700; margin-bottom:6px; }
-.metricValue { font-size:15px; font-weight:800; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.metricHint { color:var(--muted); font-size:12px; margin-top:3px; }
-.settingsLayout { display:grid; grid-template-columns: minmax(0, 1fr) 260px; gap:16px; align-items:start; }
-.grid { display:flex; flex-direction:column; gap:10px; }
-.sidePanel { position:sticky; top:18px; background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:14px; }
-.sidePanel h3 { margin:0 0 8px; font-size:14px; }
-.sidePanel p { font-size:12px; margin:0 0 10px; }
-.sidePanel ul { margin:0; padding-left:18px; color:var(--muted); font-size:12px; }
-.group { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:0; overflow:hidden; }
-.group summary { list-style:none; cursor:pointer; padding:14px 16px; font-size:15px; font-weight:800; display:grid; grid-template-columns: 1fr auto auto; gap:12px; align-items:center; }
-.group summary::-webkit-details-marker { display:none; }
-.group summary::after { content:"展开"; color:var(--muted); font-size:12px; font-weight:700; }
-.group[open] summary { border-bottom:1px solid #edf0f5; }
-.group[open] summary::after { content:"收起"; }
-.groupCount { color:var(--muted); font-size:12px; font-weight:700; }
-.groupBody { padding:6px 16px 14px; }
-.field { display:grid; grid-template-columns: minmax(180px, 260px) minmax(220px, 1fr); gap:14px; align-items:center; padding:12px 0; border-top:1px solid #edf0f5; }
-.field:first-of-type { border-top:0; }
-.fieldMeta { min-width:0; }
-label { display:block; font-weight:750; padding:0; }
-.control { min-width:0; }
-input, select, textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px 9px; font:inherit; background:white; color:var(--text); }
-input[type=checkbox] { width:20px; height:20px; margin:0; accent-color:var(--accent); }
-textarea { min-height:96px; resize:vertical; }
-.help { margin-top:4px; color:var(--muted); font-size:12px; }
-.envName { margin-top:4px; color:#98a2b3; font-size:11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.boolControl { display:flex; justify-content:flex-start; align-items:center; min-height:38px; }
-.pill { display:inline-block; margin-left:6px; padding:2px 6px; border-radius:999px; font-size:11px; background:#eef2ff; color:#3447a0; }
-.pill.restart { background:#fff7ed; color:#9a3412; }
-.cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; }
-.voice { background:white; border:1px solid var(--line); border-radius:8px; padding:14px; }
-.voice strong { display:block; margin-bottom:4px; }
-.voice.current { outline:2px solid var(--accent); }
-pre { margin:0; padding:14px; background:#101828; color:#f2f4f7; border-radius:8px; overflow:auto; max-height:520px; white-space:pre-wrap; }
-.diag { background:white; border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:12px; }
-#toast { position:fixed; right:20px; bottom:20px; min-width:220px; max-width:420px; padding:12px 14px; border-radius:8px; background:#1d2939; color:white; opacity:0; transform:translateY(8px); transition:160ms; pointer-events:none; }
-#toast.show { opacity:1; transform:translateY(0); }
-@media (max-width: 980px) { .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); } .settingsLayout { grid-template-columns:1fr; } .sidePanel { position:static; } }
-@media (max-width: 760px) { header { height:auto; padding:14px 16px; align-items:flex-start; gap:10px; flex-direction:column; } main { grid-template-columns:1fr; } .nav { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); padding:12px; } .tab { min-width:0; text-align:center; } #content { padding:16px; } .overview { grid-template-columns:repeat(2, minmax(0, 1fr)); } .toolbar { flex-direction:column; } .field { grid-template-columns:1fr; gap:8px; } }
-@media (max-width: 520px) { .overview { grid-template-columns:1fr; } .nav { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
-"""
-
-
-def _admin_js() -> str:
-    return r"""
-const state = { data: null, tab: "settings", dirty: new Map() };
-const content = document.getElementById("content");
-const toast = document.getElementById("toast");
-
-document.querySelectorAll(".tab").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-    btn.classList.add("active");
-    state.tab = btn.dataset.tab;
-    render();
-  });
-});
-
-function showToast(text) {
-  toast.textContent = text;
-  toast.classList.add("show");
-  setTimeout(() => toast.classList.remove("show"), 2600);
-}
-
-async function load() {
-  const res = await fetch("/api/settings");
-  state.data = await res.json();
-  updateHealth(state.data.health);
-  render();
-}
-
-function updateHealth(health) {
-  document.getElementById("statusDot").style.background = health.status === "ok" ? "var(--ok)" : "var(--bad)";
-  document.getElementById("healthText").textContent =
-    `${health.vad_provider} / ${health.stt_provider} / ${health.tts_provider} / ${health.hermes_model}`;
-}
-
-function render() {
-  if (!state.data) return;
-  if (state.tab === "settings") renderSettings();
-  if (state.tab === "voices") renderVoices();
-  if (state.tab === "diagnostics") renderDiagnostics();
-  if (state.tab === "logs") renderLogs();
-}
-
-function renderSettings() {
-  const health = state.data.health;
-  content.innerHTML = `
-    <div class="toolbar">
-      <div>
-        <h2>常用设置</h2>
-        <p>只保留会影响对话体验的少数参数。按体验目标展开一组调整，保存后会写入 .env。</p>
-      </div>
-      <div class="actions">
-        <button class="secondary" id="reload">重新读取</button>
-        <button class="primary" id="save">保存并应用</button>
-      </div>
-    </div>
-    <div class="overview">
-      ${renderMetric("语音链路", `${health.vad_provider} / ${health.stt_provider}`, health.tts_provider)}
-      ${renderMetric("Hermes", health.hermes_model, health.hermes_base_url)}
-      ${renderMetric("当前声线", `ID ${health.voice}`, voiceName(health.voice))}
-      ${renderMetric("设置项", `${state.data.categories.reduce((sum, group) => sum + group.settings.length, 0)} 项`, "低频项保留在 .env")}
-    </div>
-    <div class="settingsLayout">
-      <div class="grid">
-        ${state.data.categories.map(renderGroup).join("")}
-      </div>
-      <aside class="sidePanel">
-        <h3>调参建议</h3>
-        <p>先按实际问题找分组，避免一次改太多。</p>
-        <ul>
-          <li>反应慢：看“听写截句”和“等待体验”。</li>
-          <li>声音不自然：看“声音”。</li>
-          <li>经常自我打断：看“交互”。</li>
-          <li>回答太长：看“回答长度”。</li>
-        </ul>
-      </aside>
-    </div>`;
-  document.getElementById("reload").onclick = () => { state.dirty.clear(); load(); };
-  document.getElementById("save").onclick = saveSettings;
-  bindInputs();
-}
-
-function renderMetric(label, value, hint) {
-  return `<div class="metric">
-    <div class="metricLabel">${escapeHtml(label)}</div>
-    <div class="metricValue" title="${escapeAttr(value)}">${escapeHtml(value)}</div>
-    <div class="metricHint" title="${escapeAttr(hint)}">${escapeHtml(hint || "")}</div>
-  </div>`;
-}
-
-function renderGroup(group) {
-  return `<details class="group">
-    <summary><span>${escapeHtml(group.name)}</span><span class="groupCount">${group.settings.length} 项</span></summary>
-    <div class="groupBody">
-    ${group.settings.map(renderField).join("")}
-    </div>
-  </details>`;
-}
-
-function renderField(item) {
-  const value = state.dirty.has(item.env) ? state.dirty.get(item.env) : item.value;
-  const badge = item.live ? '<span class="pill">即时</span>' : '<span class="pill restart">需重启/重建</span>';
-  let input = "";
-  if (item.kind === "bool") {
-    input = `<div class="boolControl"><input data-env="${item.env}" data-kind="${item.kind}" type="checkbox" ${value ? "checked" : ""}></div>`;
-  } else if (item.choices && item.choices.length) {
-    const labels = item.choice_labels || {};
-    input = `<select data-env="${item.env}" data-kind="${item.kind}">${item.choices.map(choice => `<option value="${escapeAttr(choice)}" ${String(value) === String(choice) ? "selected" : ""}>${escapeHtml(labels[choice] || choice)}</option>`).join("")}</select>`;
-  } else if (item.kind === "textarea") {
-    input = `<textarea data-env="${item.env}" data-kind="${item.kind}">${escapeHtml(value ?? "")}</textarea>`;
-  } else {
-    const type = item.kind === "password" ? "password" : item.kind === "int" || item.kind === "float" ? "number" : "text";
-    const step = item.kind === "float" ? "0.1" : "1";
-    input = `<input data-env="${item.env}" data-kind="${item.kind}" type="${type}" step="${step}" value="${escapeAttr(value ?? "")}">`;
-  }
-  return `<div class="field">
-    <div class="fieldMeta">
-      <label>${escapeHtml(item.label)} ${badge}</label>
-      ${item.help ? `<div class="help">${escapeHtml(item.help)}</div>` : ""}
-      <div class="envName">${escapeHtml(item.env)}</div>
-    </div>
-    <div class="control">
-      ${input}
-    </div>
-  </div>`;
-}
-
-function voiceName(id) {
-  const item = state.data.kokoro_voices.find(v => v.id === id);
-  return item ? item.name : "未命名声线";
-}
-
-function bindInputs() {
-  content.querySelectorAll("[data-env]").forEach(input => {
-    input.addEventListener("input", () => {
-      const kind = input.dataset.kind;
-      let value = kind === "bool" ? input.checked : input.value;
-      if (kind === "int") value = Number.parseInt(value || "0", 10);
-      if (kind === "float") value = Number.parseFloat(value || "0");
-      state.dirty.set(input.dataset.env, value);
-    });
-  });
-}
-
-async function saveSettings() {
-  if (!state.dirty.size) { showToast("没有需要保存的改动"); return; }
-  const values = Object.fromEntries(state.dirty.entries());
-  const res = await fetch("/api/settings", {
-    method: "PATCH",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ values })
-  });
-  if (!res.ok) { showToast("保存失败"); return; }
-  const result = await res.json();
-  state.dirty.clear();
-  await load();
-  const restart = result.restart_required?.length ? `；这些项建议重启服务：${result.restart_required.join(", ")}` : "";
-  showToast(`已保存 ${Object.keys(result.changed).length} 项${restart}`);
-}
-
-function renderVoices() {
-  const current = state.data.health.voice;
-  content.innerHTML = `
-    <div class="toolbar"><h2>Kokoro 中文声线</h2><div class="actions"><button class="secondary" id="reload">刷新</button></div></div>
-    <div class="cards">${state.data.kokoro_voices.map(v => `
-      <div class="voice ${v.id === current ? "current" : ""}">
-        <strong>${v.id} · ${escapeHtml(v.name)}</strong>
-        <div>${escapeHtml(v.note)}</div>
-        <button class="secondary" data-voice="${v.id}">设为当前声线</button>
-      </div>`).join("")}</div>`;
-  document.getElementById("reload").onclick = load;
-  content.querySelectorAll("[data-voice]").forEach(btn => {
-    btn.onclick = async () => {
-      state.dirty.set("SHERPA_KOKORO_VOICE", Number.parseInt(btn.dataset.voice, 10));
-      await saveSettings();
-    };
-  });
-}
-
-async function renderDiagnostics() {
-  content.innerHTML = `<div class="toolbar"><h2>诊断</h2><div class="actions"><button class="secondary" id="checkHermes">检查 Hermes</button></div></div><div id="diag"></div>`;
-  const diag = document.getElementById("diag");
-  diag.innerHTML = `<div class="diag"><strong>当前链路</strong><p>${escapeHtml(JSON.stringify(state.data.health))}</p><p>.env：${escapeHtml(state.data.env_path)}</p></div>`;
-  document.getElementById("checkHermes").onclick = async () => {
-    diag.innerHTML = `<div class="diag">正在检查 Hermes /models ...</div>`;
-    const res = await fetch("/api/diagnostics/hermes");
-    const data = await res.json();
-    diag.innerHTML = `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
-  };
-}
-
-async function renderLogs() {
-  content.innerHTML = `<div class="toolbar"><h2>日志</h2><div class="actions"><button class="secondary" id="refreshLogs">刷新日志</button></div></div><pre id="logBox">加载中</pre>`;
-  document.getElementById("refreshLogs").onclick = loadLogs;
-  await loadLogs();
-}
-
-async function loadLogs() {
-  const res = await fetch("/api/logs?lines=160");
-  const data = await res.json();
-  document.getElementById("logBox").textContent = `STDERR\n${data.stderr || "(empty)"}\n\nSTDOUT\n${data.stdout || "(empty)"}`;
-}
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
-}
-function escapeAttr(value) { return escapeHtml(value); }
-
-load().catch(err => {
-  content.innerHTML = `<pre>${escapeHtml(err.stack || err.message || err)}</pre>`;
-});
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="utf-8"><title>Hermes STS 控制台</title></head>
+  <body style="font-family: system-ui; background:#111; color:#eee; padding:32px">
+    <h1>Hermes STS 控制台</h1>
+    <p>前端构建产物不存在。请运行 <code>cd admin_ui && npm install && npm run build</code>。</p>
+  </body>
+</html>
 """

@@ -1,27 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="$ROOT/.venv-sts/bin/python"
-ENV_FILE="$ROOT/.env"
-
-dotenv_value() {
-  local name="$1"
-  local default="$2"
-  if [[ -f "$ENV_FILE" ]]; then
-    local line
-    line="$(grep -E "^${name}=" "$ENV_FILE" | head -n1 || true)"
-    if [[ -n "$line" ]]; then
-      local value="${line#*=}"
-      value="${value%$'\r'}"
-      value="${value%\"}"
-      value="${value#\"}"
-      printf '%s' "$value"
-      return
-    fi
-  fi
-  printf '%s' "$default"
-}
 
 step() {
   echo "==> $*"
@@ -63,7 +44,16 @@ stop_pid() {
   return 0
 }
 
-PORT="$(dotenv_value HERMES_STS_PORT 8765)"
+if [[ -x "$PYTHON" ]]; then
+  cd "$ROOT"
+  PORT="$("$PYTHON" - <<'PY'
+from hermes_sts.config import settings
+print(settings.port)
+PY
+)"
+else
+  PORT=8765
+fi
 owners=()
 mapfile -t owners < <(port_owner_pids "$PORT")
 

@@ -19,10 +19,12 @@ from starlette.websockets import WebSocketDisconnect
 
 from hermes_sts.audio import Utterance, chunk_pcm16
 from hermes_sts.config import Settings
+from hermes_sts.config_store import ConfigStore
 from hermes_sts.llm import LLMProvider, LLMResponse, Message, ToolCall
+from hermes_sts.persona import build_persona_instructions
 from hermes_sts.stt import SttProvider
 from hermes_sts.tools import ToolExecution, ToolRegistry
-from hermes_sts.tts import TtsProvider
+from hermes_sts.tts import TtsProvider, TtsVoice
 from hermes_sts.vad import VadProvider, build_vad
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,8 @@ class RealtimeSession:
     pending_tool_results: list[Message] = field(default_factory=list)
     pending_tool_context: list[Message] | None = None
     next_response_instructions: str = ""
+    session_voice: TtsVoice | None = None
+    next_response_voice: TtsVoice | None = None
     session_id: str = field(default_factory=lambda: f"sess_{uuid.uuid4().hex}")
 
     def __post_init__(self) -> None:
@@ -156,8 +160,14 @@ class RealtimeSession:
                         started_at=time.perf_counter(),
                     )
                     turn_instructions = self._consume_response_instructions()
+                    turn_voice = self._consume_response_voice()
                     self.processing = self._create_processing_task(
-                        lambda: self._process_text_turn(transcript, metrics, instructions=turn_instructions),
+                        lambda: self._process_text_turn(
+                            transcript,
+                            metrics,
+                            instructions=turn_instructions,
+                            voice=turn_voice,
+                        ),
                         metrics=metrics,
                     )
                 elif self.pending_tool_context and self.pending_tool_results:
@@ -167,8 +177,13 @@ class RealtimeSession:
                         started_at=time.perf_counter(),
                     )
                     turn_instructions = self._consume_response_instructions()
+                    turn_voice = self._consume_response_voice()
                     self.processing = self._create_processing_task(
-                        lambda: self._process_tool_result_turn(metrics, instructions=turn_instructions),
+                        lambda: self._process_tool_result_turn(
+                            metrics,
+                            instructions=turn_instructions,
+                            voice=turn_voice,
+                        ),
                         metrics=metrics,
                     )
                 else:
@@ -227,12 +242,17 @@ class RealtimeSession:
     def _apply_session_config(self, session: dict[str, Any]) -> None:
         if "instructions" in session:
             self.instructions = str(session.get("instructions") or "")
+        if "voice" in session:
+            self.session_voice = TtsVoice.from_realtime(session.get("voice"))
         if isinstance(session.get("tools"), list):
             self.tools.set_client_tools(session.get("tools"))
         logger.info(
-            "Session updated session_id=%s instructions_chars=%d client_tools=%d local_tools=%d",
+            "Session updated session_id=%s instructions_chars=%d persona_source=%s voice_source=%s ws_voice=%s client_tools=%d local_tools=%d",
             self.session_id,
             len(self.instructions),
+            self.settings.sts_persona_source,
+            self.settings.tts_voice_source,
+            self._voice_label(self.session_voice),
             len(self.tools.client_tool_names()),
             len(self.tools.local_tool_names()),
         )
@@ -241,6 +261,8 @@ class RealtimeSession:
         instructions = response_config.get("instructions")
         if isinstance(instructions, str) and instructions.strip():
             self.next_response_instructions = instructions.strip()
+        if "voice" in response_config:
+            self.next_response_voice = TtsVoice.from_realtime(response_config.get("voice"))
         if isinstance(response_config.get("tools"), list):
             self.tools.set_client_tools(response_config.get("tools"))
         logger.debug(
@@ -319,7 +341,40 @@ class RealtimeSession:
     def _consume_response_instructions(self) -> str:
         instructions = self.next_response_instructions
         self.next_response_instructions = ""
-        return self._merge_instructions(self.instructions, instructions)
+        return self._effective_instructions(instructions)
+
+    def _effective_instructions(self, response_instructions: str | None = None) -> str:
+        settings_persona = build_persona_instructions(self.settings)
+        if self.settings.sts_persona_source.strip().lower() == "ws":
+            ws_instructions = self._merge_instructions(self.instructions, response_instructions or "")
+            return ws_instructions or settings_persona
+        return settings_persona
+
+    def _consume_response_voice(self) -> TtsVoice | None:
+        voice = self.next_response_voice
+        self.next_response_voice = None
+        return voice
+
+    def _effective_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
+        if self.settings.tts_voice_source.strip().lower() == "ws":
+            for voice in (response_voice, self.session_voice):
+                if voice and not voice.is_empty():
+                    return voice
+        return TtsVoice.from_settings(self.settings)
+
+    @staticmethod
+    def _voice_label(voice: TtsVoice | None) -> str:
+        if not voice or voice.is_empty():
+            return ""
+        if voice.speaker:
+            return f"speaker:{voice.speaker}"
+        if voice.ref_spk or voice.ref_rvq:
+            return "clone:preencoded"
+        if voice.ref_wav:
+            return "clone:wav"
+        if voice.instruct:
+            return "design"
+        return "custom"
 
     async def _decode_audio_append(self, msg: dict[str, Any]) -> bytes | None:
         encoded = msg.get("audio")
@@ -392,13 +447,19 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         *,
         instructions: str | None = None,
+        voice: TtsVoice | None = None,
     ) -> None:
         try:
             transcript = transcript.strip()
             if not transcript:
                 self.state = "idle"
                 return
-            await self._respond_with_agent_wait(transcript, metrics=metrics, instructions=instructions)
+            await self._respond_with_agent_wait(
+                transcript,
+                metrics=metrics,
+                instructions=instructions,
+                voice=voice,
+            )
             self.state = "idle"
         except asyncio.CancelledError:
             self.state = "cancelled"
@@ -413,6 +474,7 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         *,
         instructions: str | None = None,
+        voice: TtsVoice | None = None,
     ) -> None:
         context = self.pending_tool_context or []
         results = list(self.pending_tool_results)
@@ -429,11 +491,12 @@ class RealtimeSession:
                 len(context),
                 len(results),
             )
-            final = await self.llm.chat(messages=messages, instructions=instructions or self.instructions)
+            instructions = instructions if instructions is not None else self._effective_instructions()
+            final = await self.llm.chat(messages=messages, instructions=instructions)
             if metrics:
                 metrics.llm_ms = (time.perf_counter() - started) * 1000
             text = final.text.strip() or "好的，已完成。"
-            await self._send_response(text, transcript=text, metrics=metrics)
+            await self._send_response(text, transcript=text, metrics=metrics, voice=voice)
             self.state = "idle"
         except asyncio.CancelledError:
             self.state = "cancelled"
@@ -456,7 +519,10 @@ class RealtimeSession:
         *,
         metrics: TurnMetrics | None = None,
         instructions: str | None = None,
+        voice: TtsVoice | None = None,
     ) -> None:
+        instructions = instructions if instructions is not None else self._effective_instructions()
+        voice = self._effective_tts_voice(voice)
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
         llm_task = asyncio.create_task(
@@ -465,7 +531,7 @@ class RealtimeSession:
                 response_id=response_id,
                 item_id=item_id,
                 metrics=metrics,
-                instructions=instructions or self.instructions,
+                instructions=instructions,
             )
         )
         filler_texts = self._filler_texts_for(transcript)
@@ -473,7 +539,9 @@ class RealtimeSession:
         started = time.perf_counter()
         first_filler_pcm_task = None
         if filler_texts and self.settings.hermes_max_fillers > 0:
-            first_filler_pcm_task = asyncio.create_task(self._synthesize_tts(filler_texts[0], metrics=metrics))
+            first_filler_pcm_task = asyncio.create_task(
+                self._synthesize_tts(filler_texts[0], metrics=metrics, voice=voice)
+            )
 
         try:
             try:
@@ -485,7 +553,7 @@ class RealtimeSession:
                     first_filler_pcm_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await first_filler_pcm_task
-                await self._send_response(answer, transcript=answer, metrics=metrics)
+                await self._send_response(answer, transcript=answer, metrics=metrics, voice=voice)
                 return
             except asyncio.TimeoutError:
                 pass
@@ -522,13 +590,20 @@ class RealtimeSession:
                             response_id=response_id,
                             item_id=item_id,
                             metrics=metrics,
+                            voice=voice,
                         )
                         filler_count += 1
 
             if answer is None:
                 answer = await llm_task
 
-            await self._send_text_segments(answer, response_id=response_id, item_id=item_id, metrics=metrics)
+            await self._send_text_segments(
+                answer,
+                response_id=response_id,
+                item_id=item_id,
+                metrics=metrics,
+                voice=voice,
+            )
             await self._send_response_done(response_id=response_id, item_id=item_id, transcript=answer)
         except asyncio.CancelledError:
             logger.info("Cancelling in-flight LLM turn session_id=%s response_id=%s", self.session_id, response_id)
@@ -555,7 +630,7 @@ class RealtimeSession:
         started = time.perf_counter()
         response = await self.llm.chat(
             transcript,
-            instructions=instructions or self.instructions,
+            instructions=instructions,
             tools=self.tools.openai_tools(),
         )
         if metrics:
@@ -601,7 +676,7 @@ class RealtimeSession:
             )
             return response.text.strip()
         final_started = time.perf_counter()
-        final = await self.llm.chat(messages=messages, instructions=instructions or self.instructions)
+        final = await self.llm.chat(messages=messages, instructions=instructions)
         if metrics:
             metrics.llm_ms += (time.perf_counter() - final_started) * 1000
         return final.text or self._fallback_text_for(transcript)
@@ -657,9 +732,9 @@ class RealtimeSession:
             "工具名、JSON、动作参数和表情标签不能作为语音内容读出来。"
             "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
         )
-        effective = instructions or self.instructions
+        effective = instructions if instructions is not None else self._effective_instructions()
         if effective:
-            return f"{base}\n\nReachy 会话附加指令：\n{effective[:2500]}"
+            return f"{base}\n\n当前人格和表达风格：\n{effective[:2500]}"
         return base
 
     @staticmethod
@@ -711,11 +786,19 @@ class RealtimeSession:
         *,
         transcript: str,
         metrics: TurnMetrics | None = None,
+        voice: TtsVoice | None = None,
     ) -> None:
+        voice = self._effective_tts_voice(voice)
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
         await self._send_response_created(response_id, item_id, metrics=metrics)
-        await self._send_text_segments(text, response_id=response_id, item_id=item_id, metrics=metrics)
+        await self._send_text_segments(
+            text,
+            response_id=response_id,
+            item_id=item_id,
+            metrics=metrics,
+            voice=voice,
+        )
         await self._send_response_done(response_id=response_id, item_id=item_id, transcript=transcript)
 
     async def _send_response_created(
@@ -743,6 +826,7 @@ class RealtimeSession:
         response_id: str,
         item_id: str,
         metrics: TurnMetrics | None = None,
+        voice: TtsVoice | None = None,
     ) -> None:
         for segment in self._split_tts_segments(self._sanitize_tts_text(text)):
             await self._send_audio_segment(
@@ -750,6 +834,7 @@ class RealtimeSession:
                 response_id=response_id,
                 item_id=item_id,
                 metrics=metrics,
+                voice=voice,
             )
 
     async def _send_audio_segment(
@@ -759,13 +844,32 @@ class RealtimeSession:
         response_id: str,
         item_id: str,
         metrics: TurnMetrics | None = None,
+        voice: TtsVoice | None = None,
     ) -> None:
-        pcm16 = await self._synthesize_tts(text, metrics=metrics)
+        pcm16 = await self._synthesize_tts(text, metrics=metrics, voice=voice)
         await self._send_pcm_segment(pcm16, response_id=response_id, item_id=item_id, metrics=metrics)
 
-    async def _synthesize_tts(self, text: str, *, metrics: TurnMetrics | None = None) -> bytes:
+    async def _synthesize_tts(
+        self,
+        text: str,
+        *,
+        metrics: TurnMetrics | None = None,
+        voice: TtsVoice | None = None,
+    ) -> bytes:
+        voice = self._effective_tts_voice(voice)
         started = time.perf_counter()
-        pcm16 = await self.tts.synthesize(text)
+        try:
+            pcm16 = await self.tts.synthesize(text, voice=voice)
+        except Exception:
+            if self.settings.tts_voice_source.strip().lower() != "ws" or voice.is_empty():
+                raise
+            fallback_voice = TtsVoice.from_settings(self.settings)
+            logger.warning(
+                "TTS failed with WS voice %s; retrying configured voice",
+                self._voice_label(voice),
+                exc_info=True,
+            )
+            pcm16 = await self.tts.synthesize(text, voice=fallback_voice)
         elapsed_ms = (time.perf_counter() - started) * 1000
         if metrics:
             metrics.tts_segments += 1
@@ -903,9 +1007,9 @@ class RealtimeSession:
             "工具名、JSON、动作参数和表情标签不能作为语音内容读出来。"
             "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
         )
-        effective = instructions or self.instructions
+        effective = instructions if instructions is not None else self._effective_instructions()
         if effective:
-            return f"{base}\n\nReachy 会话附加指令：\n{effective[:2500]}"
+            return f"{base}\n\n当前人格和表达风格：\n{effective[:2500]}"
         return base
 
     def _filler_texts_for(self, transcript: str) -> list[str]:
@@ -1101,6 +1205,22 @@ class RealtimeSession:
         if not metrics or not self.settings.latency_logging:
             return
         total_ms = (time.perf_counter() - metrics.started_at) * 1000
+        value = {
+            "turn_id": metrics.turn_id,
+            "status": status,
+            "utterance_ms": metrics.utterance_ms,
+            "stt_ms": metrics.stt_ms,
+            "llm_ms": metrics.llm_ms,
+            "first_tts_ms": metrics.first_tts_ms,
+            "first_audio_ms": metrics.first_audio_ms,
+            "total_ms": total_ms,
+            "tts_segments": metrics.tts_segments,
+            "audio_chunks": metrics.audio_chunks,
+        }
+        try:
+            ConfigStore.default().add_metric("turn", value)
+        except Exception:
+            logger.debug("Failed to persist turn metrics", exc_info=True)
         logger.info(
             (
                 "Turn latency %s status=%s utterance_ms=%d stt_ms=%.0f llm_ms=%.0f "

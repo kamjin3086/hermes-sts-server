@@ -27,66 +27,165 @@ Reachy Mini
 The service expects mono PCM16 little-endian audio at `HERMES_STS_SAMPLE_RATE`
 (default `16000`).
 
+## Admin Console And Configuration
+
+Open the local console after the server starts:
+
+```text
+http://127.0.0.1:8765/
+```
+
+Configuration is UI-first. Runtime settings live in
+`data/hermes_sts.sqlite3`, and the console is the place to edit them. This
+project no longer reads `.env` files.
+
+The console includes:
+
+- Status dashboard: current role, TTS engine, voice, Qwen model availability,
+  recent preview latency, real turn latency, RTF, uptime, and switchable voice
+  waveform styles.
+- Role and voice studio: persona prompt and TTS voice are edited together.
+  Selecting a persona preset immediately shows the full prompt in an editable
+  text box; saving persists it for refreshes and restarts.
+- Voice workshop: call the configured Hermes/LLM backend to generate a complete
+  persona + Qwen3TTS voice proposal, preview it, apply it, or save it as a
+  reusable role.
+- Seed A/B deck: generate five Qwen Base voice seeds, preview candidates,
+  collect the good ones with tags, filter saved voices, and delete with
+  confirmation.
+- Music bay: select local audio files in the browser and play them from the
+  dashboard while monitoring the assistant.
+- Source switches: choose whether persona and voice are controlled by the
+  console or by Reachy WebSocket profile/session data.
+- First setup: fill Hermes/LLM, STT, TTS, and Qwen model paths from the browser.
+- Advanced settings: model paths, backend, debug args, VAD, Kokoro fallback, and
+  other low-frequency controls.
+
+The Vite React frontend lives in `admin_ui/`. Build the static console with:
+
+```bash
+cd admin_ui
+npm install
+npm run build
+```
+
+FastAPI serves the built console from `admin_ui/dist`. During UI development,
+run `npm run dev` and use the Vite proxy to the backend.
+
 ## Recommended Providers
 
 Recommended local, Chinese-first setup:
 
 - VAD: `sherpa_silero`
 - STT: `sherpa_sensevoice`
-- TTS: `sherpa_kokoro`
+- TTS: `qwen3tts`
 - LLM: `hermes_agent` at `http://127.0.0.1:8642/v1`
 
-This keeps the STS service small while still running VAD/STT/TTS locally on
-Windows and Fedora/Linux.
+This keeps the STS service local-first while using the current Fedora + AMD
+Vulkan machine for the higher-quality Qwen3TTS voice path.
 
-Use the same `.env` provider settings on Windows and Fedora/Linux for matching
-behavior. `sapi` is kept only as a Windows fallback; the recommended path on
-both platforms is `sherpa_kokoro`.
+`sherpa_kokoro` remains available as a stable low-latency fallback. Windows
+support is kept for legacy use but is no longer the primary target.
 
-## Windows Setup
+### Fedora AMD Qwen3TTS
 
-```powershell
-.\scripts\setup_venv.ps1
-Copy-Item .env.example .env
-notepad .env
-.\scripts\download_models.ps1
-.\scripts\start_sts_pipeline.ps1
+The default `qwen3tts` provider runs `qwentts.cpp` as an isolated C++/GGML
+subprocess with `GGML_BACKEND=Vulkan0`, then converts the generated 24 kHz WAV
+to the STS server's 16 kHz PCM16 stream.
+
+Install/build the lab runtime and download the Q4 GGUF model:
+
+```bash
+# Optional: let the script install Fedora Vulkan build packages with sudo.
+QWENTTS_INSTALL_SYSTEM_DEPS=1 ./scripts/qwen/setup_qwentts_lab.sh
+
+# Re-run later without sudo once dependencies are present.
+./scripts/qwen/setup_qwentts_lab.sh
 ```
 
-Stop the service:
+Benchmark Qwen3TTS against the checked-in prompt set:
 
-```powershell
-.\scripts\stop_sts_pipeline.ps1
+```bash
+./scripts/qwen/bench_qwentts_lab.sh
 ```
 
-The desktop BAT remains available:
+Smoke-test the configured provider from `hermes-sts-server`:
 
-```powershell
-.\scripts\Start Hermes STS Pipeline.bat
+```bash
+./scripts/qwen/smoke_qwen3tts_provider.sh
 ```
+
+Qwen3TTS voice modes in the console are mapped directly to qwentts.cpp modes:
+
+- Default: Base model default voice. Base does not accept `--speaker` or
+  `--instruct`.
+- Preset: CustomVoice model with `--speaker`. Supported speakers are `serena`,
+  `vivian`, `uncle_fu`, `ryan`, `aiden`, `ono_anna`, `sohee`, `eric`, and
+  `dylan`.
+- Design: VoiceDesign model with `--instruct` driven by a text voice
+  description.
+- Clone: upload a reference WAV and transcript; the server stores it in
+  `data/voices/<voice_id>/` and runs `qwen-codec --talker` to create reusable
+  `.spk`/`.rvq` files.
+
+qwentts.cpp defaults to `--seed -1`, which intentionally randomizes sampling.
+Hermes STS fixes the seed to `42` by default, so the same text and voice mode
+stay stable across turns. Set the advanced "fixed voice seed" value to `-1`
+only when you intentionally want stochastic variation.
+
+## Control Console Roadmap
+
+Implemented:
+
+- AI voice workshop for persona + voice prompt + seed proposals.
+- One-click save/apply of AI-generated complete roles.
+- Tagged saved voice seeds with filtering and delete confirmation.
+- Five-slot A/B seed audition deck.
+- Dashboard waveform style switching, uptime, turn latency, and local browser
+  music bay.
+
+Still worth doing:
+
+- Server-side music library under `data/music/`, persistent playlists, and
+  optional voice ducking while the assistant speaks.
+- Richer voice profile metadata such as rating, notes, last-used time, and
+  favorite sorting.
+- Server-side pre-render/cache for A/B candidates so five voices can be prepared
+  ahead of playback.
+- More runtime metrics from the Reachy client side, such as user interruption
+  intent, tool latency, and robot action success/failure.
+- Import/export bundles for roles, prompts, saved seed voices, and clone
+  profiles.
+
+## Windows Scripts
+
+Windows is no longer the primary target. Legacy PowerShell and BAT helpers were
+moved to `scripts/windows/` and are kept only as compatibility references.
 
 ## Fedora/Linux Setup
 
 Install Python 3.12 and `uv`, then run:
 
 ```bash
-./scripts/setup_venv.sh
-cp .env.example .env
-${EDITOR:-vi} .env
-./scripts/download_models.sh
-./scripts/start_sts_pipeline.sh
+./scripts/dev/setup_venv.sh
+./scripts/dev/download_models.sh
+./scripts/qwen/setup_qwentts_lab.sh
+cd admin_ui && npm install && npm run build && cd ..
+./scripts/service/start_sts_pipeline.sh
 ```
+
+Then open `http://127.0.0.1:8765/` and finish configuration in the console.
 
 Stop the service:
 
 ```bash
-./scripts/stop_sts_pipeline.sh
+./scripts/service/stop_sts_pipeline.sh
 ```
 
 Install as a user-level systemd service:
 
 ```bash
-./scripts/install_user_service.sh
+./scripts/service/install_user_service.sh
 systemctl --user status hermes-sts-server.service
 journalctl --user -u hermes-sts-server.service -f
 ```
@@ -101,7 +200,7 @@ systemctl --user stop hermes-sts-server.service
 Uninstall the user service:
 
 ```bash
-./scripts/uninstall_user_service.sh
+./scripts/service/uninstall_user_service.sh
 ```
 
 If `uv` is missing:
@@ -169,41 +268,82 @@ Minimal Realtime tool shape:
 }
 ```
 
-Prompt policy: pass the Conversation App profile instructions to the LLM, but
-only as additive session instructions. STS keeps its own base system prompt for
-voice brevity, language matching, tool-use rules, and "do not speak JSON/tool
-arguments/expression tags" behavior. This keeps app-selected personalities and
-tool mappings effective without letting a profile accidentally break the audio
-contract.
+Prompt/persona policy: STS keeps its own base system prompt for voice brevity,
+language matching, tool-use rules, and "do not speak JSON/tool
+arguments/expression tags" behavior. The persona layer is explicitly selected:
+
+```text
+persona source = console     # use the server/admin UI persona, ignore WS instructions
+persona source = Reachy      # use Reachy session/response instructions, fallback to settings
+persona preset = operator, systems_analyst, news_anchor, field_operator, baritone_male, custom
+```
+
+Use `settings` when the admin UI should own the assistant personality. Use `ws`
+when the Reachy Mini Conversation App profile should own it. This mirrors voice
+selection while keeping persona text and TTS voice independent.
 
 ## Provider Configuration
 
+Use the admin console for provider configuration. The details below describe
+what the console writes into SQLite.
+
 Main provider switches:
 
+Recommended provider values are `sherpa_silero`, `sherpa_sensevoice`,
+`qwen3tts`, and `hermes_agent`.
+
+Qwen3TTS provider settings:
+
+The Qwen fields in the console map to the qwentts.cpp binary, Base model,
+CustomVoice model, VoiceDesign model, codec model, backend, language, voice
+mode, selected speaker, voice description, clone voice id, fixed seed, and
+optional extra args.
+
+Voice source and cloning:
+
+Use "界面控制" when the server should always use the selected console voice.
+Use "跟随 WS" only when the Reachy profile should override it.
+
+`Reachy Mini` may pass `voice` through `session.update` or `response.create`.
+The server accepts either a simple speaker string or a structured object:
+
+```json
+{"voice": "vivian"}
+```
+
+```json
+{
+  "voice": {
+    "speaker": "",
+    "instruct": "",
+    "ref_wav": "/path/to/reference.wav",
+    "ref_text": "/path/to/reference.txt",
+    "ref_spk": "/path/to/reference.spk",
+    "ref_rvq": "/path/to/reference.rvq"
+  }
+}
+```
+
+Pre-encode a clone reference for lower per-utterance overhead:
+
+```bash
+./scripts/qwen/encode_qwen3tts_clone.sh /path/to/reference.wav
+```
+
+Waiting fillers, fallback text, and normal assistant responses all use the same
+effective voice selected by `STS_TTS_VOICE_SOURCE`.
+
+To fall back to Kokoro:
+
 ```text
-STS_VAD_PROVIDER=sherpa_silero
-STS_STT_PROVIDER=sherpa_sensevoice
 STS_TTS_PROVIDER=sherpa_kokoro
-STS_LLM_PROVIDER=hermes_agent
 ```
 
-For a no-model smoke test, set:
+For a no-model smoke test, switch VAD/STT/TTS to `energy`, `dev`, and `tone` in
+the console.
 
-```text
-STS_VAD_PROVIDER=energy
-STS_STT_PROVIDER=dev
-STS_TTS_PROVIDER=tone
-HERMES_ALLOW_FALLBACK=true
-```
-
-To call a direct OpenAI-compatible model instead of Hermes Agent:
-
-```text
-STS_LLM_PROVIDER=openai_compatible
-LLM_BASE_URL=http://127.0.0.1:8000/v1
-LLM_MODEL=your-model
-LLM_API_KEY=
-```
+To call a direct OpenAI-compatible model instead of Hermes Agent, switch the LLM
+provider in the console and fill the base URL, model, and API key.
 
 ## Latency and Duplex Settings
 
@@ -213,17 +353,9 @@ The server logs one summary line per completed turn:
 Turn latency turn_x status=completed utterance_ms=... stt_ms=... llm_ms=... first_tts_ms=... first_audio_ms=... total_ms=...
 ```
 
-Useful tuning switches:
-
-```text
-STS_LATENCY_LOGGING=true
-STS_SUPPRESS_INPUT_WHILE_SPEAKING=true
-STS_RESPONSE_AUDIO_CHUNK_MS=80
-STS_TTS_SEGMENT_MIN_CHARS=24
-STS_TTS_SEGMENT_MAX_CHARS=90
-STS_TTS_STRIP_BRACKETED_CUES=true
-VAD_MIN_SILENCE_SECONDS=0.5
-```
+Useful tuning switches live in the console's advanced settings: latency logging,
+input suppression while speaking, response chunk size, TTS segment sizes,
+bracketed-cue stripping, and VAD silence timing.
 
 `STS_SUPPRESS_INPUT_WHILE_SPEAKING=true` prevents the robot from hearing its own
 TTS output as a new user turn. Set it to `false` only when you need open-mic
@@ -233,20 +365,9 @@ barge-in during playback and your speaker/mic isolation is good.
 `[呲牙]` or `（笑）` from being spoken by TTS. Ordinary parenthetical content like
 `（杭州）` is preserved.
 
-`.env.example` intentionally keeps only the common knobs. Advanced fallback
-settings such as `LLM_FALLBACK_*`, `LEMONADE_*`, `SAPI_VOICE`, and generic
-`SHERPA_TTS_*` are still supported by `hermes_sts.config.Settings`, but are not
-needed for the recommended Windows/Fedora setup.
-
 ## Health Checks
 
 Fast local checks that do not need running models or a live STS server:
-
-Windows:
-
-```powershell
-.\scripts\run_tests.ps1
-```
 
 Fedora/Linux:
 
@@ -274,9 +395,9 @@ Fedora/Linux:
 
 ```bash
 curl http://127.0.0.1:8765/health
-./.venv-sts/bin/python scripts/ws_smoke.py
-./.venv-sts/bin/python scripts/ws_turn_smoke.py
-./.venv-sts/bin/python scripts/ws_cancel_smoke.py
+./.venv-sts/bin/python scripts/smoke/ws_smoke.py
+./.venv-sts/bin/python scripts/smoke/ws_turn_smoke.py
+./.venv-sts/bin/python scripts/smoke/ws_cancel_smoke.py
 ```
 
 `ws_turn_smoke.py` uses generated audio and is best suited to the `energy` VAD
@@ -289,15 +410,13 @@ Logs are written under `logs/`.
 
 Do not commit:
 
-- `.env`
 - `.venv-sts/`
 - `logs/`
 - `models/`
 - `*.egg-info/`
 - `__pycache__/`
 
-Large ONNX model files should be downloaded with `scripts/download_models.ps1`
-or `scripts/download_models.sh`.
+Large ONNX model files should be downloaded with `scripts/dev/download_models.sh`.
 
 ## Roadmap
 
@@ -311,12 +430,13 @@ Near-term work should keep the project reliable, local-first, and small:
    - Keep Hermes Agent mode unchanged, because Hermes may already own its own
      retrieval/tooling layer.
 
-2. Better voice quality without heavy PyTorch runtime.
-   - Evaluate OmniVoice or an equivalent non-PyTorch/GPU-accelerated path.
-   - Preserve the current `sherpa_kokoro` provider as the stable default until
-     the new provider has comparable startup reliability and latency.
-   - Measure first-audio latency, segment synthesis time, voice naturalness, and
-     Windows/Fedora parity before making it recommended.
+2. Qwen3TTS latency improvements.
+   - Move from per-segment CLI subprocesses to the bundled `tts-server` or a
+     small persistent process when startup cost becomes the bottleneck.
+   - Keep `sherpa_kokoro` as the quick fallback for low-resource or broken-GPU
+     sessions.
+   - Evaluate OmniVoice only if Qwen3TTS naturalness or voice-design controls
+     are not sufficient.
 
 3. Local memory for direct LLM mode.
    - Add a small memory provider abstraction, used only when

@@ -214,7 +214,7 @@ class BaseOpenAIChatProvider:
             "不要把工具名、JSON 参数、动作枚举或表情标签写进要播报的文字里。"
         )
         if instructions:
-            return f"{system}\n\nReachy 会话附加指令：\n{instructions[:2500]}"
+            return f"{system}\n\n当前人格和表达风格：\n{instructions[:2500]}"
         return system
 
     @staticmethod

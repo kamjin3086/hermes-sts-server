@@ -4,15 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover
-    def load_dotenv(*_args, **_kwargs) -> bool:
-        return False
-
-
 ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / ".env", override=False)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -102,6 +94,9 @@ class Settings:
     llm_fallback_api_key: str = os.getenv("LLM_FALLBACK_API_KEY", "")
     llm_fallback_timeout_seconds: float = _float_env("LLM_FALLBACK_TIMEOUT_SECONDS", 180.0)
     llm_fallback_max_tokens: int = _int_env("LLM_FALLBACK_MAX_TOKENS", 160)
+    sts_persona_source: str = os.getenv("STS_PERSONA_SOURCE", "settings")
+    sts_persona_preset: str = os.getenv("STS_PERSONA_PRESET", "operator")
+    sts_persona_custom: str = os.getenv("STS_PERSONA_CUSTOM", "")
 
     stt_provider: str = os.getenv("STS_STT_PROVIDER", "dev")
     dev_transcript: str = os.getenv("HERMES_STS_DEV_TRANSCRIPT", "hello")
@@ -117,7 +112,7 @@ class Settings:
     sherpa_sensevoice_language: str = os.getenv("SHERPA_SENSEVOICE_LANGUAGE", "zh")
     sherpa_sensevoice_use_itn: bool = _bool_env("SHERPA_SENSEVOICE_USE_ITN", True)
 
-    tts_provider: str = os.getenv("STS_TTS_PROVIDER", "sapi")
+    tts_provider: str = os.getenv("STS_TTS_PROVIDER", "qwen3tts")
     sapi_voice: str = os.getenv("SAPI_VOICE", "")
     sherpa_tts_model: str = _path_env("SHERPA_TTS_MODEL")
     sherpa_tts_tokens: str = _path_env("SHERPA_TTS_TOKENS")
@@ -129,6 +124,47 @@ class Settings:
     sherpa_kokoro_data_dir: str = _path_env("SHERPA_KOKORO_DATA_DIR")
     sherpa_kokoro_voice: int = _int_env("SHERPA_KOKORO_VOICE", 0)
     sherpa_kokoro_lang: str = os.getenv("SHERPA_KOKORO_LANG", "")
+    tts_voice_source: str = os.getenv("STS_TTS_VOICE_SOURCE", "settings")
+    qwentts_cpp_bin: str = _path_env(
+        "QWENTTS_CPP_BIN",
+        "../hermes-tts-lab/src/qwentts.cpp/build/qwen-tts",
+    )
+    qwentts_cpp_model: str = _path_env(
+        "QWENTTS_CPP_MODEL",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-base-Q4_K_M.gguf",
+    )
+    qwentts_cpp_codec: str = _path_env(
+        "QWENTTS_CPP_CODEC",
+        "../hermes-tts-lab/models/qwen-tokenizer-12hz-Q4_K_M.gguf",
+    )
+    qwentts_cpp_base_model: str = _path_env(
+        "QWENTTS_CPP_BASE_MODEL",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-base-Q4_K_M.gguf",
+    )
+    qwentts_cpp_customvoice_model: str = _path_env(
+        "QWENTTS_CPP_CUSTOMVOICE_MODEL",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-customvoice-Q4_K_M.gguf",
+    )
+    qwentts_cpp_voicedesign_model: str = _path_env(
+        "QWENTTS_CPP_VOICEDESIGN_MODEL",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-voicedesign-Q4_K_M.gguf",
+    )
+    qwentts_cpp_voice_mode: str = os.getenv("QWENTTS_CPP_VOICE_MODE", "default")
+    qwentts_cpp_voice_preset: str = os.getenv("QWENTTS_CPP_VOICE_PRESET", "")
+    qwentts_cpp_voice_design: str = os.getenv("QWENTTS_CPP_VOICE_DESIGN", "")
+    qwentts_cpp_clone_voice_id: str = os.getenv("QWENTTS_CPP_CLONE_VOICE_ID", "")
+    qwentts_cpp_backend: str = os.getenv("QWENTTS_CPP_BACKEND", "Vulkan0")
+    qwentts_cpp_lang: str = os.getenv("QWENTTS_CPP_LANG", "Chinese")
+    qwentts_cpp_speaker: str = os.getenv("QWENTTS_CPP_SPEAKER", "")
+    qwentts_cpp_instruct: str = os.getenv("QWENTTS_CPP_INSTRUCT", "")
+    qwentts_cpp_ref_wav: str = _path_env("QWENTTS_CPP_REF_WAV")
+    qwentts_cpp_ref_text: str = _path_env("QWENTTS_CPP_REF_TEXT")
+    qwentts_cpp_ref_spk: str = _path_env("QWENTTS_CPP_REF_SPK")
+    qwentts_cpp_ref_rvq: str = _path_env("QWENTTS_CPP_REF_RVQ")
+    qwentts_cpp_format: str = os.getenv("QWENTTS_CPP_FORMAT", "wav16")
+    qwentts_cpp_extra_args: str = os.getenv("QWENTTS_CPP_EXTRA_ARGS", "")
+    qwentts_cpp_seed: int = _int_env("QWENTTS_CPP_SEED", 42)
+    qwentts_cpp_timeout_seconds: float = _float_env("QWENTTS_CPP_TIMEOUT_SECONDS", 120.0)
 
     vad_provider: str = os.getenv("STS_VAD_PROVIDER", "energy")
     vad_energy_threshold: float = _float_env("VAD_ENERGY_THRESHOLD", 0.004)
@@ -150,6 +186,14 @@ class Settings:
 
     models_dir: Path = Path(_path_env("MODELS_DIR", str(ROOT / "models")))
     log_dir: Path = Path(_path_env("LOG_DIR", str(ROOT / "logs")))
+    data_dir: Path = Path(_path_env("DATA_DIR", str(ROOT / "data")))
+    config_db: Path = Path(_path_env("HERMES_STS_CONFIG_DB", str(ROOT / "data" / "hermes_sts.sqlite3")))
 
 
-settings = Settings()
+def load_settings() -> Settings:
+    from hermes_sts.config_store import ConfigStore
+
+    return ConfigStore.default().load_settings()
+
+
+settings = load_settings()

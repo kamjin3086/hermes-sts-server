@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVICE_NAME="${HERMES_STS_SYSTEMD_SERVICE_NAME:-hermes-sts-server.service}"
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_PATH="$USER_UNIT_DIR/$SERVICE_NAME"
 PYTHON="$ROOT/.venv-sts/bin/python"
-ENV_FILE="$ROOT/.env"
 LOG_DIR="$ROOT/logs"
 
 step() {
@@ -24,12 +23,7 @@ require_command() {
 require_command systemctl
 
 if [[ ! -x "$PYTHON" ]]; then
-  echo "Missing STS venv Python: $PYTHON. Run scripts/setup_venv.sh first." >&2
-  exit 1
-fi
-
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Missing .env: $ENV_FILE. Copy .env.example to .env and configure it first." >&2
+  echo "Missing STS venv Python: $PYTHON. Run scripts/dev/setup_venv.sh first." >&2
   exit 1
 fi
 
@@ -46,7 +40,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$ROOT
-EnvironmentFile=-$ENV_FILE
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$PYTHON -m hermes_sts
 Restart=on-failure
@@ -63,9 +56,9 @@ if systemctl --user is-active --quiet "$SERVICE_NAME"; then
   step "Restarting $SERVICE_NAME"
   systemctl --user restart "$SERVICE_NAME"
 else
-  if [[ -x "$ROOT/scripts/stop_sts_pipeline.sh" ]]; then
+  if [[ -x "$ROOT/scripts/service/stop_sts_pipeline.sh" ]]; then
     step "Stopping any standalone STS process on the configured port"
-    "$ROOT/scripts/stop_sts_pipeline.sh" || true
+    "$ROOT/scripts/service/stop_sts_pipeline.sh" || true
   fi
   step "Enabling and starting $SERVICE_NAME"
   systemctl --user enable --now "$SERVICE_NAME"

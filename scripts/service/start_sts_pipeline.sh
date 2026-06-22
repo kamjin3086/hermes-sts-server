@@ -1,30 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="$ROOT/.venv-sts/bin/python"
 LOG_DIR="$ROOT/logs"
 STDOUT_LOG="$LOG_DIR/sts-server.out.log"
 STDERR_LOG="$LOG_DIR/sts-server.err.log"
-ENV_FILE="$ROOT/.env"
-
-dotenv_value() {
-  local name="$1"
-  local default="$2"
-  if [[ -f "$ENV_FILE" ]]; then
-    local line
-    line="$(grep -E "^${name}=" "$ENV_FILE" | head -n1 || true)"
-    if [[ -n "$line" ]]; then
-      local value="${line#*=}"
-      value="${value%$'\r'}"
-      value="${value%\"}"
-      value="${value#\"}"
-      printf '%s' "$value"
-      return
-    fi
-  fi
-  printf '%s' "$default"
-}
 
 http_ok() {
   local url="$1"
@@ -41,22 +22,38 @@ step() {
 }
 
 if [[ ! -x "$PYTHON" ]]; then
-  echo "Missing STS venv Python: $PYTHON. Run scripts/setup_venv.sh first." >&2
+  echo "Missing STS venv Python: $PYTHON. Run scripts/dev/setup_venv.sh first." >&2
   exit 1
 fi
 
 cd "$ROOT"
 mkdir -p "$LOG_DIR"
 
-HOST_NAME="$(dotenv_value HERMES_STS_HOST 127.0.0.1)"
-PORT="$(dotenv_value HERMES_STS_PORT 8765)"
+HOST_NAME="$("$PYTHON" - <<'PY'
+from hermes_sts.config import settings
+print(settings.host)
+PY
+)"
+PORT="$("$PYTHON" - <<'PY'
+from hermes_sts.config import settings
+print(settings.port)
+PY
+)"
 CONNECT_HOST="$HOST_NAME"
 if [[ "$CONNECT_HOST" == "0.0.0.0" || "$CONNECT_HOST" == "::" ]]; then
   CONNECT_HOST="127.0.0.1"
 fi
 HEALTH_URL="http://${CONNECT_HOST}:${PORT}/health"
-HERMES_BASE_URL="$(dotenv_value HERMES_BASE_URL http://127.0.0.1:8642/v1)"
-HERMES_API_KEY="$(dotenv_value HERMES_API_KEY "")"
+HERMES_BASE_URL="$("$PYTHON" - <<'PY'
+from hermes_sts.config import settings
+print(settings.hermes_base_url)
+PY
+)"
+HERMES_API_KEY="$("$PYTHON" - <<'PY'
+from hermes_sts.config import settings
+print(settings.hermes_api_key)
+PY
+)"
 HERMES_MODELS_URL="${HERMES_BASE_URL%/}/models"
 
 port_owner_pids() {

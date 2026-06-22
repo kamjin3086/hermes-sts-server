@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENV="$ROOT/.venv-sts"
 MIRROR="${PYPI_INDEX_URL:-}"
 
-if [[ -z "$MIRROR" && -f "$ROOT/.env" ]]; then
-  MIRROR="$(grep -E '^PYPI_INDEX_URL=' "$ROOT/.env" | head -n1 | cut -d= -f2- || true)"
-fi
 if [[ -z "$MIRROR" ]]; then
   MIRROR="https://pypi.org/simple"
 fi
