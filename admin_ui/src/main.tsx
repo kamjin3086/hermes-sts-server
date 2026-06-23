@@ -116,13 +116,13 @@ function App() {
   const patch = async (values: SettingsValues) => {
     setBusy("saving");
     try {
-      const data = await api<{ state: AdminState }>("/api/settings", {
+      const data = await api<{ state: AdminState; restart_scheduled?: boolean }>("/api/settings", {
         method: "PATCH",
         body: JSON.stringify({ values }),
       });
       setState(data.state);
-      setNotice("已保存并热更新");
-      window.setTimeout(() => setNotice(""), 1800);
+      setNotice(data.restart_scheduled ? "已保存，服务正在重启，几秒后自动恢复" : "已保存并热更新");
+      window.setTimeout(() => setNotice(""), data.restart_scheduled ? 3600 : 1800);
     } catch (err) {
       setNotice(`保存失败：${errorMessage(err)}`);
       window.setTimeout(() => setNotice(""), 3600);
@@ -373,10 +373,12 @@ function Studio({
   const reapplySavedConfig = async () => {
     setBusy("reapply");
     try {
-      const data = await api<{ state: AdminState }>("/api/settings/reapply", { method: "POST" });
-      setNotice("已重新应用数据库中的已保存配置");
-      window.setTimeout(() => setNotice(""), 2200);
-      await reload();
+      const data = await api<{ state: AdminState; restart_scheduled?: boolean }>("/api/settings/reapply", { method: "POST" });
+      setNotice(data.restart_scheduled ? "服务正在重启，几秒后自动恢复" : "已重新应用数据库中的已保存配置");
+      window.setTimeout(() => setNotice(""), data.restart_scheduled ? 3600 : 2200);
+      if (!data.restart_scheduled) {
+        await reload();
+      }
       return data;
     } finally {
       setBusy("");

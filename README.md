@@ -39,6 +39,11 @@ Configuration is UI-first. Runtime settings live in
 `data/hermes_sts.sqlite3`, and the console is the place to edit them. This
 project no longer reads `.env` files.
 
+Changes that affect native/model-backed components, such as STT/TTS providers
+or Qwen model paths, are applied by restarting the user service instead of
+hot-rebuilding those components in-process. The restart costs a few seconds but
+keeps memory stable on unified-memory systems.
+
 The console includes:
 
 - Status dashboard: current role, TTS engine, voice, Qwen model availability,

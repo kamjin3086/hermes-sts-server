@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -47,6 +49,7 @@ QWEN_MODEL_FILES = {
 }
 QWEN_MODEL_REPO = "https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main"
 SERVER_STARTED_AT = time.time()
+SERVICE_NAME = os.getenv("HERMES_STS_SYSTEMD_SERVICE_NAME", "hermes-sts-server.service")
 
 
 class SettingsPatch(BaseModel):
@@ -180,24 +183,15 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             sorted(payload.values),
         )
         _validate_settings_patch(payload.values)
-        previous = {
-            ENV_TO_ATTR.get(key, key): getattr(settings, ENV_TO_ATTR.get(key, key))
-            for key in payload.values
-            if hasattr(settings, ENV_TO_ATTR.get(key, key))
-        }
         changed = store.set_settings(payload.values)
         current = refresh_settings()
+        restart_scheduled = False
         if _requires_rebuild(changed):
-            try:
-                rebuild_components()
-            except Exception as exc:
-                if previous:
-                    store.set_settings(previous)
-                    refresh_settings()
-                raise HTTPException(status_code=500, detail=f"component rebuild failed: {exc}") from exc
+            restart_scheduled = _schedule_service_restart("settings changed")
         return {
             "changed": changed,
-            "restart_required": [],
+            "restart_required": list(changed) if restart_scheduled else [],
+            "restart_scheduled": restart_scheduled,
             "rebuild_required": _requires_rebuild(changed),
             "health": _health(current),
             "state": await admin_state(),
@@ -206,12 +200,11 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
     @router.post("/api/settings/reapply")
     async def reapply_settings() -> dict[str, Any]:
         current = refresh_settings()
-        try:
-            rebuild_components()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"component rebuild failed: {exc}") from exc
+        restart_scheduled = _schedule_service_restart("manual reapply")
         return {
             "ok": True,
+            "restart_scheduled": restart_scheduled,
+            "restart_required": ["service"],
             "health": _health(current),
             "state": await admin_state(),
         }
@@ -260,9 +253,13 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             values[voice_ref_key] = payload.voice_ref
         changed = store.set_settings(values)
         refresh_settings()
-        if _requires_rebuild(changed):
-            rebuild_components()
-        return {"ok": True, "applied": True, "state": await admin_state()}
+        restart_scheduled = _restart_if_required(changed, "persona applied")
+        return {
+            "ok": True,
+            "applied": True,
+            "restart_scheduled": restart_scheduled,
+            "state": await admin_state(),
+        }
 
     @router.delete("/api/personas/{persona_id}")
     async def delete_persona(persona_id: str) -> dict[str, Any]:
@@ -290,9 +287,8 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
                 values[voice_ref_key] = fallback.get("voice_ref", "")
             changed = store.set_settings(values)
             refresh_settings()
-        if _requires_rebuild(changed):
-            rebuild_components()
-        return {"ok": True, "state": await admin_state()}
+        restart_scheduled = _restart_if_required(changed, "active persona deleted")
+        return {"ok": True, "restart_scheduled": restart_scheduled, "state": await admin_state()}
 
     @router.post("/api/qwen/models/install")
     async def install_qwen_models(payload: ModelInstallRequest | None = None) -> dict[str, Any]:
@@ -311,7 +307,7 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             url = f"{QWEN_MODEL_REPO}/{filename}"
             logger.info("Downloading Qwen model %s", url)
             await asyncio.to_thread(urlretrieve, url, target)
-        store.set_settings(
+        changed = store.set_settings(
             {
                 "qwentts_cpp_base_model": str(models_dir / QWEN_MODEL_FILES["base"]),
                 "qwentts_cpp_customvoice_model": str(models_dir / QWEN_MODEL_FILES["customvoice"]),
@@ -320,7 +316,13 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             }
         )
         refresh_settings()
-        return {"ok": True, "models": _qwen_model_status(settings), "state": await admin_state()}
+        restart_scheduled = _restart_if_required(changed, "qwen models installed")
+        return {
+            "ok": True,
+            "models": _qwen_model_status(settings),
+            "restart_scheduled": restart_scheduled,
+            "state": await admin_state(),
+        }
 
     @router.post("/api/qwen/clone/upload")
     async def upload_clone(
@@ -426,9 +428,8 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
         values = _settings_for_voice_profile(voice)
         changed = store.set_settings(values)
         refresh_settings()
-        if _requires_rebuild(changed):
-            rebuild_components()
-        return {"ok": True, "voice": voice, "state": await admin_state()}
+        restart_scheduled = _restart_if_required(changed, "voice applied")
+        return {"ok": True, "voice": voice, "restart_scheduled": restart_scheduled, "state": await admin_state()}
 
     @router.delete("/api/qwen/voices/{voice_id}")
     async def delete_voice(voice_id: str) -> dict[str, Any]:
@@ -438,11 +439,12 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             raise HTTPException(status_code=404, detail="voice not found")
         current = refresh_settings()
         active_clone = current.qwentts_cpp_voice_mode == "clone" and current.qwentts_cpp_clone_voice_id == voice_id
+        restart_scheduled = False
         if active_clone:
-            store.set_settings({"qwentts_cpp_voice_mode": "default", "qwentts_cpp_clone_voice_id": ""})
+            changed = store.set_settings({"qwentts_cpp_voice_mode": "default", "qwentts_cpp_clone_voice_id": ""})
             refresh_settings()
-            rebuild_components()
-        return {"ok": True, "state": await admin_state()}
+            restart_scheduled = _restart_if_required(changed, "active clone voice deleted")
+        return {"ok": True, "restart_scheduled": restart_scheduled, "state": await admin_state()}
 
     @router.post("/api/qwen/workshop/suggest")
     async def suggest_voice(payload: WorkshopSuggestRequest) -> dict[str, Any]:
@@ -642,6 +644,32 @@ def _qwen_model_status(settings: Settings) -> dict[str, Any]:
         key: {"path": value, "installed": bool(value and Path(value).exists())}
         for key, value in paths.items()
     }
+
+
+def _restart_if_required(changed: dict[str, Any], reason: str) -> bool:
+    if not _requires_rebuild(changed):
+        return False
+    return _schedule_service_restart(reason)
+
+
+def _schedule_service_restart(reason: str) -> bool:
+    if os.getenv("HERMES_STS_DISABLE_SELF_RESTART") == "1":
+        logger.info("Self restart disabled; restart required reason=%s", reason)
+        return False
+    command = f"sleep 0.8; systemctl --user restart {shlex.quote(SERVICE_NAME)}"
+    try:
+        subprocess.Popen(
+            ["sh", "-c", command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        logger.exception("Failed to schedule service restart reason=%s", reason)
+        return False
+    logger.info("Scheduled service restart service=%s reason=%s", SERVICE_NAME, reason)
+    return True
 
 
 def _requires_rebuild(changed: dict[str, Any]) -> bool:
