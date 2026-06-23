@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from hermes_sts.admin import _settings_payload, _validate_settings_patch
+from hermes_sts.admin import _settings_for_voice_profile, _settings_payload, _validate_settings_patch
 from hermes_sts.config import Settings
 from hermes_sts.config_store import ConfigStore
 from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, ToolCall
@@ -710,6 +710,7 @@ class CoreTests(unittest.TestCase):
                         "mode": "seed",
                         "seed": 12345,
                         "tags": "冷静,清晰",
+                        "note": "第三条随机，低频更稳",
                     }
                 )
                 voice = store.voice_profile(voice_id)
@@ -723,8 +724,36 @@ class CoreTests(unittest.TestCase):
 
         self.assertIsNotNone(voice)
         self.assertEqual(voice["tags"], "冷静,清晰")
+        self.assertEqual(voice["note"], "第三条随机，低频更稳")
         self.assertEqual(settings.qwentts_cpp_seed, 12345)
         self.assertEqual(settings.qwentts_cpp_voice_mode, "default")
+
+    def test_design_voice_profiles_keep_prompt_note_and_map_to_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+            store.upsert_voice(
+                {
+                    "id": "design_test",
+                    "name": "冷感播报",
+                    "provider": "qwen3tts",
+                    "mode": "design",
+                    "design_prompt": "female adult, cool clear Mandarin, calm pace, low energy",
+                    "tags": "冷感,播报",
+                    "note": "适合提醒和短句快答",
+                }
+            )
+            voice = store.voice_profile("design_test")
+
+        self.assertIsNotNone(voice)
+        self.assertEqual(voice["note"], "适合提醒和短句快答")
+        self.assertEqual(voice["design_prompt"], "female adult, cool clear Mandarin, calm pace, low energy")
+        self.assertEqual(
+            _settings_for_voice_profile(voice),
+            {
+                "qwentts_cpp_voice_mode": "design",
+                "qwentts_cpp_voice_design": "female adult, cool clear Mandarin, calm pace, low energy",
+            },
+        )
 
     def test_config_store_deleted_persona_stays_deleted_after_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

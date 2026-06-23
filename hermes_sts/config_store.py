@@ -238,6 +238,7 @@ class ConfigStore:
                     mode text not null,
                     seed integer,
                     tags text not null default '',
+                    note text not null default '',
                     speaker text not null default '',
                     design_prompt text not null default '',
                     ref_wav text not null default '',
@@ -263,6 +264,8 @@ class ConfigStore:
                 conn.execute("alter table voice_profiles add column seed integer")
             if "tags" not in columns:
                 conn.execute("alter table voice_profiles add column tags text not null default ''")
+            if "note" not in columns:
+                conn.execute("alter table voice_profiles add column note text not null default ''")
         self.ensure_defaults()
 
     def ensure_defaults(self) -> None:
@@ -584,8 +587,8 @@ class ConfigStore:
             conn.execute(
                 """
                 insert or replace into voice_profiles
-                (id, name, provider, mode, seed, tags, speaker, design_prompt, ref_wav, ref_text, ref_spk, ref_rvq, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, provider, mode, seed, tags, note, speaker, design_prompt, ref_wav, ref_text, ref_spk, ref_rvq, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile["id"],
@@ -594,6 +597,7 @@ class ConfigStore:
                     profile.get("mode", "clone"),
                     profile.get("seed"),
                     profile.get("tags", ""),
+                    profile.get("note", ""),
                     profile.get("speaker", ""),
                     profile.get("design_prompt", ""),
                     profile.get("ref_wav", ""),

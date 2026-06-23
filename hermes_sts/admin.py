@@ -74,6 +74,14 @@ class SeedVoiceRequest(BaseModel):
     name: str = "收藏声线"
     seed: int
     tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class DesignVoiceRequest(BaseModel):
+    name: str = "描述造声音色"
+    design_prompt: str
+    tags: list[str] = Field(default_factory=list)
+    note: str = ""
 
 
 class ApplyVoiceRequest(BaseModel):
@@ -83,6 +91,8 @@ class ApplyVoiceRequest(BaseModel):
 class WorkshopSuggestRequest(BaseModel):
     brief: str
     persona_hint: str = ""
+    scenario: str = "persona"
+    current_voice: str = ""
 
 
 class PreviewRequest(BaseModel):
@@ -385,6 +395,25 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             "mode": "seed",
             "seed": int(payload.seed),
             "tags": ",".join(_normalize_tags(payload.tags)),
+            "note": payload.note.strip()[:240],
+        }
+        store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
+
+    @router.post("/api/qwen/voices/design")
+    async def save_design_voice(payload: DesignVoiceRequest) -> dict[str, Any]:
+        design_prompt = payload.design_prompt.strip()
+        if not design_prompt:
+            raise HTTPException(status_code=422, detail="design_prompt is required")
+        voice_id = f"design_{uuid.uuid4().hex[:12]}"
+        profile = {
+            "id": voice_id,
+            "name": payload.name.strip() or "描述造声音色",
+            "provider": "qwen3tts",
+            "mode": "design",
+            "design_prompt": design_prompt,
+            "tags": ",".join(_normalize_tags(payload.tags)),
+            "note": payload.note.strip()[:240],
         }
         store.upsert_voice(profile)
         return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
@@ -692,19 +721,29 @@ async def _suggest_voice_with_llm(payload: WorkshopSuggestRequest, settings: Set
         {
             "role": "system",
             "content": (
-                "你是语音助手音色设计师。根据用户想要的气质，生成 Qwen3TTS 可用的音色方案。"
+                "你是个人语音助手的音色设计师，目标是生成可试听、可启用、可收藏的 Qwen3TTS 声线方案。"
+                "你需要综合：当前人格、实际使用场景、用户偏好、当前声线状态。"
+                "优先让声线适合长期对话、短句快答、等待提示和正式回答保持一致。"
                 "只返回 JSON，不要 Markdown。字段必须包含："
-                "name, persona_prompt, voice_mode, design_prompt, seed, tags, preview_text, notes。"
+                "name, persona_prompt, voice_mode, design_prompt, seed, tags, preview_text, notes, rationale, use_case, save_note。"
                 "voice_mode 只能是 default 或 design。"
-                "design_prompt 用英文短语，适合 Qwen3TTS VoiceDesign，例如 gender, age, pitch, tone, accent, pace。"
+                "当用户需要明确气质、角色感、播报感、甜度、冷感、性别、年龄、口音、节奏时，选择 design。"
+                "当用户只是在默认音色中探索稳定随机声线，或需求极简时，选择 default 并给 seed。"
+                "design_prompt 必须是英文短语，适合 Qwen3TTS VoiceDesign，包含 gender/age/pitch/tone/accent/pace/energy/texture 等要素，不要写模型名。"
                 "seed 是 1 到 2147483647 的整数，用于 Base 默认音色微调。"
-                "persona_prompt 用中文，适合语音助手系统提示词，克制、明确、可长期使用。"
-                "tags 是 2 到 4 个中文短标签，例如：沉稳、清晰、冷感、亲和、播报、低频、甜、快速。"
+                "persona_prompt 用中文，适合语音助手系统提示词，可以为空；不要夸张，不要二次元套话。"
+                "tags 是 2 到 4 个中文短标签，例如：沉稳、清晰、冷感、亲和、播报、低频、甜感、快答。"
+                "rationale 用一句中文说明为什么这样设计；save_note 用一句短备注，方便用户以后识别这条收藏声线。"
             ),
         },
         {
             "role": "user",
-            "content": f"需求：{brief}\n当前人格参考：{payload.persona_hint[:1200]}",
+            "content": (
+                f"偏好/需求：{brief}\n"
+                f"使用场景：{payload.scenario[:120] or 'persona'}\n"
+                f"当前人格参考：{payload.persona_hint[:1200]}\n"
+                f"当前声线：{payload.current_voice[:400]}"
+            ),
         },
     ]
     body = {
@@ -748,6 +787,9 @@ async def _suggest_voice_with_llm(payload: WorkshopSuggestRequest, settings: Set
         "tags": _normalize_tags(parsed.get("tags")),
         "preview_text": str(parsed.get("preview_text") or "你好，我正在用新的声线和你说话。").strip(),
         "notes": str(parsed.get("notes") or "").strip(),
+        "rationale": str(parsed.get("rationale") or "").strip(),
+        "use_case": str(parsed.get("use_case") or payload.scenario or "").strip(),
+        "save_note": str(parsed.get("save_note") or parsed.get("notes") or "").strip()[:240],
         "raw": content,
     }
 

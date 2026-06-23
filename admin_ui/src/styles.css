@@ -1182,6 +1182,10 @@ button:disabled {
   min-height: 90px;
 }
 
+.compact-note-input {
+  max-width: 460px;
+}
+
 .design-panel {
   display: grid;
   gap: 12px;
@@ -1217,6 +1221,14 @@ button:disabled {
 .saved-voice span {
   color: #9aa8a1;
   font-size: 12px;
+}
+
+.voice-note {
+  display: block;
+  margin-top: 4px;
+  color: rgba(232, 216, 180, 0.86);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .suggestion-card code {

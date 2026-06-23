@@ -563,18 +563,20 @@ function QwenVoice({
   const [lastRandomSeed, setLastRandomSeed] = useState<number | null>(null);
   const [randomName, setRandomName] = useState("收藏声线");
   const [randomTags, setRandomTags] = useState("沉稳,清晰");
+  const [randomNote, setRandomNote] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [seedBatch, setSeedBatch] = useState<number[]>([]);
   const [queuedSeeds, setQueuedSeeds] = useState<number[]>([]);
   const [workshopBrief, setWorkshopBrief] = useState("冷静、清晰、有一点未来感，适合长期陪伴的中文语音助手");
+  const [workshopScenario, setWorkshopScenario] = useState("跟随当前人格");
   const [workshopSuggestion, setWorkshopSuggestion] = useState<Record<string, any> | null>(null);
   const [designBrief, setDesignBrief] = useState("自然、清晰、冷静一点，适合中文语音助手长期陪伴");
   const [designDraft, setDesignDraft] = useState(String(values.qwentts_cpp_voice_design || ""));
   const customVoiceReady = Boolean(state.qwen.models.customvoice?.installed);
   const voiceDesignReady = Boolean(state.qwen.models.voicedesign?.installed);
-  const allSeedVoices = state.voices.filter((voice) => voice.mode === "seed");
-  const seedTags = Array.from(new Set(allSeedVoices.flatMap((voice) => splitTags(voice.tags))));
-  const seedVoices = tagFilter ? allSeedVoices.filter((voice) => splitTags(voice.tags).includes(tagFilter)) : allSeedVoices;
+  const favoriteVoices = state.voices.filter((voice) => ["seed", "design"].includes(String(voice.mode)));
+  const favoriteTags = Array.from(new Set(favoriteVoices.flatMap((voice) => splitTags(voice.tags))));
+  const shownVoices = tagFilter ? favoriteVoices.filter((voice) => splitTags(voice.tags).includes(tagFilter)) : favoriteVoices;
 
   useEffect(() => {
     setDesignDraft(String(values.qwentts_cpp_voice_design || ""));
@@ -611,7 +613,7 @@ function QwenVoice({
     }
     await api("/api/qwen/voices/seed", {
       method: "POST",
-      body: JSON.stringify({ name: randomName || `Seed ${lastRandomSeed}`, seed: lastRandomSeed, tags: splitTags(randomTags) }),
+      body: JSON.stringify({ name: randomName || `Seed ${lastRandomSeed}`, seed: lastRandomSeed, tags: splitTags(randomTags), note: randomNote }),
     });
     await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: lastRandomSeed, tts_voice_source: "settings" });
     await reload();
@@ -622,7 +624,7 @@ function QwenVoice({
   const keepSeed = async (seed: number, name = `Seed ${seed}`) => {
     await api("/api/qwen/voices/seed", {
       method: "POST",
-      body: JSON.stringify({ name, seed, tags: splitTags(randomTags) }),
+      body: JSON.stringify({ name, seed, tags: splitTags(randomTags), note: randomNote }),
     });
     await reload();
     setNotice(`已收藏 seed ${seed}`);
@@ -672,7 +674,12 @@ function QwenVoice({
     try {
       const data = await api<{ suggestion: Record<string, any> }>("/api/qwen/workshop/suggest", {
         method: "POST",
-        body: JSON.stringify({ brief: workshopBrief, persona_hint: state.health.persona_prompt || "" }),
+        body: JSON.stringify({
+          brief: workshopBrief,
+          scenario: workshopScenario,
+          persona_hint: state.health.persona_prompt || "",
+          current_voice: describeCurrentVoice(values),
+        }),
       });
       setWorkshopSuggestion(data.suggestion);
       setNotice("AI 已生成音色方案");
@@ -712,6 +719,27 @@ function QwenVoice({
     window.setTimeout(() => setNotice(""), 1800);
   };
 
+  const saveCurrentDesignVoice = async () => {
+    const prompt = designDraft.trim();
+    if (!prompt) {
+      setNotice("先填写或生成音色描述");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    await api("/api/qwen/voices/design", {
+      method: "POST",
+      body: JSON.stringify({
+        name: randomName || "描述造声音色",
+        design_prompt: prompt,
+        tags: splitTags(randomTags),
+        note: randomNote,
+      }),
+    });
+    await reload();
+    setNotice("描述声线已收藏");
+    window.setTimeout(() => setNotice(""), 1800);
+  };
+
   const applySuggestion = async () => {
     if (!workshopSuggestion) return;
     const valuesToPatch: SettingsValues = {
@@ -726,6 +754,44 @@ function QwenVoice({
     if (workshopSuggestion.persona_prompt) {
       setNotice("音色方案已启用，提示词可复制到人格里微调");
     }
+  };
+
+  const saveSuggestionVoice = async () => {
+    if (!workshopSuggestion) return;
+    const mode = String(workshopSuggestion.voice_mode || "design");
+    const tags = Array.isArray(workshopSuggestion.tags) ? workshopSuggestion.tags : splitTags(workshopSuggestion.tags);
+    const note = String(workshopSuggestion.save_note || workshopSuggestion.rationale || workshopSuggestion.notes || "").slice(0, 240);
+    if (mode === "design") {
+      const designPrompt = String(workshopSuggestion.design_prompt || "").trim();
+      if (!designPrompt) {
+        setNotice("这条方案没有音色描述，无法收藏为描述造声");
+        window.setTimeout(() => setNotice(""), 1800);
+        return;
+      }
+      await api("/api/qwen/voices/design", {
+        method: "POST",
+        body: JSON.stringify({
+          name: workshopSuggestion.name || "AI 描述声线",
+          design_prompt: designPrompt,
+          tags,
+          note,
+        }),
+      });
+    } else {
+      const seed = Number(workshopSuggestion.seed || 42);
+      await api("/api/qwen/voices/seed", {
+        method: "POST",
+        body: JSON.stringify({
+          name: workshopSuggestion.name || `Seed ${seed}`,
+          seed,
+          tags,
+          note,
+        }),
+      });
+    }
+    await reload();
+    setNotice("AI 声线已收藏");
+    window.setTimeout(() => setNotice(""), 1800);
   };
 
   const saveSuggestionAsPersona = async () => {
@@ -845,6 +911,7 @@ function QwenVoice({
             </div>
             <input value={randomName} onChange={(event) => setRandomName(event.target.value)} placeholder="给这条声线起个名字" />
             <input value={randomTags} onChange={(event) => setRandomTags(event.target.value)} placeholder="标签，用逗号分隔，例如 沉稳,清晰" />
+            <input className="compact-note-input" value={randomNote} onChange={(event) => setRandomNote(event.target.value)} placeholder="备注，可选：例如 低频、像某次随机里的第 3 条" />
             <code>{lastRandomSeed == null ? `当前固定 seed: ${values.qwentts_cpp_seed ?? 42}` : `刚试听 seed: ${lastRandomSeed}`}</code>
             <div className="ab-rack">
               <div>
@@ -886,10 +953,24 @@ function QwenVoice({
               <span>音色描述</span>
               <textarea value={designDraft} onChange={(e) => setDesignDraft(e.target.value)} placeholder="例如：female, young adult, clear warm Mandarin voice, natural pace, soft tone" />
             </label>
+            <div className="field-row">
+              <label className="field">
+                <span>收藏名</span>
+                <input value={randomName} onChange={(event) => setRandomName(event.target.value)} placeholder="例如 冷感播报" />
+              </label>
+              <label className="field">
+                <span>标签</span>
+                <input value={randomTags} onChange={(event) => setRandomTags(event.target.value)} placeholder="沉稳,清晰" />
+              </label>
+            </div>
+            <input className="compact-note-input" value={randomNote} onChange={(event) => setRandomNote(event.target.value)} placeholder="备注，可选：记录这条声线适合什么场景" />
             <div className="design-actions">
               <button className="primary" onClick={applyDesignDraft}><Check size={16} />使用描述</button>
               <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: designDraft }, "描述造声试听完成")} disabled={!designDraft.trim() || !voiceDesignReady}>
                 <Play size={16} />试听
+              </button>
+              <button className="secondary" onClick={saveCurrentDesignVoice} disabled={!designDraft.trim()}>
+                <Save size={16} />收藏描述
               </button>
             </div>
           </div>
@@ -925,15 +1006,24 @@ function QwenVoice({
         <div className="workshop-box">
           <span className="eyebrow"><Wand2 size={15} /> 音色工坊</span>
           <h3>让 AI 先设计一版</h3>
+          <p className="muted">依据当前人格、场景和偏好生成一条可试听、可启用、可收藏的声线。</p>
+          <select value={workshopScenario} onChange={(e) => setWorkshopScenario(e.target.value)}>
+            <option>跟随当前人格</option>
+            <option>日常陪伴和快答</option>
+            <option>播报、提醒、读消息</option>
+            <option>设备控制和短指令</option>
+            <option>夜间低打扰对话</option>
+          </select>
           <textarea value={workshopBrief} onChange={(e) => setWorkshopBrief(e.target.value)} />
           <button className="primary" onClick={suggestVoice} disabled={false}>{busy === "workshop" ? "生成中" : "生成方案"}</button>
           {workshopSuggestion && (
             <div className="suggestion-card">
               <strong>{workshopSuggestion.name}</strong>
-              <span>{workshopSuggestion.voice_mode === "design" ? "描述造声" : "默认声线 seed"}</span>
+              <span>{workshopSuggestion.voice_mode === "design" ? "描述造声" : "默认声线 seed"}{workshopSuggestion.use_case ? ` · ${workshopSuggestion.use_case}` : ""}</span>
               {workshopSuggestion.design_prompt && <code>{workshopSuggestion.design_prompt}</code>}
               <em>seed {workshopSuggestion.seed}</em>
-              {workshopSuggestion.notes && <p>{workshopSuggestion.notes}</p>}
+              {(workshopSuggestion.rationale || workshopSuggestion.notes) && <p>{workshopSuggestion.rationale || workshopSuggestion.notes}</p>}
+              {workshopSuggestion.save_note && <small className="voice-note">收藏备注：{workshopSuggestion.save_note}</small>}
               {workshopSuggestion.persona_prompt && <textarea readOnly value={workshopSuggestion.persona_prompt} />}
               <button className="secondary" onClick={() => previewVoice({
                 voice_mode: workshopSuggestion.voice_mode,
@@ -942,26 +1032,28 @@ function QwenVoice({
                 text: workshopSuggestion.preview_text,
               }, "AI 方案试听完成")}><Play size={15} />试听方案</button>
               <button className="primary" onClick={applySuggestion}>使用方案</button>
+              <button className="secondary" onClick={saveSuggestionVoice}><Save size={15} />收藏声线</button>
               <button className="primary" onClick={saveSuggestionAsPersona}>保存成完整角色</button>
             </div>
           )}
         </div>
-        {seedVoices.length > 0 && (
+        {shownVoices.length > 0 && (
           <div className="saved-voices">
             <span className="eyebrow"><Shuffle size={15} /> 收藏声线</span>
-            {seedTags.length > 0 && (
+            {favoriteTags.length > 0 && (
               <div className="tag-filter">
                 <button className={tagFilter === "" ? "pill selected" : "pill"} onClick={() => setTagFilter("")}>全部</button>
-                {seedTags.map((tag) => (
+                {favoriteTags.map((tag) => (
                   <button key={tag} className={tagFilter === tag ? "pill selected" : "pill"} onClick={() => setTagFilter(tag)}>{tag}</button>
                 ))}
               </div>
             )}
-            {seedVoices.map((voice) => (
+            {shownVoices.map((voice) => (
               <div className="saved-voice" key={voice.id}>
                 <div>
                   <strong>{voice.name}</strong>
-                  <span>seed {voice.seed}{voice.tags ? ` · ${voice.tags}` : ""}</span>
+                  <span>{voiceSummary(voice)}{voice.tags ? ` · ${voice.tags}` : ""}</span>
+                  {voice.note && <small className="voice-note">{voice.note}</small>}
                 </div>
                 <button className="icon-btn" onClick={() => applyVoiceProfile(voice.id)} title="使用"><Check size={16} /></button>
                 <button className="icon-btn danger" onClick={() => deleteVoiceProfile(voice)} title="删除"><Trash2 size={16} /></button>
@@ -1309,6 +1401,23 @@ function splitTags(raw: any) {
     .split(/[，,\s]+/)
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function voiceSummary(voice: VoiceProfile) {
+  const mode = String(voice.mode || "default");
+  if (mode === "seed") return `seed ${voice.seed ?? 42}`;
+  if (mode === "design") return "描述造声";
+  if (mode === "preset") return `预设 ${voice.speaker || ""}`.trim();
+  if (mode === "clone") return voice.ref_spk ? "克隆音色 · ready" : "克隆音色 · 未预编码";
+  return "默认音色";
+}
+
+function describeCurrentVoice(values: SettingsValues) {
+  const mode = String(values.qwentts_cpp_voice_mode || "default");
+  if (mode === "preset") return `预设声线 ${values.qwentts_cpp_voice_preset || "未选择"}`;
+  if (mode === "design") return `描述造声：${values.qwentts_cpp_voice_design || "未填写"}`;
+  if (mode === "clone") return `克隆音色：${values.qwentts_cpp_clone_voice_id || "未选择"}`;
+  return `默认音色 seed ${values.qwentts_cpp_seed ?? 42}`;
 }
 
 function settingsForVoiceProfile(voice: VoiceProfile): SettingsValues {
