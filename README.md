@@ -277,12 +277,13 @@ arguments/expression tags" behavior. The persona layer is explicitly selected:
 ```text
 persona source = console     # use the server/admin UI persona, ignore WS instructions
 persona source = Reachy      # use Reachy session/response instructions, fallback to settings
-persona preset = operator, systems_analyst, news_anchor, field_operator, baritone_male, custom
+persona preset = operator, night_copilot, news_anchor, field_operator, baritone_male,
+                 soft_companion, taiwan_sweet, quiet_cat, custom
 ```
 
 Use `settings` when the admin UI should own the assistant personality. Use `ws`
-when the Reachy Mini Conversation App profile should own it. This mirrors voice
-selection while keeping persona text and TTS voice independent.
+when the Reachy Mini Conversation App profile should own it. TTS voice remains
+locked to the admin UI setting so waiting audio and final answers stay consistent.
 
 ## Provider Configuration
 

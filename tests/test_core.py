@@ -379,7 +379,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(pcm16) % 2, 0)
             self.assertLess(len(pcm16), 2400 * 2)
 
-    def test_realtime_voice_source_switch_selects_settings_or_ws(self) -> None:
+    def test_realtime_voice_always_uses_configured_settings_voice(self) -> None:
         session = bare_session()
         session.settings = Settings(
             tts_voice_source="settings",
@@ -392,10 +392,10 @@ class CoreTests(unittest.TestCase):
             tts_voice_source="ws",
             qwentts_cpp_speaker="ui_voice",
         )
-        self.assertEqual(session._effective_tts_voice().speaker, "ws_voice")
+        self.assertEqual(session._effective_tts_voice().speaker, "ui_voice")
         self.assertEqual(
             session._effective_tts_voice(TtsVoice(speaker="response_voice")).speaker,
-            "response_voice",
+            "ui_voice",
         )
 
     def test_realtime_persona_source_switch_selects_settings_or_ws(self) -> None:
@@ -404,9 +404,9 @@ class CoreTests(unittest.TestCase):
 
         session.settings = Settings(
             sts_persona_source="settings",
-            sts_persona_preset="systems_analyst",
+            sts_persona_preset="night_copilot",
         )
-        self.assertIn("系统分析师", session._effective_instructions())
+        self.assertIn("夜航副驾", session._effective_instructions())
         self.assertNotIn("WS profile", session._effective_instructions("temporary"))
 
         session.settings = Settings(
@@ -419,7 +419,7 @@ class CoreTests(unittest.TestCase):
         session.instructions = ""
         self.assertIn("可靠", session._effective_instructions())
 
-    def test_synthesize_tts_retries_configured_voice_when_ws_voice_fails(self) -> None:
+    def test_synthesize_tts_keeps_selected_voice_when_ws_voice_fails(self) -> None:
         class FakeTts:
             def __init__(self) -> None:
                 self.voices = []
@@ -436,10 +436,32 @@ class CoreTests(unittest.TestCase):
             qwentts_cpp_speaker="ui_voice",
         )
         session.tts = FakeTts()
-        pcm = asyncio.run(session._synthesize_tts("你好", voice=TtsVoice(speaker="bad_ws")))
 
-        self.assertEqual(pcm, b"\x00\x00")
-        self.assertEqual(session.tts.voices, ["bad_ws", "ui_voice"])
+        with self.assertRaises(RuntimeError):
+            asyncio.run(session._synthesize_tts("你好", voice=TtsVoice(speaker="bad_ws")))
+        self.assertEqual(session.tts.voices, ["bad_ws"])
+
+    def test_realtime_turn_voice_is_reused_for_waiting_and_answer_audio(self) -> None:
+        class FakeTts:
+            def __init__(self) -> None:
+                self.voices = []
+
+            async def synthesize(self, text, *, voice=None):
+                self.voices.append(voice.speaker)
+                return b"\x00\x00"
+
+        session = bare_session()
+        session.settings = Settings(
+            tts_voice_source="ws",
+            qwentts_cpp_speaker="ui_voice",
+        )
+        session.tts = FakeTts()
+        voice = session._turn_tts_voice(TtsVoice(speaker="response_voice"))
+        asyncio.run(session._synthesize_tts("等待", voice=voice))
+        session.session_voice = TtsVoice(speaker="changed_ws_voice")
+        asyncio.run(session._synthesize_tts("正式回答", voice=voice))
+
+        self.assertEqual(session.tts.voices, ["ui_voice", "ui_voice"])
 
     def test_qwen3tts_command_accepts_voice_clone_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -489,6 +511,37 @@ class CoreTests(unittest.TestCase):
         self.assertIn("--ref-rvq", clone_cmd)
         self.assertIn("/tmp/ref.rvq", clone_cmd)
 
+    def test_qwen3tts_command_uses_voice_snapshot_for_deterministic_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_bin = tmp_path / "qwen-tts"
+            model = tmp_path / "talker.gguf"
+            next_model = tmp_path / "next-talker.gguf"
+            codec = tmp_path / "codec.gguf"
+            next_codec = tmp_path / "next-codec.gguf"
+            for path in (fake_bin, model, next_model, codec, next_codec):
+                path.touch()
+            settings = Settings(
+                qwentts_cpp_bin=str(fake_bin),
+                qwentts_cpp_model=str(model),
+                qwentts_cpp_codec=str(codec),
+                qwentts_cpp_seed=123,
+            )
+            provider = QwenTtsCpp(settings)
+            voice = TtsVoice.from_settings(settings)
+            object.__setattr__(settings, "qwentts_cpp_model", str(next_model))
+            object.__setattr__(settings, "qwentts_cpp_codec", str(next_codec))
+            object.__setattr__(settings, "qwentts_cpp_seed", 999)
+
+            cmd = provider._command(tmp_path / "snapshot.wav", voice=voice)
+
+        self.assertIn(str(model), cmd)
+        self.assertNotIn(str(next_model), cmd)
+        self.assertIn(str(codec), cmd)
+        self.assertNotIn(str(next_codec), cmd)
+        seed_index = cmd.index("--seed") + 1
+        self.assertEqual(cmd[seed_index], "123")
+
     def test_config_store_sqlite_overrides_env_and_maps_qwen_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "settings.sqlite3"
@@ -511,11 +564,54 @@ class CoreTests(unittest.TestCase):
             )
 
             settings = store.load_settings()
+            raw = store.settings_dict()
 
         self.assertEqual(settings.tts_provider, "qwen3tts")
         self.assertEqual(settings.qwentts_cpp_voice_mode, "preset")
         self.assertEqual(settings.qwentts_cpp_speaker, "vivian")
         self.assertEqual(settings.qwentts_cpp_model, str(custom_model))
+        self.assertEqual(raw["qwentts_cpp_model"], str(custom_model))
+        self.assertEqual(raw["qwentts_cpp_speaker"], "vivian")
+        self.assertEqual(raw["qwentts_cpp_instruct"], "")
+
+    def test_config_store_keeps_qwen_legacy_fields_in_sync_when_switching_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "settings.sqlite3"
+            custom_model = Path(tmp) / "customvoice.gguf"
+            design_model = Path(tmp) / "design.gguf"
+            base_model = Path(tmp) / "base.gguf"
+            for path in (custom_model, design_model, base_model):
+                path.touch()
+
+            store = ConfigStore(db)
+            store.set_settings(
+                {
+                    "qwentts_cpp_voice_mode": "preset",
+                    "qwentts_cpp_voice_preset": "vivian",
+                    "qwentts_cpp_base_model": str(base_model),
+                    "qwentts_cpp_customvoice_model": str(custom_model),
+                    "qwentts_cpp_voicedesign_model": str(design_model),
+                }
+            )
+            preset = store.settings_dict()
+            store.set_settings(
+                {
+                    "qwentts_cpp_voice_mode": "design",
+                    "qwentts_cpp_voice_design": "cool, clear voice",
+                }
+            )
+            design = store.settings_dict()
+            store.set_settings({"qwentts_cpp_voice_mode": "default"})
+            default = store.settings_dict()
+
+        self.assertEqual(preset["qwentts_cpp_model"], str(custom_model))
+        self.assertEqual(preset["qwentts_cpp_speaker"], "vivian")
+        self.assertEqual(design["qwentts_cpp_model"], str(design_model))
+        self.assertEqual(design["qwentts_cpp_instruct"], "cool, clear voice")
+        self.assertEqual(design["qwentts_cpp_speaker"], "")
+        self.assertEqual(default["qwentts_cpp_model"], str(base_model))
+        self.assertEqual(default["qwentts_cpp_speaker"], "")
+        self.assertEqual(default["qwentts_cpp_instruct"], "")
 
     def test_config_store_falls_back_to_base_when_optional_qwen_voice_model_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -591,6 +687,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn("tts_voice_source", values)
         self.assertIn("tts_segment_max_chars", values)
         self.assertIn("qwentts_cpp_seed", values)
+        self.assertIn("hermes_history_max_messages", values)
+        self.assertIn("hermes_history_max_chars", values)
+        self.assertIn("hermes_history_idle_reset_seconds", values)
+        self.assertIn("hermes_agent_max_wait_seconds", values)
+        self.assertIn("hermes_filler_interval_seconds", values)
+        self.assertIn("hermes_max_fillers", values)
         self.assertEqual(bad_speaker.exception.status_code, 422)
 
     def test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied(self) -> None:

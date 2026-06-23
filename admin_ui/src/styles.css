@@ -1025,6 +1025,67 @@ button:disabled {
   margin-bottom: 16px;
 }
 
+.studio-commit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  background:
+    linear-gradient(135deg, rgba(123, 231, 216, 0.13), rgba(217, 149, 69, 0.10)),
+    rgba(255, 255, 255, 0.045);
+}
+
+.studio-commit h2 {
+  margin: 6px 0 4px;
+}
+
+.studio-commit p {
+  margin: 0;
+}
+
+.context-meter {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.context-meter div,
+.locked-note {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.045);
+  border-radius: var(--control-radius);
+}
+
+.context-meter div {
+  padding: 14px;
+}
+
+.context-meter strong {
+  display: block;
+  font-size: 30px;
+  line-height: 1;
+  color: #f4f0dc;
+}
+
+.context-meter span,
+.locked-note span {
+  color: #9aa8a1;
+  font-size: 13px;
+}
+
+.locked-note {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px;
+}
+
+.locked-note svg {
+  color: var(--cyan);
+  flex: 0 0 auto;
+}
+
 .persona-actions,
 .random-actions {
   display: flex;
@@ -1492,6 +1553,7 @@ textarea {
   .hero,
   .cockpit,
   .cockpit-hero,
+  .studio-commit,
   .voice-layout,
   .deploy-grid {
     grid-template-columns: 1fr;
@@ -1581,6 +1643,7 @@ textarea {
   }
 
   .panel-head,
+  .studio-commit,
   .switch-line {
     display: grid;
     align-items: stretch;

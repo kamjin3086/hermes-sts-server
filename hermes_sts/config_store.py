@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 
+logger = logging.getLogger(__name__)
 
 ENV_TO_ATTR: dict[str, str] = {
     "HERMES_STS_HOST": "host",
@@ -131,38 +133,59 @@ ATTR_TO_ENV = {attr: env for env, attr in ENV_TO_ATTR.items()}
 PERSONA_PROFILE_DEFAULTS = [
     {
         "id": "operator",
-        "name": "默认操作员",
+        "name": "默认同伴",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
-        "prompt": "你是一个可靠、直接、轻松自然的个人语音助手。回答简洁，优先给出可执行结论；语气有温度，但不过度卖萌或表演。",
+        "prompt": "你是一个可靠、直接、轻松自然的个人语音助手，像一直在线的聪明同伴。回答简洁，优先给出可执行结论；语气有温度，有一点机敏和松弛感，但不过度表演。",
     },
     {
-        "id": "systems_analyst",
-        "name": "系统分析师",
+        "id": "night_copilot",
+        "name": "夜航副驾",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
-        "prompt": "你是一个冷静、结构化的系统分析师。先判断问题本质，再给出清晰步骤和取舍；避免情绪化措辞，保持高信噪比。",
+        "prompt": "你是一个夜航副驾型语音助手，冷静、敏捷、带一点未来感。你会快速抓住用户真正想做的事，给出清晰下一步；必要时提醒风险，但不要说教。语气像并肩处理复杂任务的搭档，短句、有判断、有节奏。",
     },
     {
         "id": "news_anchor",
-        "name": "新闻播报员",
+        "name": "清醒播报",
         "voice_mode": "preset",
         "voice_ref": "ryan",
-        "prompt": "你是一个端庄、清晰、克制的新闻播报员。用词准确，节奏稳，避免口头禅和夸张情绪。回答像简短播报，不要闲聊式拖长。",
+        "prompt": "你是一个清醒、克制、声线稳定的简报型语音助手。用词准确，节奏稳，先给结论，再给一两句关键信息。适合播报状态、日程、新闻和摘要；不要夸张，不要拖长。",
     },
     {
         "id": "field_operator",
-        "name": "现场操作员",
+        "name": "快反执行",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
-        "prompt": "你是一个反应快、判断明确的现场操作员。回答短、准、能立刻执行；对不确定信息直接标明，不绕弯。",
+        "prompt": "你是一个快反执行型语音助手，反应快、判断明确、动作感强。回答短、准、能立刻执行；对不确定信息直接标明，不绕弯。适合设备控制、任务推进和即时决策，语气干净利落。",
     },
     {
         "id": "baritone_male",
-        "name": "磁性男中音",
+        "name": "冷感低音",
         "voice_mode": "design",
         "voice_ref": "male, middle aged, low pitch, warm baritone, calm tone",
-        "prompt": "你是一个沉稳、磁性、可靠的男中音语音助手。文字风格要从容、简洁、有安全感。不要过度热情，也不要像播报机器。",
+        "prompt": "你是一个冷感低音型语音助手，沉稳、磁性、可靠，有安全感。文字风格从容、简洁、有分寸，偶尔带一点低调幽默。不要过度热情，也不要像播报机器。",
+    },
+    {
+        "id": "soft_companion",
+        "name": "柔和陪伴",
+        "voice_mode": "default",
+        "voice_ref": "qwen-default",
+        "prompt": "你是一个柔和陪伴型语音助手，温柔、耐心、会照顾用户的情绪和节奏。回答要自然、轻一点，像认真听懂以后给出舒服的回应。可以适度表达关心，但不要腻，不要装可怜，也不要强行撒娇。",
+    },
+    {
+        "id": "taiwan_sweet",
+        "name": "台湾甜声",
+        "voice_mode": "design",
+        "voice_ref": "young adult female, sweet bright voice, Taiwanese Mandarin accent, lively but clear, natural pace",
+        "prompt": "你是一个声音甜、语气轻快的台湾风格语音助手。表达亲切、自然、有一点俏皮；中文回答可以带轻微台湾口语气质，但不要堆叠语气词。适合日常聊天、提醒、轻松陪伴；遇到严肃问题时要马上收敛，保持清楚可靠。",
+    },
+    {
+        "id": "quiet_cat",
+        "name": "安静猫系",
+        "voice_mode": "default",
+        "voice_ref": "qwen-default",
+        "prompt": "你是一个安静猫系语音助手，亲近、聪明、轻微撒娇，但始终有边界感。回答短而灵动，可以有一点软软的语气，但不要频繁喵、不要幼稚化。适合陪伴、提醒和轻松互动；涉及工作任务时切回清晰可靠的表达。",
     },
 ]
 
@@ -187,6 +210,7 @@ class ConfigStore:
         return conn
 
     def _init_db(self) -> None:
+        logger.info("DBG _init_db called path=%s", self.path)
         with self.connect() as conn:
             conn.executescript(
                 """
@@ -243,8 +267,9 @@ class ConfigStore:
 
     def ensure_defaults(self) -> None:
         now = time.time()
+        preset_value = None
         with self.connect() as conn:
-            conn.execute("delete from persona_profiles where id in ('assistant', 'soft_catgirl', 'taiwan_sweet')")
+            conn.execute("delete from persona_profiles where id in ('assistant', 'soft_catgirl', 'systems_analyst')")
             deleted_personas = {
                 row["id"]
                 for row in conn.execute("select id from deleted_persona_profiles").fetchall()
@@ -279,7 +304,8 @@ class ConfigStore:
                 "select value_json from settings where key='sts_persona_preset'"
             ).fetchone()
             preset_value = json.loads(preset["value_json"]) if preset else ""
-            if preset_value in {"assistant", "soft_catgirl", "taiwan_sweet"}:
+            if preset_value in {"assistant", "soft_catgirl", "systems_analyst"}:
+                logger.warning("DBG ensure_defaults migrating old persona preset=%s to 'operator'", preset_value)
                 for key, value in {
                     "sts_persona_preset": "operator",
                     "sts_persona_custom": "",
@@ -319,6 +345,10 @@ class ConfigStore:
                     "insert or ignore into settings values (?, ?, ?)",
                     (key, json.dumps(value, ensure_ascii=False), now),
                 )
+        logger.info(
+            "DBG ensure_defaults ran persona_preset=%s",
+            preset_value or "(no preset in DB)",
+        )
 
     def setup_complete(self) -> bool:
         row = self.get_setup_value("complete")
@@ -428,11 +458,71 @@ class ConfigStore:
             for key, value in values.items():
                 attr = ENV_TO_ATTR.get(key, key)
                 normalized[attr] = value
+            normalized = self._with_qwen_voice_derivatives(conn, normalized)
+            for attr, value in normalized.items():
                 conn.execute(
                     "insert or replace into settings values (?, ?, ?)",
                     (attr, json.dumps(value, ensure_ascii=False), now),
                 )
+        logger.info(
+            "DBG set_settings keys=%s persona_preset=%s persona_custom=%.80s voice_mode=%s voice_source=%s",
+            sorted(normalized),
+            normalized.get("sts_persona_preset", "<N/A>"),
+            normalized.get("sts_persona_custom", "<N/A>"),
+            normalized.get("qwentts_cpp_voice_mode", "<N/A>"),
+            normalized.get("tts_voice_source", "<N/A>"),
+        )
         return normalized
+
+    def _with_qwen_voice_derivatives(self, conn: sqlite3.Connection, normalized: dict[str, Any]) -> dict[str, Any]:
+        qwen_keys = {
+            "qwentts_cpp_voice_mode",
+            "qwentts_cpp_voice_preset",
+            "qwentts_cpp_voice_design",
+            "qwentts_cpp_clone_voice_id",
+            "qwentts_cpp_base_model",
+            "qwentts_cpp_customvoice_model",
+            "qwentts_cpp_voicedesign_model",
+        }
+        if not (set(normalized) & qwen_keys):
+            return normalized
+
+        rows = conn.execute("select key, value_json from settings").fetchall()
+        current = {row["key"]: json.loads(row["value_json"]) for row in rows}
+        merged = {**current, **normalized}
+        mode = str(merged.get("qwentts_cpp_voice_mode") or "default").strip().lower()
+        base_model = str(merged.get("qwentts_cpp_base_model") or "")
+        custom_model = str(merged.get("qwentts_cpp_customvoice_model") or "")
+        design_model = str(merged.get("qwentts_cpp_voicedesign_model") or "")
+
+        derived = {
+            "qwentts_cpp_speaker": "",
+            "qwentts_cpp_instruct": "",
+            "qwentts_cpp_ref_wav": "",
+            "qwentts_cpp_ref_text": "",
+            "qwentts_cpp_ref_spk": "",
+            "qwentts_cpp_ref_rvq": "",
+        }
+        if mode == "preset":
+            derived["qwentts_cpp_model"] = custom_model
+            derived["qwentts_cpp_speaker"] = str(merged.get("qwentts_cpp_voice_preset") or "")
+        elif mode == "design":
+            derived["qwentts_cpp_model"] = design_model
+            derived["qwentts_cpp_instruct"] = str(merged.get("qwentts_cpp_voice_design") or "")
+        elif mode == "clone":
+            derived["qwentts_cpp_model"] = base_model
+            clone_id = str(merged.get("qwentts_cpp_clone_voice_id") or "")
+            clone = conn.execute("select * from voice_profiles where id=?", (clone_id,)).fetchone()
+            if clone:
+                clone_dict = dict(clone)
+                derived["qwentts_cpp_ref_wav"] = clone_dict.get("ref_wav", "") or ""
+                derived["qwentts_cpp_ref_text"] = clone_dict.get("ref_text", "") or ""
+                derived["qwentts_cpp_ref_spk"] = clone_dict.get("ref_spk", "") or ""
+                derived["qwentts_cpp_ref_rvq"] = clone_dict.get("ref_rvq", "") or ""
+        else:
+            derived["qwentts_cpp_voice_mode"] = "default"
+            derived["qwentts_cpp_model"] = base_model
+        return {**normalized, **derived}
 
     def persona_profiles(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

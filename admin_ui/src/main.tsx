@@ -51,6 +51,7 @@ type ModelStatus = Record<string, { path: string; installed: boolean }>;
 type Metric = { id: number; kind: string; value: Record<string, any>; created_at: number };
 type AdminState = {
   health: Record<string, any>;
+  llm_context: Record<string, any>;
   settings: { values: SettingsValues; groups: Record<string, string[]>; raw: SettingsValues };
   setup: { complete: boolean; env_imported: boolean };
   runtime?: { started_at: number; uptime_seconds: number };
@@ -184,7 +185,7 @@ function App() {
         {tab === "dashboard" && <Dashboard state={state} patch={patch} goStudio={() => setTab("studio")} />}
         {tab === "studio" && <Studio state={state} patch={patch} reload={load} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={() => setTab("setup")} />}
         {tab === "setup" && <Setup state={state} patch={patch} reload={load} setBusy={setBusy} setNotice={setNotice} />}
-        {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} />}
+        {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} reload={load} setNotice={setNotice} />}
       </main>
     </div>
   );
@@ -301,6 +302,7 @@ function Studio({
 }) {
   const values = state.settings.values;
   const activePersona = state.personas.find((p) => p.id === values.sts_persona_preset) ?? state.personas[0];
+  const [dirty, setDirty] = useState(false);
   const [personaId, setPersonaId] = useState(activePersona?.id ?? "operator");
   const [personaName, setPersonaName] = useState(activePersona?.name ?? "自定义人格");
   const [prompt, setPrompt] = useState(values.sts_persona_custom || activePersona?.prompt || "");
@@ -308,16 +310,18 @@ function Studio({
   const [audioUrl, setAudioUrl] = useState("");
 
   useEffect(() => {
+    if (dirty) return;
     const persona = state.personas.find((p) => p.id === values.sts_persona_preset) ?? state.personas[0];
     setPersonaId(persona?.id ?? "operator");
     setPersonaName(persona?.name ?? "自定义人格");
     setPrompt(values.sts_persona_custom || persona?.prompt || "");
-  }, [state.personas, values.sts_persona_custom, values.sts_persona_preset]);
+  }, [dirty, state.personas, values.sts_persona_custom, values.sts_persona_preset]);
 
   const selectPersona = (persona: Persona) => {
     setPersonaId(persona.id);
     setPersonaName(persona.name);
     setPrompt(persona.prompt);
+    setDirty(true);
   };
 
   const personaPayload = (apply: boolean) => {
@@ -345,15 +349,38 @@ function Studio({
   };
 
   const applyPersona = async () => {
-    const payload = personaPayload(true);
-    await api("/api/personas", {
-      method: "POST",
-      body: JSON.stringify(payload),
+    let appliedPersonaId = personaId;
+    if (personaId === "custom" || !state.personas.some((p) => p.id === personaId)) {
+      const payload = personaPayload(false);
+      await api("/api/personas", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      appliedPersonaId = payload.id;
+      setPersonaId(payload.id);
+    }
+    await patch({
+      sts_persona_source: values.sts_persona_source || "settings",
+      sts_persona_preset: appliedPersonaId,
+      sts_persona_custom: prompt,
     });
-    setPersonaId(payload.id);
+    setDirty(false);
     await reload();
-    setNotice("人格和声线已应用");
-    window.setTimeout(() => setNotice(""), 1800);
+    setNotice("人格已应用");
+    window.setTimeout(() => setNotice(""), 2200);
+  };
+
+  const reapplySavedConfig = async () => {
+    setBusy("reapply");
+    try {
+      const data = await api<{ state: AdminState }>("/api/settings/reapply", { method: "POST" });
+      setNotice("已重新应用数据库中的已保存配置");
+      window.setTimeout(() => setNotice(""), 2200);
+      await reload();
+      return data;
+    } finally {
+      setBusy("");
+    }
   };
 
   const deletePersona = async (persona: Persona) => {
@@ -382,28 +409,22 @@ function Studio({
     setPersonaId("custom");
     setPersonaName("新人格");
     setPrompt("你是 Hermes 的语音助手。保持回答自然、简洁、有分寸，先理解用户意图，再给出清晰可执行的回应。");
+    setDirty(true);
   };
 
   const switchTtsProvider = async (provider: "qwen3tts" | "sherpa_kokoro") => {
     if (values.tts_provider === provider || busy === "tts-provider") return;
-    setBusy("tts-provider");
-    try {
-      await patch({ tts_provider: provider });
-      await reload();
-      setNotice(provider === "qwen3tts" ? "已切换到 Qwen3TTS" : "已切换到 Kokoro");
-      window.setTimeout(() => setNotice(""), 1800);
-    } catch {
-      window.setTimeout(() => setNotice(""), 3600);
-    } finally {
-      setBusy("");
-    }
+    await patch({ tts_provider: provider, tts_voice_source: "settings" });
+    await reload();
+    setNotice(provider === "qwen3tts" ? "已切换到 Qwen3TTS" : "已切换到 Kokoro");
+    window.setTimeout(() => setNotice(""), 1600);
   };
 
   const preview = async () => {
     setBusy("preview");
     const data = await api<{ audio_wav_base64: string; elapsed_ms: number }>("/api/tts/preview", {
       method: "POST",
-      body: JSON.stringify({ text: previewText }),
+      body: JSON.stringify({ text: previewText, ...previewVoicePayload(values) }),
     });
     const blob = base64ToBlob(data.audio_wav_base64, "audio/wav");
     setAudioUrl(URL.createObjectURL(blob));
@@ -414,6 +435,7 @@ function Studio({
 
   const onPromptChange = (next: string) => {
     setPrompt(next);
+    setDirty(true);
     if (personaId !== "custom") {
       setPersonaId("custom");
       setPersonaName("自定义人格");
@@ -422,6 +444,17 @@ function Studio({
 
   return (
     <div className="grid studio">
+      <section className="panel span-12 studio-commit">
+        <div>
+          <span className="eyebrow"><CheckCircle2 size={15} /> 全局应用</span>
+          <h2>重新应用已保存配置</h2>
+          <p className="muted">声线和引擎选择会在点击“使用/切换”时立即保存；这个按钮只负责从数据库重载并重建运行组件。</p>
+        </div>
+        <button className="primary apply-global" onClick={reapplySavedConfig} disabled={busy === "reapply" || busy === "saving"}>
+          <CheckCircle2 size={16} />{busy === "reapply" ? "应用中" : "重新应用"}
+        </button>
+      </section>
+
       <section className="panel span-5">
         <div className="panel-head">
           <div>
@@ -430,7 +463,7 @@ function Studio({
           </div>
           <button className="secondary" onClick={newPersona}><Plus size={16} />新增</button>
         </div>
-        <p className="muted">点选只会装载到编辑框，确认后再应用到实时助手。</p>
+        <p className="muted">点选只会装载到编辑框；改完提示词后用“应用人格”提交。</p>
         <div className="persona-list">
           {state.personas.map((persona) => (
             <div key={persona.id} className={personaId === persona.id ? "persona selected" : "persona"}>
@@ -454,12 +487,12 @@ function Studio({
           </div>
           <div className="persona-actions">
             <button className="secondary" onClick={savePersona}><Save size={16} />保存预设</button>
-            <button className="primary" onClick={applyPersona}><CheckCircle2 size={16} />应用</button>
+            <button className="primary" onClick={applyPersona}><CheckCircle2 size={16} />应用人格</button>
           </div>
         </div>
         <label className="field">
           <span>角色名称</span>
-          <input value={personaName} onChange={(e) => { setPersonaName(e.target.value); setPersonaId("custom"); }} />
+          <input value={personaName} onChange={(e) => { setPersonaName(e.target.value); setPersonaId("custom"); setDirty(true); }} />
         </label>
         <label className="field">
           <span>完整提示词</span>
@@ -483,9 +516,9 @@ function Studio({
           </div>
         </div>
         {values.tts_provider === "qwen3tts" ? (
-          <QwenVoice state={state} patch={patch} reload={reload} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={goSetup} />
+          <QwenVoice state={state} values={values} patch={patch} reload={reload} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={goSetup} />
         ) : (
-          <KokoroVoice state={state} patch={patch} />
+          <KokoroVoice state={state} values={values} patch={patch} />
         )}
       </section>
 
@@ -506,6 +539,7 @@ function Studio({
 
 function QwenVoice({
   state,
+  values,
   patch,
   reload,
   busy,
@@ -514,6 +548,7 @@ function QwenVoice({
   goSetup,
 }: {
   state: AdminState;
+  values: SettingsValues;
   patch: (v: SettingsValues) => Promise<void>;
   reload: () => Promise<void>;
   busy: string;
@@ -521,7 +556,6 @@ function QwenVoice({
   setNotice: (v: string) => void;
   goSetup: () => void;
 }) {
-  const values = state.settings.values;
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [cloneName, setCloneName] = useState("我的克隆音色");
   const [cloneText, setCloneText] = useState("");
@@ -579,7 +613,7 @@ function QwenVoice({
       method: "POST",
       body: JSON.stringify({ name: randomName || `Seed ${lastRandomSeed}`, seed: lastRandomSeed, tags: splitTags(randomTags) }),
     });
-    await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: lastRandomSeed });
+    await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: lastRandomSeed, tts_voice_source: "settings" });
     await reload();
     setNotice(`已收藏并使用 seed ${lastRandomSeed}`);
     window.setTimeout(() => setNotice(""), 1800);
@@ -614,14 +648,15 @@ function QwenVoice({
   };
 
   const applyVoiceProfile = async (voiceId: string) => {
-    const data = await api<{ state: AdminState }>("/api/qwen/voices/apply", {
-      method: "POST",
-      body: JSON.stringify({ voice_id: voiceId }),
-    });
+    const voice = state.voices.find((item) => item.id === voiceId);
+    if (!voice) {
+      setNotice("没有找到这条收藏声线");
+      return;
+    }
+    await patch({ ...settingsForVoiceProfile(voice), tts_voice_source: "settings" });
+    await reload();
     setNotice("收藏声线已启用");
     window.setTimeout(() => setNotice(""), 1800);
-    await reload();
-    return data;
   };
 
   const deleteVoiceProfile = async (voice: VoiceProfile) => {
@@ -671,9 +706,9 @@ function QwenVoice({
       window.setTimeout(() => setNotice(""), 1600);
       return;
     }
-    await patch({ qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: prompt });
+    await patch({ qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: prompt, tts_voice_source: "settings" });
     await reload();
-    setNotice("描述造声已应用");
+    setNotice("描述造声已启用");
     window.setTimeout(() => setNotice(""), 1800);
   };
 
@@ -686,9 +721,10 @@ function QwenVoice({
     if (valuesToPatch.qwentts_cpp_voice_mode === "design") {
       valuesToPatch.qwentts_cpp_voice_design = workshopSuggestion.design_prompt || "";
     }
-    await patch(valuesToPatch);
+    await patch({ ...valuesToPatch, tts_voice_source: "settings" });
+    await reload();
     if (workshopSuggestion.persona_prompt) {
-      setNotice("音色方案已应用，提示词可复制到人格里微调");
+      setNotice("音色方案已启用，提示词可复制到人格里微调");
     }
   };
 
@@ -703,14 +739,16 @@ function QwenVoice({
         prompt: workshopSuggestion.persona_prompt || workshopBrief,
         voice_mode: mode,
         voice_ref: mode === "design" ? workshopSuggestion.design_prompt || "" : "qwen-default",
-        apply: true,
+        apply: false,
       }),
     });
-    if (mode === "default") {
-      await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: Number(workshopSuggestion.seed || 42) });
+    if (mode === "design") {
+      await patch({ qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: workshopSuggestion.design_prompt || "", tts_voice_source: "settings" });
+    } else {
+      await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: Number(workshopSuggestion.seed || 42), tts_voice_source: "settings" });
     }
     await reload();
-    setNotice("完整角色已保存并应用");
+    setNotice("完整角色已保存，声线已启用");
     window.setTimeout(() => setNotice(""), 1800);
   };
 
@@ -731,7 +769,8 @@ function QwenVoice({
       body: JSON.stringify({ voice_id: uploaded.voice.id }),
     });
     setBusy("");
-    setNotice("克隆音色已预编码并设为当前音色");
+    await patch({ qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: uploaded.voice.id, tts_voice_source: "settings" });
+    setNotice("克隆音色已预编码并启用");
     await reload();
   };
 
@@ -743,7 +782,7 @@ function QwenVoice({
     if (mode === "design" && !values.qwentts_cpp_voice_design) {
       valuesToPatch.qwentts_cpp_voice_design = "clear, calm, natural Mandarin voice with a cool and reliable tone";
     }
-    await patch(valuesToPatch);
+    await patch({ ...valuesToPatch, tts_voice_source: "settings" });
     await reload();
   };
 
@@ -769,7 +808,7 @@ function QwenVoice({
             <label className="field">
               <span>预设 speaker</span>
               <div className="select-wrap">
-                <select value={values.qwentts_cpp_voice_preset || "vivian"} onChange={(e) => patch({ qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: e.target.value })}>
+                <select value={values.qwentts_cpp_voice_preset || "vivian"} onChange={(e) => patch({ qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: e.target.value, tts_voice_source: "settings" })}>
                   {state.qwen.speakers.map((speaker) => <option key={speaker} value={speaker}>{speakerNames[speaker] ?? speaker}</option>)}
                 </select>
                 <ChevronDown size={16} />
@@ -784,7 +823,7 @@ function QwenVoice({
                     <button className="secondary" disabled={!customVoiceReady} onClick={() => previewVoice({ voice_mode: "preset", speaker }, `${speakerNames[speaker] ?? speaker} 试听完成`)}>
                       <Play size={15} />试听
                     </button>
-                    <button className="primary" onClick={() => patch({ qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: speaker })}>
+                    <button className="primary" onClick={() => patch({ qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: speaker, tts_voice_source: "settings" })}>
                       使用
                     </button>
                   </div>
@@ -848,7 +887,7 @@ function QwenVoice({
               <textarea value={designDraft} onChange={(e) => setDesignDraft(e.target.value)} placeholder="例如：female, young adult, clear warm Mandarin voice, natural pace, soft tone" />
             </label>
             <div className="design-actions">
-              <button className="primary" onClick={applyDesignDraft}><Check size={16} />应用描述</button>
+              <button className="primary" onClick={applyDesignDraft}><Check size={16} />使用描述</button>
               <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: designDraft }, "描述造声试听完成")} disabled={!designDraft.trim() || !voiceDesignReady}>
                 <Play size={16} />试听
               </button>
@@ -874,7 +913,7 @@ function QwenVoice({
             <button className="primary" onClick={uploadClone}><Upload size={16} />上传并预编码</button>
             <div className="voice-pills">
               {state.voices.filter((v) => v.mode === "clone").map((voice) => (
-                <button key={voice.id} className={values.qwentts_cpp_clone_voice_id === voice.id ? "pill selected" : "pill"} onClick={() => patch({ qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id })}>
+                <button key={voice.id} className={values.qwentts_cpp_clone_voice_id === voice.id ? "pill selected" : "pill"} onClick={() => patch({ qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id, tts_voice_source: "settings" })}>
                   {voice.name}{voice.ref_spk ? " · ready" : " · 未预编码"}
                 </button>
               ))}
@@ -902,7 +941,7 @@ function QwenVoice({
                 seed: workshopSuggestion.seed,
                 text: workshopSuggestion.preview_text,
               }, "AI 方案试听完成")}><Play size={15} />试听方案</button>
-              <button className="primary" onClick={applySuggestion}>应用方案</button>
+              <button className="primary" onClick={applySuggestion}>使用方案</button>
               <button className="primary" onClick={saveSuggestionAsPersona}>保存成完整角色</button>
             </div>
           )}
@@ -943,9 +982,9 @@ function QwenVoice({
         <button className="secondary" onClick={goSetup}>
           <Download size={16} />模型设置
         </button>
-        <div className="switch-line">
-          <span>声线来源</span>
-          <SwitchControl checked={values.tts_voice_source !== "ws"} onChange={(checked) => patch({ tts_voice_source: checked ? "settings" : "ws" })} onLabel="界面控制" offLabel="跟随 WS" />
+        <div className="locked-note">
+          <CheckCircle2 size={16} />
+          <span>声线点击“使用/切换”后立即保存并热更新；WS 传入 voice 不会覆盖当前音色。</span>
         </div>
         {voicePreviewUrl && <audio controls src={voicePreviewUrl} className="audio" autoPlay onEnded={continueSeedQueue} />}
       </div>
@@ -953,12 +992,19 @@ function QwenVoice({
   );
 }
 
-function KokoroVoice({ state, patch }: { state: AdminState; patch: (v: SettingsValues) => Promise<void> }) {
-  const values = state.settings.values;
+function KokoroVoice({
+  state,
+  values,
+  patch,
+}: {
+  state: AdminState;
+  values: SettingsValues;
+  patch: (v: SettingsValues) => Promise<void>;
+}) {
   return (
     <div className="kokoro-grid">
       {state.kokoro_voices.map((voice) => (
-        <button key={voice.id} className={Number(values.sherpa_kokoro_voice) === voice.id ? "voice-card selected" : "voice-card"} onClick={() => patch({ sherpa_kokoro_voice: voice.id })}>
+        <button key={voice.id} className={Number(values.sherpa_kokoro_voice) === voice.id ? "voice-card selected" : "voice-card"} onClick={() => patch({ sherpa_kokoro_voice: voice.id, tts_voice_source: "settings" })}>
           <strong>{voice.name}</strong>
           <span>{voice.note}</span>
         </button>
@@ -1056,8 +1102,26 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
   );
 }
 
-function Advanced({ state, patch, busy }: { state: AdminState; patch: (v: SettingsValues) => Promise<void>; busy: string }) {
+function Advanced({
+  state,
+  patch,
+  busy,
+  reload,
+  setNotice,
+}: {
+  state: AdminState;
+  patch: (v: SettingsValues) => Promise<void>;
+  busy: string;
+  reload: () => Promise<void>;
+  setNotice: (v: string) => void;
+}) {
   const values = state.settings.values;
+  const resetContext = async () => {
+    await api("/api/llm/context/reset", { method: "POST" });
+    await reload();
+    setNotice("语音短期上下文已清空，Hermes 长期记忆不受影响");
+    window.setTimeout(() => setNotice(""), 2200);
+  };
   return (
     <div className="grid">
       <section className="panel span-6">
@@ -1071,7 +1135,27 @@ function Advanced({ state, patch, busy }: { state: AdminState; patch: (v: Settin
         <EditableField label="固定声线种子" value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} />
       </section>
       <section className="panel span-6">
-        <span className="eyebrow"><Gauge size={15} /> 对话细节</span>
+        <span className="eyebrow"><Bot size={15} /> 上下文控制</span>
+        <div className="context-meter">
+          <div>
+            <strong>{state.llm_context?.messages ?? 0}</strong>
+            <span>本地上下文消息</span>
+          </div>
+          <div>
+            <strong>{state.llm_context?.chars ?? 0}</strong>
+            <span>约字符数</span>
+          </div>
+        </div>
+        <p className="muted">控制 STS 调用 Hermes/Agent 时附带的短期对话历史。它不是人格提示词，也不会删除 Hermes 自己的长期记忆。</p>
+        <button className="secondary" onClick={resetContext} disabled={!state.llm_context?.reset_available}>
+          <RefreshCw size={16} />立即清空短期上下文
+        </button>
+        <EditableField label="最多保留消息数" value={values.hermes_history_max_messages ?? 40} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} />
+        <EditableField label="最多保留字符数" value={values.hermes_history_max_chars ?? 12000} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} />
+        <EditableField label="空闲多久后自动清空（秒）" value={values.hermes_history_idle_reset_seconds ?? 900} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} />
+      </section>
+      <section className="panel span-6">
+        <span className="eyebrow"><Gauge size={15} /> 对话节奏</span>
         <label className="field">
           <span>Hermes 语音快答</span>
           <SwitchControl
@@ -1081,8 +1165,14 @@ function Advanced({ state, patch, busy }: { state: AdminState; patch: (v: Settin
             offLabel="关闭"
           />
         </label>
+        <EditableField label="最多等待 Hermes（秒）" value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} />
         <EditableField label="首次等待提示延迟（秒）" value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} />
+        <EditableField label="等待提示间隔（秒）" value={values.hermes_filler_interval_seconds ?? 12} onSave={(v) => patch({ hermes_filler_interval_seconds: Number(v) })} />
+        <EditableField label="最多等待提示次数" value={values.hermes_max_fillers ?? 1} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} />
         <EditableField label="每段最多字符" value={values.tts_segment_max_chars ?? 90} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} />
+      </section>
+      <section className="panel span-6">
+        <span className="eyebrow"><Mic2 size={15} /> 识别与打断</span>
         <EditableField label="VAD 阈值" value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} />
         <EditableField label="最短静音（秒）" value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} />
         <p className="muted">{busy === "saving" ? "正在保存..." : "高级项保存后会按需重建 STT/TTS/LLM 组件。"}</p>
@@ -1219,6 +1309,41 @@ function splitTags(raw: any) {
     .split(/[，,\s]+/)
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function settingsForVoiceProfile(voice: VoiceProfile): SettingsValues {
+  const mode = String(voice.mode || "default");
+  if (mode === "seed") {
+    return { qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: Number(voice.seed || 42) };
+  }
+  if (mode === "preset") {
+    return { qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: voice.speaker || "" };
+  }
+  if (mode === "design") {
+    return { qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: voice.design_prompt || "" };
+  }
+  if (mode === "clone") {
+    return { qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id || "" };
+  }
+  return { qwentts_cpp_voice_mode: "default" };
+}
+
+function previewVoicePayload(values: SettingsValues): SettingsValues {
+  const mode = String(values.qwentts_cpp_voice_mode || "default");
+  const payload: SettingsValues = {
+    voice_mode: mode,
+    seed: Number(values.qwentts_cpp_seed ?? 42),
+  };
+  if (mode === "preset") {
+    payload.speaker = values.qwentts_cpp_voice_preset || "vivian";
+  }
+  if (mode === "design") {
+    payload.design_prompt = values.qwentts_cpp_voice_design || "";
+  }
+  if (mode === "clone") {
+    payload.clone_voice_id = values.qwentts_cpp_clone_voice_id || "";
+  }
+  return payload;
 }
 
 function voiceLabel(state: AdminState) {

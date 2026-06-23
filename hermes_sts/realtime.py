@@ -247,12 +247,17 @@ class RealtimeSession:
         if isinstance(session.get("tools"), list):
             self.tools.set_client_tools(session.get("tools"))
         logger.info(
-            "Session updated session_id=%s instructions_chars=%d persona_source=%s voice_source=%s ws_voice=%s client_tools=%d local_tools=%d",
+            "DBG session.update session_id=%s instructions_chars=%d persona_source=%s voice_source=%s"
+            " ws_voice=%s settings_persona_preset=%s settings_persona_custom=%.60s settings_voice_mode=%s"
+            " client_tools=%d local_tools=%d",
             self.session_id,
             len(self.instructions),
             self.settings.sts_persona_source,
             self.settings.tts_voice_source,
             self._voice_label(self.session_voice),
+            self.settings.sts_persona_preset,
+            self.settings.sts_persona_custom or "(empty)",
+            self.settings.qwentts_cpp_voice_mode,
             len(self.tools.client_tool_names()),
             len(self.tools.local_tool_names()),
         )
@@ -347,7 +352,16 @@ class RealtimeSession:
         settings_persona = build_persona_instructions(self.settings)
         if self.settings.sts_persona_source.strip().lower() == "ws":
             ws_instructions = self._merge_instructions(self.instructions, response_instructions or "")
-            return ws_instructions or settings_persona
+            result = ws_instructions or settings_persona
+            logger.info(
+                "DBG effective_instructions session_id=%s source=ws preset=%s chars=%d",
+                self.session_id, self.settings.sts_persona_preset, len(result),
+            )
+            return result
+        logger.info(
+            "DBG effective_instructions session_id=%s source=settings preset=%s chars=%d",
+            self.session_id, self.settings.sts_persona_preset, len(settings_persona),
+        )
         return settings_persona
 
     def _consume_response_voice(self) -> TtsVoice | None:
@@ -356,11 +370,19 @@ class RealtimeSession:
         return voice
 
     def _effective_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
-        if self.settings.tts_voice_source.strip().lower() == "ws":
-            for voice in (response_voice, self.session_voice):
-                if voice and not voice.is_empty():
-                    return voice
         return TtsVoice.from_settings(self.settings)
+
+    def _turn_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
+        voice = self._effective_tts_voice(response_voice)
+        logger.info(
+            "DBG turn_tts_voice session_id=%s voice_mode=%s speaker=%s instruct=%.50s source=%s",
+            self.session_id,
+            self.settings.qwentts_cpp_voice_mode,
+            voice.speaker or "(none)",
+            voice.instruct or "(none)",
+            self.settings.tts_voice_source,
+        )
+        return voice
 
     @staticmethod
     def _voice_label(voice: TtsVoice | None) -> str:
@@ -522,7 +544,11 @@ class RealtimeSession:
         voice: TtsVoice | None = None,
     ) -> None:
         instructions = instructions if instructions is not None else self._effective_instructions()
-        voice = self._effective_tts_voice(voice)
+        voice = self._turn_tts_voice(voice)
+        logger.info(
+            "DBG respond_with_agent_wait session_id=%s transcript_chars=%d instructions_chars=%d",
+            self.session_id, len(transcript), len(instructions),
+        )
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
         llm_task = asyncio.create_task(
@@ -788,7 +814,7 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         voice: TtsVoice | None = None,
     ) -> None:
-        voice = self._effective_tts_voice(voice)
+        voice = voice if voice is not None else self._turn_tts_voice()
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
         await self._send_response_created(response_id, item_id, metrics=metrics)
@@ -856,20 +882,9 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         voice: TtsVoice | None = None,
     ) -> bytes:
-        voice = self._effective_tts_voice(voice)
+        voice = voice if voice is not None else self._turn_tts_voice()
         started = time.perf_counter()
-        try:
-            pcm16 = await self.tts.synthesize(text, voice=voice)
-        except Exception:
-            if self.settings.tts_voice_source.strip().lower() != "ws" or voice.is_empty():
-                raise
-            fallback_voice = TtsVoice.from_settings(self.settings)
-            logger.warning(
-                "TTS failed with WS voice %s; retrying configured voice",
-                self._voice_label(voice),
-                exc_info=True,
-            )
-            pcm16 = await self.tts.synthesize(text, voice=fallback_voice)
+        pcm16 = await self.tts.synthesize(text, voice=voice)
         elapsed_ms = (time.perf_counter() - started) * 1000
         if metrics:
             metrics.tts_segments += 1

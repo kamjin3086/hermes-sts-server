@@ -23,14 +23,28 @@ class TtsVoice:
     ref_text: str = ""
     ref_spk: str = ""
     ref_rvq: str = ""
+    model: str = ""
+    codec: str = ""
+    lang: str = ""
+    audio_format: str = ""
+    seed: int | None = None
+    extra_args: str = ""
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "TtsVoice":
         mode = settings.qwentts_cpp_voice_mode.strip().lower()
+        qwen_kwargs = {
+            "model": settings.qwentts_cpp_model or _qwen_model_path(settings),
+            "codec": settings.qwentts_cpp_codec,
+            "lang": settings.qwentts_cpp_lang,
+            "audio_format": settings.qwentts_cpp_format,
+            "seed": settings.qwentts_cpp_seed,
+            "extra_args": settings.qwentts_cpp_extra_args,
+        }
         if mode == "preset":
-            return cls(speaker=settings.qwentts_cpp_voice_preset)
+            return cls(speaker=settings.qwentts_cpp_voice_preset, **qwen_kwargs)
         if mode == "design":
-            return cls(instruct=settings.qwentts_cpp_voice_design)
+            return cls(instruct=settings.qwentts_cpp_voice_design, **qwen_kwargs)
         return cls(
             speaker=settings.qwentts_cpp_speaker,
             instruct=settings.qwentts_cpp_instruct,
@@ -38,6 +52,7 @@ class TtsVoice:
             ref_text=settings.qwentts_cpp_ref_text,
             ref_spk=settings.qwentts_cpp_ref_spk,
             ref_rvq=settings.qwentts_cpp_ref_rvq,
+            **qwen_kwargs,
         )
 
     def is_empty(self) -> bool:
@@ -71,6 +86,15 @@ class TtsVoice:
 class TtsProvider(Protocol):
     async def synthesize(self, text: str, *, voice: TtsVoice | None = None) -> bytes:
         ...
+
+
+def _qwen_model_path(settings: Settings) -> str:
+    mode = settings.qwentts_cpp_voice_mode.strip().lower()
+    if mode == "preset":
+        return settings.qwentts_cpp_customvoice_model or settings.qwentts_cpp_model
+    if mode == "design":
+        return settings.qwentts_cpp_voicedesign_model or settings.qwentts_cpp_model
+    return settings.qwentts_cpp_base_model or settings.qwentts_cpp_model
 
 
 class WindowsSapiTts:
@@ -261,26 +285,22 @@ class QwenTtsCpp(CommandWavTts):
     def _model_path(self) -> str:
         if self.settings.qwentts_cpp_model:
             return self.settings.qwentts_cpp_model
-        mode = self.settings.qwentts_cpp_voice_mode.strip().lower()
-        if mode == "preset":
-            return self.settings.qwentts_cpp_customvoice_model or self.settings.qwentts_cpp_model
-        if mode == "design":
-            return self.settings.qwentts_cpp_voicedesign_model or self.settings.qwentts_cpp_model
-        return self.settings.qwentts_cpp_base_model or self.settings.qwentts_cpp_model
+        return _qwen_model_path(self.settings)
 
     def _command(self, wav_path: Path, *, voice: TtsVoice | None = None) -> list[str]:
         voice = voice or TtsVoice.from_settings(self.settings)
         cmd = [
             str(self.bin_path),
             "--model",
-            self._model_path(),
+            voice.model or self._model_path(),
             "--codec",
-            self.settings.qwentts_cpp_codec,
+            voice.codec or self.settings.qwentts_cpp_codec,
             "--format",
-            self.settings.qwentts_cpp_format,
+            voice.audio_format or self.settings.qwentts_cpp_format,
         ]
-        if self.settings.qwentts_cpp_lang:
-            cmd.extend(["--lang", self.settings.qwentts_cpp_lang])
+        lang = voice.lang or self.settings.qwentts_cpp_lang
+        if lang:
+            cmd.extend(["--lang", lang])
         has_clone = bool(voice.ref_wav or voice.ref_spk or voice.ref_rvq)
         if voice.speaker and not has_clone:
             cmd.extend(["--speaker", voice.speaker])
@@ -294,9 +314,10 @@ class QwenTtsCpp(CommandWavTts):
             cmd.extend(["--ref-spk", voice.ref_spk])
         if voice.ref_rvq:
             cmd.extend(["--ref-rvq", voice.ref_rvq])
-        cmd.extend(["--seed", str(self.settings.qwentts_cpp_seed)])
-        if self.settings.qwentts_cpp_extra_args:
-            cmd.extend(shlex.split(self.settings.qwentts_cpp_extra_args))
+        cmd.extend(["--seed", str(voice.seed if voice.seed is not None else self.settings.qwentts_cpp_seed)])
+        extra_args = voice.extra_args if voice.extra_args else self.settings.qwentts_cpp_extra_args
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
         cmd.extend(["-o", str(wav_path)])
         return cmd
 

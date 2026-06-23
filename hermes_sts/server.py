@@ -63,7 +63,7 @@ def create_app() -> FastAPI:
             settings.sherpa_kokoro_voice,
         )
 
-    app.include_router(create_admin_router(settings, rebuild_components))
+    app.include_router(create_admin_router(settings, rebuild_components, lambda: app.state.llm))
 
     @app.get("/health")
     async def health() -> dict:

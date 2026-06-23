@@ -68,10 +68,10 @@ class Settings:
     hermes_timeout_seconds: float = _float_env("HERMES_TIMEOUT_SECONDS", 45.0)
     hermes_connect_timeout_seconds: float = _float_env("HERMES_CONNECT_TIMEOUT_SECONDS", 3.0)
     hermes_read_timeout_seconds: float = _float_env("HERMES_READ_TIMEOUT_SECONDS", hermes_timeout_seconds)
-    hermes_agent_max_wait_seconds: float = _float_env("HERMES_AGENT_MAX_WAIT_SECONDS", 240.0)
-    hermes_first_filler_delay_seconds: float = _float_env("HERMES_FIRST_FILLER_DELAY_SECONDS", 1.2)
-    hermes_filler_interval_seconds: float = _float_env("HERMES_FILLER_INTERVAL_SECONDS", 8.0)
-    hermes_max_fillers: int = _int_env("HERMES_MAX_FILLERS", 2)
+    hermes_agent_max_wait_seconds: float = _float_env("HERMES_AGENT_MAX_WAIT_SECONDS", 60.0)
+    hermes_first_filler_delay_seconds: float = _float_env("HERMES_FIRST_FILLER_DELAY_SECONDS", 3.0)
+    hermes_filler_interval_seconds: float = _float_env("HERMES_FILLER_INTERVAL_SECONDS", 12.0)
+    hermes_max_fillers: int = _int_env("HERMES_MAX_FILLERS", 1)
     hermes_allow_fallback: bool = _bool_env("HERMES_ALLOW_FALLBACK", True)
     hermes_fallback_text: str = os.getenv(
         "HERMES_FALLBACK_TEXT",

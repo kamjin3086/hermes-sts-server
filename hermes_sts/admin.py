@@ -12,7 +12,7 @@ import uuid
 import wave
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.request import urlretrieve
 
 import httpx
@@ -94,7 +94,7 @@ class PreviewRequest(BaseModel):
     seed: int | None = None
 
 
-def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
+def create_admin_router(settings: Settings, rebuild_components, get_llm: Callable[[], Any] | None = None) -> APIRouter:
     store = ConfigStore.default()
     router = APIRouter()
 
@@ -102,6 +102,14 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
         new_settings = store.load_settings()
         for key, value in vars(new_settings).items():
             object.__setattr__(settings, key, value)
+        logger.info(
+            "DBG refresh_settings persona_preset=%s persona_custom=%.80s voice_mode=%s voice_source=%s persona_source=%s",
+            settings.sts_persona_preset,
+            settings.sts_persona_custom or "(empty)",
+            settings.qwentts_cpp_voice_mode,
+            settings.tts_voice_source,
+            settings.sts_persona_source,
+        )
         return settings
 
     @router.get("/", response_class=HTMLResponse)
@@ -124,6 +132,7 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
         current = refresh_settings()
         return {
             "health": _health(current),
+            "llm_context": _llm_context_payload(get_llm() if get_llm else None, current),
             "settings": _settings_payload(current, store),
             "setup": {
                 "complete": store.setup_complete(),
@@ -156,6 +165,10 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
 
     @router.patch("/api/settings")
     async def patch_settings(payload: SettingsPatch) -> dict[str, Any]:
+        logger.info(
+            "DBG PATCH /api/settings incoming keys=%s",
+            sorted(payload.values),
+        )
         _validate_settings_patch(payload.values)
         previous = {
             ENV_TO_ATTR.get(key, key): getattr(settings, ENV_TO_ATTR.get(key, key))
@@ -180,6 +193,19 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
             "state": await admin_state(),
         }
 
+    @router.post("/api/settings/reapply")
+    async def reapply_settings() -> dict[str, Any]:
+        current = refresh_settings()
+        try:
+            rebuild_components()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"component rebuild failed: {exc}") from exc
+        return {
+            "ok": True,
+            "health": _health(current),
+            "state": await admin_state(),
+        }
+
     @router.post("/api/setup/import-env")
     async def import_env() -> dict[str, Any]:
         refresh_settings()
@@ -190,6 +216,15 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
         store.set_setup_value("complete", True)
         return {"ok": True}
 
+    @router.post("/api/llm/context/reset")
+    async def reset_llm_context() -> dict[str, Any]:
+        llm = get_llm() if get_llm else None
+        reset = getattr(llm, "reset_history", None)
+        if not callable(reset):
+            raise HTTPException(status_code=422, detail="current LLM provider does not expose local context")
+        reset("admin")
+        return {"ok": True, "context": _llm_context_payload(llm, settings), "state": await admin_state()}
+
     @router.post("/api/personas")
     async def upsert_persona(payload: PersonaPatch) -> dict[str, Any]:
         if payload.voice_mode not in {"default", "preset", "design", "clone"}:
@@ -199,6 +234,10 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
         profile = payload.model_dump()
         profile.pop("apply", None)
         store.upsert_persona(profile)
+        logger.info(
+            "DBG POST /api/personas id=%s apply=%s name=%s voice_mode=%s voice_ref=%s",
+            payload.id, payload.apply, payload.name, payload.voice_mode, payload.voice_ref,
+        )
         if not payload.apply:
             return {"ok": True, "applied": False, "state": await admin_state()}
         values = {
@@ -227,6 +266,10 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
         changed: dict[str, Any] = {}
         if current.sts_persona_preset == persona_id:
             fallback = store.persona_profiles()[0]
+            logger.info(
+                "DBG DELETE persona %s was active, falling back to %s",
+                persona_id, fallback["id"],
+            )
             values = {
                 "sts_persona_preset": fallback["id"],
                 "sts_persona_custom": fallback["prompt"],
@@ -330,9 +373,6 @@ def create_admin_router(settings: Settings, rebuild_components) -> APIRouter:
         profile = dict(voice)
         profile.update({"ref_spk": str(spk), "ref_rvq": str(rvq)})
         store.upsert_voice(profile)
-        store.set_settings({"qwentts_cpp_voice_mode": "clone", "qwentts_cpp_clone_voice_id": payload.voice_id})
-        refresh_settings()
-        rebuild_components()
         return {"ok": True, "voice": store.voice_profile(payload.voice_id), "state": await admin_state()}
 
     @router.post("/api/qwen/voices/seed")
@@ -440,7 +480,16 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
     data = store.settings_dict()
     visible = {
         "server": ["host", "port", "log_level"],
-        "llm": ["hermes_base_url", "hermes_model", "hermes_api_key", "hermes_max_tokens", "hermes_voice_no_think"],
+        "llm": [
+            "hermes_base_url",
+            "hermes_model",
+            "hermes_api_key",
+            "hermes_max_tokens",
+            "hermes_voice_no_think",
+            "hermes_history_max_messages",
+            "hermes_history_max_chars",
+            "hermes_history_idle_reset_seconds",
+        ],
         "stt": ["stt_provider", "sherpa_sensevoice_model", "sherpa_sensevoice_tokens"],
         "tts": [
             "tts_provider",
@@ -460,7 +509,10 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
         "conversation": [
             "vad_threshold",
             "vad_min_silence_seconds",
+            "hermes_agent_max_wait_seconds",
             "hermes_first_filler_delay_seconds",
+            "hermes_filler_interval_seconds",
+            "hermes_max_fillers",
             "suppress_input_while_speaking",
             "tts_segment_min_chars",
             "tts_segment_max_chars",
@@ -506,6 +558,26 @@ def _legacy_categories(settings: Settings, store: ConfigStore) -> list[dict[str,
         }
         for group, keys in payload["groups"].items()
     ]
+
+
+def _llm_context_payload(llm: Any, settings: Settings) -> dict[str, Any]:
+    history = getattr(llm, "history", None)
+    if not isinstance(history, list):
+        history = []
+    chars = sum(
+        len(str(message.get("content", "")))
+        for message in history
+        if isinstance(message, dict)
+    )
+    return {
+        "messages": len(history),
+        "chars": chars,
+        "max_messages": settings.hermes_history_max_messages,
+        "max_chars": settings.hermes_history_max_chars,
+        "idle_reset_seconds": settings.hermes_history_idle_reset_seconds,
+        "last_llm_call_started_at": getattr(llm, "last_llm_call_started_at", None),
+        "reset_available": callable(getattr(llm, "reset_history", None)),
+    }
 
 
 def _health(settings: Settings) -> dict[str, Any]:
