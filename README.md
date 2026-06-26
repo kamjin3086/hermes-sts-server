@@ -430,7 +430,7 @@ Large ONNX model files should be downloaded with `scripts/dev/download_models.sh
 
 Near-term work should keep the project reliable, local-first, and small:
 
-1. Lightweight web search tool for direct LLM mode.
+1. ✅ Done: Lightweight web search tool for direct LLM mode.
    - Preferred first provider: Tavily.
    - Expose it as a fast STS-local tool only when explicitly configured.
    - Return compact search snippets and source URLs to the LLM; do not stream
@@ -446,7 +446,7 @@ Near-term work should keep the project reliable, local-first, and small:
    - Evaluate OmniVoice only if Qwen3TTS naturalness or voice-design controls
      are not sufficient.
 
-3. Local memory for direct LLM mode.
+3. ✅ Done: Local memory for direct LLM mode.
    - Add a small memory provider abstraction, used only when
      `STS_LLM_PROVIDER=openai_compatible` unless explicitly enabled elsewhere.
    - Start with a local file-backed store for durable user facts and session
@@ -455,3 +455,24 @@ Near-term work should keep the project reliable, local-first, and small:
      human-readable notes.
    - Prefer local libraries or simple local persistence over hosted memory
      services. Keep the default privacy-preserving and easy to inspect.
+
+## Direct LLM + Memory Mode
+
+An alternative to the Hermes Agent path. Switch via:
+
+```text
+STS_LLM_PROVIDER=openai_compatible
+STS_MEMORY_ENABLED=true
+STS_MEMORY_PROVIDER=sqlite  # sqlite | openviking | noop
+STS_WEB_SEARCH_ENABLED=true
+TAVILY_API_KEY=...
+```
+
+- **Direct LLM**: uses `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY` instead of the Hermes Agent backend.
+- **Memory**: injected into the system prompt each turn. Two backends:
+  - `sqlite` (default): local SQLite + FTS5 storage with LLM-driven fact extraction. No external service required.
+  - `openviking` (optional): connect to a running [OpenViking](https://docs.openviking.ai) server at `OPENVIKING_BASE_URL` (default `http://127.0.0.1:1933`).
+- **Web search**: Tavily-based tool (`TAVILY_API_KEY`). Uses `ultra-fast` depth, 2-second timeout, max 3 results, silent failure on error.
+- **Hermes Agent mode**: when `STS_LLM_PROVIDER=hermes_agent`, memory is still injected (read-only) if `STS_MEMORY_REMEMBER_IN_HERMES=true`, but never written. Web search is disabled.
+- **Admin console**: a Memory tab lets you browse, search, add, edit, and delete stored memories, view recall activity, and toggle memory/web search settings.
+- Both memory backends support the same CRUD operations and can be toggled at runtime from the console.
