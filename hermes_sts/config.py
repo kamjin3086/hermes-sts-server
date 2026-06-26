@@ -78,9 +78,9 @@ class Settings:
         "我这边还在等 Hermes 的结果，语音链路本身是正常的。你可以再说一遍，或者稍等我继续处理。",
     )
     hermes_fallback_texts: str = os.getenv("HERMES_FALLBACK_TEXTS", "")
-    hermes_history_max_messages: int = _int_env("HERMES_HISTORY_MAX_MESSAGES", 40)
-    hermes_history_max_chars: int = _int_env("HERMES_HISTORY_MAX_CHARS", 12000)
-    hermes_history_idle_reset_seconds: float = _float_env("HERMES_HISTORY_IDLE_RESET_SECONDS", 900.0)
+    hermes_history_max_messages: int = _int_env("HERMES_HISTORY_MAX_MESSAGES", 300)
+    hermes_history_max_chars: int = _int_env("HERMES_HISTORY_MAX_CHARS", 65536)
+    hermes_history_idle_reset_seconds: float = _float_env("HERMES_HISTORY_IDLE_RESET_SECONDS", 14400.0)
     hermes_voice_no_think: bool = _bool_env("HERMES_VOICE_NO_THINK", True)
     llm_provider: str = os.getenv("STS_LLM_PROVIDER", "hermes_agent")
     llm_max_concurrent_requests: int = _int_env("STS_LLM_MAX_CONCURRENT_REQUESTS", 1)
