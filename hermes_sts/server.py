@@ -14,6 +14,8 @@ from hermes_sts.singleton import acquire_singleton_lock
 from hermes_sts.stt import build_stt
 from hermes_sts.tools import ToolRegistry
 from hermes_sts.tts import build_tts
+from hermes_sts.memory import build_memory
+from hermes_sts.websearch import build_websearch
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ def _build_components(app: FastAPI) -> None:
     app.state.stt = build_stt(settings)
     app.state.tts = build_tts(settings)
     app.state.llm = build_llm(settings)
+    app.state.memory = build_memory(settings, app.state.llm)
+    app.state.web_search = build_websearch(settings)
     app.state.tools = ToolRegistry()
     if not hasattr(app.state, "turn_gate"):
         app.state.turn_gate = asyncio.Lock()
@@ -55,15 +59,17 @@ def create_app() -> FastAPI:
     def rebuild_components() -> None:
         _build_components(app)
         logger.info(
-            "STS components rebuilt vad=%s stt=%s tts=%s llm=%s voice=%s",
+            "STS components rebuilt vad=%s stt=%s tts=%s llm=%s memory=%s web_search=%s voice=%s",
             settings.vad_provider,
             settings.stt_provider,
             settings.tts_provider,
             settings.llm_provider,
+            settings.memory_provider,
+            settings.web_search_enabled,
             settings.sherpa_kokoro_voice,
         )
 
-    app.include_router(create_admin_router(settings, rebuild_components, lambda: app.state.llm))
+    app.include_router(create_admin_router(settings, rebuild_components, lambda: app.state.llm, lambda: app.state.memory))
 
     @app.get("/health")
     async def health() -> dict:
@@ -89,6 +95,8 @@ def create_app() -> FastAPI:
             llm=websocket.app.state.llm,
             tools=websocket.app.state.tools,
             turn_gate=websocket.app.state.turn_gate,
+            memory=websocket.app.state.memory,
+            web_search=websocket.app.state.web_search,
         )
         await session.run()
 
