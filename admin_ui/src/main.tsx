@@ -21,6 +21,8 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
+  Undo2,
   Save,
   Settings2,
   SlidersHorizontal,
@@ -185,11 +187,13 @@ function App() {
           </div>
         </header>
 
-        {tab === "dashboard" && <Dashboard state={state} patch={patch} goStudio={() => setTab("studio")} />}
-        {tab === "studio" && <Studio state={state} patch={patch} reload={load} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={() => setTab("setup")} />}
-        {tab === "setup" && <Setup state={state} patch={patch} reload={load} setBusy={setBusy} setNotice={setNotice} />}
-        {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} reload={load} setNotice={setNotice} />}
-        {tab === "memory" && <MemoryPanel state={state} patch={patch} reload={load} setNotice={setNotice} />}
+        <div className="main-scroll">
+          {tab === "dashboard" && <Dashboard state={state} patch={patch} goStudio={() => setTab("studio")} />}
+          {tab === "studio" && <Studio state={state} patch={patch} reload={load} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={() => setTab("setup")} />}
+          {tab === "setup" && <Setup state={state} patch={patch} reload={load} setBusy={setBusy} setNotice={setNotice} />}
+          {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} reload={load} setNotice={setNotice} />}
+          {tab === "memory" && <MemoryPanel state={state} patch={patch} reload={load} setNotice={setNotice} />}
+        </div>
       </main>
     </div>
   );
@@ -313,6 +317,7 @@ function Studio({
   const [previewText, setPreviewText] = useState("你好，我是 Hermes STS。现在用当前角色和音色说话。");
   const [audioUrl, setAudioUrl] = useState("");
 
+  const personaListRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (dirty) return;
     const persona = state.personas.find((p) => p.id === values.sts_persona_preset) ?? state.personas[0];
@@ -320,6 +325,11 @@ function Studio({
     setPersonaName(persona?.name ?? "自定义人格");
     setPrompt(values.sts_persona_custom || persona?.prompt || "");
   }, [dirty, state.personas, values.sts_persona_custom, values.sts_persona_preset]);
+
+  useEffect(() => {
+    const el = personaListRef.current?.querySelector(".selected");
+    el?.scrollIntoView({ block: "nearest" });
+  }, [state.personas]);
 
   const selectPersona = (persona: Persona) => {
     setPersonaId(persona.id);
@@ -389,6 +399,45 @@ function Studio({
     }
   };
 
+  const optimizePersona = async () => {
+    const current = prompt.trim();
+    if (!current) {
+      setNotice("先填写提示词内容");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    setBusy("optimize");
+    try {
+      const data = await api<{ optimized_prompt: string }>("/api/persona/optimize", {
+        method: "POST",
+        body: JSON.stringify({ prompt: current, name: personaName }),
+      });
+      setPrompt(data.optimized_prompt);
+      setDirty(true);
+      setNotice("提示词已优化");
+      window.setTimeout(() => setNotice(""), 1800);
+    } catch (err) {
+      setNotice(`优化失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const resetToOriginal = () => {
+    const original = state.personas.find((p) => p.id === personaId);
+    if (!original) {
+      setNotice("未找到原始人格预设");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    setPersonaName(original.name);
+    setPrompt(original.prompt);
+    setDirty(false);
+    setNotice(`已恢复"${original.name}"的原始提示词`);
+    window.setTimeout(() => setNotice(""), 1800);
+  };
+
   const deletePersona = async (persona: Persona) => {
     if (state.personas.length <= 1) {
       setNotice("至少保留一个人格");
@@ -450,18 +499,17 @@ function Studio({
 
   return (
     <div className="grid studio">
-      <section className="panel span-12 studio-commit">
+<section className="panel span-12 studio-commit">
         <div>
-          <span className="eyebrow"><CheckCircle2 size={15} /> 全局应用</span>
-          <h2>重新应用已保存配置</h2>
-          <p className="muted">声线和引擎选择会在点击“使用/切换”时立即保存；这个按钮只负责从数据库重载并重建运行组件。</p>
+          <span className="eyebrow"><CheckCircle2 size={15} /> 重新应用</span>
+          <p className="muted">声线和引擎选择已经在「使用/切换」时立即保存。这里仅从数据库重载配置。</p>
         </div>
         <button className="primary apply-global" onClick={reapplySavedConfig} disabled={busy === "reapply" || busy === "saving"}>
-          <CheckCircle2 size={16} />{busy === "reapply" ? "应用中" : "重新应用"}
+          <CheckCircle2 size={16} />{busy === "reapply" ? "应用中" : "重新应用配置"}
         </button>
       </section>
 
-      <section className="panel span-5">
+<section className="panel span-4">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Bot size={15} /> 人格</span>
@@ -469,8 +517,8 @@ function Studio({
           </div>
           <button className="secondary" onClick={newPersona}><Plus size={16} />新增</button>
         </div>
-        <p className="muted">点选只会装载到编辑框；改完提示词后用“应用人格”提交。</p>
-        <div className="persona-list">
+        <p className="muted">点选只会装载到编辑框；改完提示词后用"应用人格"提交。</p>
+        <div className="persona-list studio-persona-list" ref={personaListRef}>
           {state.personas.map((persona) => (
             <div key={persona.id} className={personaId === persona.id ? "persona selected" : "persona"}>
               <button className="persona-main" onClick={() => selectPersona(persona)}>
@@ -485,14 +533,20 @@ function Studio({
         </div>
       </section>
 
-      <section className="panel span-7">
+      <section className="panel span-8">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Sparkles size={15} /> 角色与提示词</span>
             <h2>{personaName}</h2>
           </div>
           <div className="persona-actions">
+            <button className="secondary" onClick={optimizePersona} disabled={busy === "optimize" || !prompt.trim()}>
+              <Wand2 size={16} />{busy === "optimize" ? "优化中" : "AI 优化"}
+            </button>
             <button className="secondary" onClick={savePersona}><Save size={16} />保存预设</button>
+            <button className="secondary" onClick={resetToOriginal} disabled={!state.personas.some((p) => p.id === personaId)}>
+              <RefreshCw size={16} />重置
+            </button>
             <button className="primary" onClick={applyPersona}><CheckCircle2 size={16} />应用人格</button>
           </div>
         </div>
@@ -1067,19 +1121,17 @@ function QwenVoice({
             ))}
           </div>
         )}
-        <h3>Qwen3TTS 状态</h3>
-        <div className="tiny-models">
+        <div className="model-status-compact">
           {Object.entries(state.qwen.models).map(([key, model]) => (
-            <div className="check-line" key={key}>
+            <span key={key} className={model.installed ? "model-tag ok" : "model-tag"}>
               <StatusDot ok={model.installed} />
-              <span>{modelName(key)}</span>
-              <em>{model.installed ? "可用" : "未安装"}</em>
-            </div>
+              {modelName(key)}
+            </span>
           ))}
+          <button className="model-setup-btn" onClick={goSetup} title="模型设置">
+            <Download size={13} />
+          </button>
         </div>
-        <button className="secondary" onClick={goSetup}>
-          <Download size={16} />模型设置
-        </button>
         <div className="locked-note">
           <CheckCircle2 size={16} />
           <span>声线点击“使用/切换”后立即保存并热更新；WS 传入 voice 不会覆盖当前音色。</span>
@@ -1132,6 +1184,7 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
     }
   };
   const installingAll = installingModel === "__all";
+  const allModelsInstalled = Object.values(state.qwen.models).every((m) => m.installed);
   return (
     <div className="grid">
       <section className="panel span-6">
@@ -1164,10 +1217,12 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
             );
           })}
         </div>
-        <button className="primary" disabled={Boolean(installingModel)} onClick={() => installModel()}>
-          {installingAll ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
-          {installingAll ? "正在下载缺失模型" : "下载缺失模型"}
-        </button>
+        {!allModelsInstalled && (
+          <button className="primary" disabled={Boolean(installingModel)} onClick={() => installModel()}>
+            {installingAll ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
+            {installingAll ? "正在下载缺失模型" : "下载缺失模型"}
+          </button>
+        )}
       </section>
       <section className="panel span-12">
         <span className="eyebrow"><CheckCircle2 size={15} /> 部署边界</span>
@@ -1190,12 +1245,6 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
           </div>
         </div>
       </section>
-      <section className="panel span-12">
-        <span className="eyebrow"><Check size={15} /> 完成</span>
-        <h2>{state.setup.complete ? "设置向导已完成" : "确认后进入日常控制台"}</h2>
-        <p className="muted">以后配置会从 SQLite 自动读取；这个项目不再使用 `.env` 文件。</p>
-        <button className="primary" onClick={async () => { await api("/api/setup/complete", { method: "POST" }); await reload(); }}>标记完成</button>
-      </section>
     </div>
   );
 }
@@ -1214,24 +1263,30 @@ function Advanced({
   setNotice: (v: string) => void;
 }) {
   const values = state.settings.values;
+  const raw: Record<string, any> = state.settings.raw || {};
   const resetContext = async () => {
     await api("/api/llm/context/reset", { method: "POST" });
     await reload();
     setNotice("语音短期上下文已清空，Hermes 长期记忆不受影响");
     window.setTimeout(() => setNotice(""), 2200);
   };
+  const resetField = (key: string) => async () => {
+    try {
+      await api("/api/settings/reset-default", {
+        method: "POST",
+        body: JSON.stringify({ values: { [key]: null } }),
+      });
+      await reload();
+      setNotice(`"${key}" 已恢复默认值`);
+      window.setTimeout(() => setNotice(""), 1800);
+    } catch (err) {
+      setNotice(`恢复失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    }
+  };
+  const showReset = (key: string) => key in raw ? resetField(key) : undefined;
   return (
     <div className="grid">
-      <section className="panel span-6">
-        <span className="eyebrow"><Settings2 size={15} /> Qwen 底层配置</span>
-        <EditableField label="qwen-tts 程序" value={values.qwentts_cpp_bin} onSave={(v) => patch({ qwentts_cpp_bin: v })} />
-        <EditableField label="Base 模型" value={values.qwentts_cpp_base_model} onSave={(v) => patch({ qwentts_cpp_base_model: v })} />
-        <EditableField label="CustomVoice 模型" value={values.qwentts_cpp_customvoice_model} onSave={(v) => patch({ qwentts_cpp_customvoice_model: v })} />
-        <EditableField label="VoiceDesign 模型" value={values.qwentts_cpp_voicedesign_model} onSave={(v) => patch({ qwentts_cpp_voicedesign_model: v })} />
-        <EditableField label="Codec 模型" value={values.qwentts_cpp_codec} onSave={(v) => patch({ qwentts_cpp_codec: v })} />
-        <EditableField label="后端" value={values.qwentts_cpp_backend} onSave={(v) => patch({ qwentts_cpp_backend: v })} />
-        <EditableField label="固定声线种子" value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} />
-      </section>
       <section className="panel span-6">
         <span className="eyebrow"><Bot size={15} /> 上下文控制</span>
         <div className="context-meter">
@@ -1248,9 +1303,15 @@ function Advanced({
         <button className="secondary" onClick={resetContext} disabled={!state.llm_context?.reset_available}>
           <RefreshCw size={16} />立即清空短期上下文
         </button>
-        <EditableField label="最多保留消息数" value={values.hermes_history_max_messages ?? 40} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} />
-        <EditableField label="最多保留字符数" value={values.hermes_history_max_chars ?? 12000} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} />
-        <EditableField label="空闲多久后自动清空（秒）" value={values.hermes_history_idle_reset_seconds ?? 900} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} />
+        <EditableField label="最多保留消息数" value={values.hermes_history_max_messages ?? 300} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} onReset={showReset("hermes_history_max_messages")} />
+        <EditableField label="最多保留字符数" value={values.hermes_history_max_chars ?? 65536} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} onReset={showReset("hermes_history_max_chars")} />
+        <EditableField label="空闲多久后自动清空（秒）" value={values.hermes_history_idle_reset_seconds ?? 14400} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} onReset={showReset("hermes_history_idle_reset_seconds")} />
+      </section>
+      <section className="panel span-6">
+        <span className="eyebrow"><Mic2 size={15} /> 识别与打断</span>
+        <EditableField label="VAD 阈值" value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} onReset={showReset("vad_threshold")} />
+        <EditableField label="最短静音（秒）" value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} onReset={showReset("vad_min_silence_seconds")} />
+        <p className="muted">{busy === "saving" ? "正在保存..." : "高级项保存后会按需重建 STT/TTS/LLM 组件。"}</p>
       </section>
       <section className="panel span-6">
         <span className="eyebrow"><Gauge size={15} /> 对话节奏</span>
@@ -1263,30 +1324,32 @@ function Advanced({
             offLabel="关闭"
           />
         </label>
-        <EditableField label="最多等待 Hermes（秒）" value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} />
-        <EditableField label="首次等待提示延迟（秒）" value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} />
-        <EditableField label="等待提示间隔（秒）" value={values.hermes_filler_interval_seconds ?? 12} onSave={(v) => patch({ hermes_filler_interval_seconds: Number(v) })} />
-        <EditableField label="最多等待提示次数" value={values.hermes_max_fillers ?? 1} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} />
-        <EditableField label="每段最多字符" value={values.tts_segment_max_chars ?? 90} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} />
+        <EditableField label="最多等待 Hermes（秒）" value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} onReset={showReset("hermes_agent_max_wait_seconds")} />
+        <EditableField label="首次等待提示延迟（秒）" value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} onReset={showReset("hermes_first_filler_delay_seconds")} />
+        <EditableField label="等待提示间隔（秒）" value={values.hermes_filler_interval_seconds ?? 12} onSave={(v) => patch({ hermes_filler_interval_seconds: Number(v) })} onReset={showReset("hermes_filler_interval_seconds")} />
+        <EditableField label="最多等待提示次数" value={values.hermes_max_fillers ?? 1} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} onReset={showReset("hermes_max_fillers")} />
+        <EditableField label="每段最多字符" value={values.tts_segment_max_chars ?? 90} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} onReset={showReset("tts_segment_max_chars")} />
       </section>
       <section className="panel span-6">
-        <span className="eyebrow"><Mic2 size={15} /> 识别与打断</span>
-        <EditableField label="VAD 阈值" value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} />
-        <EditableField label="最短静音（秒）" value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} />
-        <p className="muted">{busy === "saving" ? "正在保存..." : "高级项保存后会按需重建 STT/TTS/LLM 组件。"}</p>
+        <span className="eyebrow"><Settings2 size={15} /> Qwen 底层配置</span>
+        <EditableField label="后端" value={values.qwentts_cpp_backend} onSave={(v) => patch({ qwentts_cpp_backend: v })} onReset={showReset("qwentts_cpp_backend")} />
+        <EditableField label="固定声线种子" value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} onReset={showReset("qwentts_cpp_seed")} />
       </section>
     </div>
   );
 }
 
-function EditableField({ label, value, secret, onSave }: { label: string; value: any; secret?: boolean; onSave: (value: string) => void }) {
+function EditableField({ label, value, secret, onSave, onReset }: { label: string; value: any; secret?: boolean; onSave: (value: string) => void; onReset?: () => void }) {
   const [draft, setDraft] = useState(String(value ?? ""));
   useEffect(() => setDraft(String(value ?? "")), [value]);
   return (
     <label className="field inline-save">
       <span>{label}</span>
       <div>
-        <input type={secret ? "password" : "text"} value={draft} onChange={(e) => setDraft(e.target.value)} />
+        <div className="input-wrap">
+          <input type={secret ? "password" : "text"} value={draft} onChange={(e) => setDraft(e.target.value)} />
+          {onReset && <button className="reset-inline" onClick={onReset} title="恢复默认值"><Undo2 size={14} /></button>}
+        </div>
         <button onClick={() => onSave(draft)}><Save size={15} /></button>
       </div>
     </label>
@@ -1728,7 +1791,7 @@ function MemoryPanel({
 
   return (
     <div className="grid">
-      <section className="panel span-12" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "12px" }}>
+      <section className="panel span-12 mem-kpi-strip">
         <div className="kpi">
           <span>记忆状态</span>
           <strong>{enabled ? "已启用" : "未启用"}</strong>
@@ -1821,41 +1884,41 @@ function MemoryPanel({
           <p className="muted">记忆未启用。在上方开启记忆后即可浏览、搜索和管理。</p>
         ) : (
           <>
-            <div className="field-row" style={{ marginBottom: "12px" }}>
+            <div className="field-row mem-search-row">
               <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doSearch(); }} placeholder="搜索记忆内容..." />
               <button className="secondary" onClick={doSearch} disabled={loading}>搜索</button>
             </div>
             {error && (
-              <div style={{ color: "#ffd0c7", background: "rgba(217,149,69,0.12)", border: "1px solid rgba(217,149,69,0.3)", padding: "10px 14px", borderRadius: "13px", marginBottom: "12px", fontSize: "13px" }}>
+              <div className="mem-error">
                 {error}
               </div>
             )}
             {loading ? (
-              <p className="muted" style={{ display: "flex", alignItems: "center", gap: "8px" }}><LoaderCircle className="spin" size={16} /> 加载中...</p>
+              <p className="muted mem-loading"><LoaderCircle className="spin" size={16} /> 加载中...</p>
             ) : memories.length === 0 ? (
               <p className="muted">暂无记忆。点击"新增"添加第一条。</p>
             ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+              <div className="mem-table-wrap">
+                <table className="mem-table">
                   <thead>
-                    <tr style={{ textAlign: "left", color: "#9aa8a1", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-                      <th style={{ padding: "8px 10px", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", textTransform: "uppercase", letterSpacing: ".06em" }}>URI</th>
-                      <th style={{ padding: "8px 10px" }}>分类</th>
-                      <th style={{ padding: "8px 10px" }}>摘要</th>
-                      <th style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>创建时间</th>
-                      <th style={{ padding: "8px 10px", textAlign: "right" }}>操作</th>
+                    <tr>
+                      <th className="col-uri">URI</th>
+                      <th className="col-cat">分类</th>
+                      <th className="col-abs">摘要</th>
+                      <th className="col-time">创建时间</th>
+                      <th className="col-acts">操作</th>
                     </tr>
                   </thead>
                   <tbody>
                     {memories.map((m) => (
-                      <tr key={m.uri} style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-                        <td style={{ padding: "8px 10px", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", color: "#9fb5aa", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.uri}>{m.uri}</td>
-                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>{m.category || "—"}</td>
-                        <td style={{ padding: "8px 10px", color: "#b7c7bd", maxWidth: "260px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.abstract || (m.content || "").slice(0, 80)}</td>
-                        <td style={{ padding: "8px 10px", color: "#9aa8a1", fontSize: "12px", whiteSpace: "nowrap" }}>{formatTime(m.created_at)}</td>
-                        <td style={{ padding: "8px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
-                          <button className="icon-btn" style={{ width: "32px", height: "32px", display: "inline-grid", placeItems: "center", marginRight: "6px" }} onClick={() => openEdit(m.uri)} title="编辑"><Save size={14} /></button>
-                          <button className="icon-btn danger" style={{ width: "32px", height: "32px", display: "inline-grid", placeItems: "center" }} onClick={() => deleteMemory(m.uri)} title="删除"><Trash2 size={14} /></button>
+                      <tr key={m.uri}>
+                        <td className="col-uri" title={m.uri}>{m.uri}</td>
+                        <td className="col-cat">{m.category || "—"}</td>
+                        <td className="col-abs">{m.abstract || (m.content || "").slice(0, 80)}</td>
+                        <td className="col-time">{formatTime(m.created_at)}</td>
+                        <td className="col-acts">
+                          <button className="icon-btn mem-pill" onClick={() => openEdit(m.uri)} title="编辑"><Save size={14} /></button>
+                          <button className="icon-btn danger mem-pill" onClick={() => deleteMemory(m.uri)} title="删除"><Trash2 size={14} /></button>
                         </td>
                       </tr>
                     ))}
@@ -1863,9 +1926,9 @@ function MemoryPanel({
                 </table>
               </div>
             )}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "14px" }}>
-              <span className="subtle" style={{ fontSize: "12px" }}>{memories.length > 0 ? `${offset + 1}–${offset + memories.length} 条` : "无结果"}</span>
-              <div style={{ display: "flex", gap: "8px" }}>
+            <div className="mem-paginate">
+              <span className="subtle">{memories.length > 0 ? `${offset + 1}–${offset + memories.length} 条` : "无结果"}</span>
+              <div className="mem-paginate-actions">
                 <button className="secondary" onClick={prevPage} disabled={offset === 0 || loading}>上一页</button>
                 <button className="secondary" onClick={nextPage} disabled={!hasMore || loading}>下一页</button>
               </div>
@@ -1887,14 +1950,14 @@ function MemoryPanel({
         ) : activity.length === 0 ? (
           <p className="muted">暂无活动。</p>
         ) : (
-          <div className="tiny-models">
+          <div className="tiny-models mem-activity-list">
             {activity.map((a, i) => (
-              <div className="check-line" key={i} style={{ gridTemplateColumns: "minmax(0, 1fr) auto", gap: "8px", alignItems: "start" }}>
-                <div style={{ minWidth: 0 }}>
-                  <strong style={{ fontSize: "13px" }}>{activityLabel(a.kind)}</strong>
-                  <span style={{ display: "block", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{activitySnippet(a.value)}</span>
+              <div className="check-line mem-act-row" key={i}>
+                <div>
+                  <strong>{activityLabel(a.kind)}</strong>
+                  <span>{activitySnippet(a.value)}</span>
                 </div>
-                <em style={{ fontSize: "11px", whiteSpace: "nowrap" }}>{formatTime(a.created_at)}</em>
+                <em>{formatTime(a.created_at)}</em>
               </div>
             ))}
           </div>
@@ -1909,7 +1972,7 @@ function MemoryPanel({
           </div>
         </div>
         <p className="muted">输入查询语句，验证记忆检索效果。返回最相关的 5 条结果及其分数。</p>
-        <div className="field-row" style={{ marginTop: "14px" }}>
+        <div className="field-row mem-recall-row-action">
           <input value={recallQuery} onChange={(e) => setRecallQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runRecall(); }} placeholder="例如：用户喜欢什么音乐" disabled={!enabled} />
           <button className="primary" onClick={runRecall} disabled={!enabled || recalling || !recallQuery.trim()}>
             {recalling ? <LoaderCircle className="spin" size={16} /> : null}
@@ -1917,18 +1980,18 @@ function MemoryPanel({
           </button>
         </div>
         {recallMs != null && (
-          <span className="subtle" style={{ fontSize: "12px", marginTop: "8px", display: "block" }}>{recallHits.length} 条命中 · {recallMs}ms</span>
+          <span className="subtle mem-recall-stats">{recallHits.length} 条命中 · {recallMs}ms</span>
         )}
         {recallHits.length > 0 && (
-          <div className="tiny-models" style={{ marginTop: "14px" }}>
+          <div className="tiny-models mem-recall-hits">
             {recallHits.map((h, i) => (
               <div className="suggestion-card" key={i}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "12px" }}>
-                  <strong style={{ fontSize: "13px", lineHeight: "1.5" }}>{h.abstract || (h.content || "").slice(0, 120)}</strong>
-                  <em style={{ fontSize: "12px", color: "#e8d8b4", fontFamily: '"JetBrains Mono", monospace', whiteSpace: "nowrap", flexShrink: 0 }}>{Number(h.score).toFixed(3)}</em>
+                <div className="mem-recall-row">
+                  <strong>{h.abstract || (h.content || "").slice(0, 120)}</strong>
+                  <em>{Number(h.score).toFixed(3)}</em>
                 </div>
-                <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", color: "#9fb5aa", wordBreak: "break-all" }}>{h.uri}</span>
-                <span>{h.source || "—"}{h.category ? ` · ${h.category}` : ""}</span>
+                <span className="mem-recall-uri">{h.uri}</span>
+                <span className="mem-recall-meta">{h.source || "—"}{h.category ? ` · ${h.category}` : ""}</span>
               </div>
             ))}
           </div>
@@ -1937,23 +2000,23 @@ function MemoryPanel({
 
       {editor && (
         <div
-          style={{ position: "fixed", inset: 0, zIndex: 50, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)", padding: "20px" }}
+          className="mem-modal-backdrop"
           onClick={() => { if (!editorSaving) setEditor(null); }}
         >
-          <div className="panel" style={{ maxWidth: "640px", width: "100%", maxHeight: "90vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+          <div className="panel mem-modal" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div>
                 <span className="eyebrow">{editor.uri ? "编辑记忆" : "新增记忆"}</span>
                 <h2>{editor.uri ? "修改内容" : "添加一条记忆"}</h2>
               </div>
-              <button className="icon-btn" onClick={() => { if (!editorSaving) setEditor(null); }} title="关闭"><span style={{ fontSize: "16px", lineHeight: 1 }}>×</span></button>
+              <button className="icon-btn mem-modal-close" onClick={() => { if (!editorSaving) setEditor(null); }} title="关闭">×</button>
             </div>
             {editor.uri && (
-              <code style={{ display: "block", color: "#9fb5aa", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", marginBottom: "12px", wordBreak: "break-all" }}>{editor.uri}</code>
+              <code className="mem-modal-uri">{editor.uri}</code>
             )}
             <label className="field">
               <span>内容</span>
-              <textarea value={editor.content} onChange={(e) => setEditor({ ...editor, content: e.target.value })} placeholder="记忆的完整内容..." style={{ minHeight: "160px" }} />
+              <textarea className="mem-editor-textarea" value={editor.content} onChange={(e) => setEditor({ ...editor, content: e.target.value })} placeholder="记忆的完整内容..." />
             </label>
             <div className="field-row">
               <label className="field">
@@ -1965,7 +2028,7 @@ function MemoryPanel({
                 <input value={editor.tags} onChange={(e) => setEditor({ ...editor, tags: e.target.value })} placeholder="偏好,事实" />
               </label>
             </div>
-            <div style={{ display: "flex", gap: "10px", marginTop: "16px", justifyContent: "flex-end" }}>
+            <div className="mem-modal-actions">
               <button className="secondary" onClick={() => setEditor(null)} disabled={editorSaving}>取消</button>
               <button className="primary" onClick={saveEditor} disabled={editorSaving || !editor.content.trim()}>
                 {editorSaving ? <LoaderCircle className="spin" size={16} /> : null}
