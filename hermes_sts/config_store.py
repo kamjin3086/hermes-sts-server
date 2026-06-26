@@ -124,6 +124,30 @@ ENV_TO_ATTR: dict[str, str] = {
     "MODELS_DIR": "models_dir",
     "LOG_DIR": "log_dir",
     "DATA_DIR": "data_dir",
+    "STS_MEMORY_ENABLED": "memory_enabled",
+    "STS_MEMORY_PROVIDER": "memory_provider",
+    "STS_MEMORY_REMEMBER_IN_HERMES": "memory_remember_in_hermes",
+    "STS_MEMORY_INJECTION_BUDGET": "memory_injection_budget",
+    "STS_MEMORY_RECALL_LIMIT": "memory_recall_limit",
+    "STS_MEMORY_RECALL_MIN_SCORE": "memory_recall_min_score",
+    "STS_MEMORY_COMMIT_INTERVAL_TURNS": "memory_commit_interval_turns",
+    "STS_MEMORY_COMMIT_IDLE_SECONDS": "memory_commit_idle_seconds",
+    "STS_MEMORY_EXTRACT_ENABLED": "memory_extract_enabled",
+    "STS_MEMORY_EXTRACT_MAX_PER_TURN": "memory_extract_max_per_turn",
+    "OPENVIKING_BASE_URL": "openviking_base_url",
+    "OPENVIKING_API_KEY": "openviking_api_key",
+    "OPENVIKING_ACCOUNT": "openviking_account",
+    "OPENVIKING_USER": "openviking_user",
+    "OPENVIKING_TARGET_URI": "openviking_target_uri",
+    "OPENVIKING_TIMEOUT_SECONDS": "openviking_timeout_seconds",
+    "OPENVIKING_COMMIT_TIMEOUT_SECONDS": "openviking_commit_timeout_seconds",
+    "STS_SQLITE_MEMORY_PATH": "sqlite_memory_path",
+    "STS_WEB_SEARCH_ENABLED": "web_search_enabled",
+    "TAVILY_API_KEY": "tavily_api_key",
+    "TAVILY_SEARCH_DEPTH": "tavily_search_depth",
+    "TAVILY_MAX_RESULTS": "tavily_max_results",
+    "TAVILY_TIMEOUT_SECONDS": "tavily_timeout_seconds",
+    "TAVILY_BASE_URL": "tavily_base_url",
     "HERMES_STS_CONFIG_DB": "config_db",
 }
 
@@ -326,6 +350,19 @@ class ConfigStore:
                 "tts_voice_source": "settings",
                 "qwentts_cpp_seed": 42,
                 "dashboard_wave_style": "scanner",
+            }.items():
+                conn.execute(
+                    "insert or ignore into settings values (?, ?, ?)",
+                    (key, json.dumps(value, ensure_ascii=False), now),
+                )
+            for key, value in {
+                "memory_enabled": False,
+                "memory_provider": "sqlite",
+                "memory_remember_in_hermes": True,
+                "web_search_enabled": False,
+                "memory_injection_budget": 500,
+                "memory_recall_limit": 5,
+                "memory_recall_min_score": 0.0,
             }.items():
                 conn.execute(
                     "insert or ignore into settings values (?, ?, ?)",
