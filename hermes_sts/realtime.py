@@ -69,10 +69,15 @@ class RealtimeSession:
     session_voice: TtsVoice | None = None
     next_response_voice: TtsVoice | None = None
     session_id: str = field(default_factory=lambda: f"sess_{uuid.uuid4().hex}")
+    memory: Any = None
+    web_search: Any = None
 
     def __post_init__(self) -> None:
         self.vad = build_vad(self.settings)
         self.tools = ToolRegistry()
+        from hermes_sts.tools import register_default_local_tools
+
+        register_default_local_tools(self.tools, self.settings, web_search_provider=self.web_search)
 
     async def run(self) -> None:
         await self.websocket.accept()
@@ -97,6 +102,13 @@ class RealtimeSession:
             logger.info("Realtime client disconnected session_id=%s", self.session_id)
         finally:
             await self._cancel_processing(send_done=False)
+            if self.settings.memory_enabled:
+                memory = getattr(self, "memory", None)
+                if memory is not None:
+                    try:
+                        await memory.final_commit(self.session_id)
+                    except Exception:
+                        logger.warning("Memory final_commit failed on disconnect", exc_info=True)
 
     async def _handle_message(self, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type")
@@ -398,6 +410,63 @@ class RealtimeSession:
             return "design"
         return "custom"
 
+    async def _inject_memory(self, transcript: str, instructions: str) -> str:
+        if not self.settings.memory_enabled:
+            return instructions
+        if not transcript.strip():
+            return instructions
+        if self.settings.llm_provider.strip().lower() == "hermes_agent" and not self.settings.memory_remember_in_hermes:
+            return instructions
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return instructions
+        started = time.perf_counter()
+        try:
+            hits = await memory.recall(
+                transcript,
+                limit=self.settings.memory_recall_limit,
+                min_score=self.settings.memory_recall_min_score,
+            )
+        except Exception:
+            logger.warning("Memory recall failed, skipping injection", exc_info=True)
+            return instructions
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        if not hits:
+            return instructions
+        budget = max(100, self.settings.memory_injection_budget)
+        lines: list[str] = []
+        for h in hits:
+            line = f"- {h.abstract}"
+            if len("\n".join(lines + [line])) > budget:
+                break
+            lines.append(line)
+        block = "\n\n参考记忆（不要逐条复述，只用于回答更准确）：\n" + "\n".join(lines)
+        combined = instructions + block
+        if len(combined) > 2500:
+            excess = len(combined) - 2500
+            block = block[:-excess]
+            if len(block) < 20:
+                return instructions
+            logger.warning("Memory injection truncated by %d chars to fit 2500 limit", excess)
+        try:
+            ConfigStore.default().add_metric(
+                "memory_read",
+                {"query": transcript[:80], "hits": len(hits), "ms": elapsed_ms},
+            )
+        except Exception:
+            pass
+        return instructions + block
+
+    async def _record_memory_turn(self, transcript: str, answer: str) -> None:
+        try:
+            await self.memory.record_turn(transcript, answer, session_id=self.session_id)
+            ConfigStore.default().add_metric(
+                "memory_record_turn",
+                {"session_id": self.session_id[:16], "transcript_chars": len(transcript)},
+            )
+        except Exception:
+            logger.warning("Memory record_turn failed", exc_info=True)
+
     async def _decode_audio_append(self, msg: dict[str, Any]) -> bytes | None:
         encoded = msg.get("audio")
         if not isinstance(encoded, str) or not encoded:
@@ -518,6 +587,11 @@ class RealtimeSession:
             if metrics:
                 metrics.llm_ms = (time.perf_counter() - started) * 1000
             text = final.text.strip() or "好的，已完成。"
+            tool_transcript = next(
+                (m.get("content", "") for m in context if m.get("role") == "user"),
+                "",
+            )
+            self._fire_record_turn(tool_transcript, text)
             await self._send_response(text, transcript=text, metrics=metrics, voice=voice)
             self.state = "idle"
         except asyncio.CancelledError:
@@ -653,6 +727,9 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         instructions: str | None = None,
     ) -> str:
+        if instructions is None:
+            instructions = self._effective_instructions()
+        instructions = await self._inject_memory(transcript, instructions)
         started = time.perf_counter()
         response = await self.llm.chat(
             transcript,
@@ -670,7 +747,9 @@ class RealtimeSession:
             len(response.text),
         )
         if not response.tool_calls:
-            return response.text
+            final_text = response.text
+            self._fire_record_turn(transcript, final_text)
+            return final_text
 
         messages = self._tool_followup_messages(transcript, response, instructions=instructions)
         waiting_for_client_tool = False
@@ -700,12 +779,26 @@ class RealtimeSession:
                 self.session_id,
                 len(messages),
             )
-            return response.text.strip()
+            final_text = response.text.strip()
+            self._fire_record_turn(transcript, final_text)
+            return final_text
         final_started = time.perf_counter()
         final = await self.llm.chat(messages=messages, instructions=instructions)
         if metrics:
             metrics.llm_ms += (time.perf_counter() - final_started) * 1000
-        return final.text or self._fallback_text_for(transcript)
+        final_text = (final.text or self._fallback_text_for(transcript))
+        self._fire_record_turn(transcript, final_text)
+        return final_text
+
+    def _fire_record_turn(self, transcript: str, answer: str) -> None:
+        if self.settings.llm_provider.strip().lower() != "openai_compatible":
+            return
+        if not self.settings.memory_enabled:
+            return
+        memory = getattr(self, "memory", None)
+        if memory is None or not answer:
+            return
+        asyncio.create_task(self._record_memory_turn(transcript, answer))
 
     async def _send_tool_call_event(
         self,
