@@ -12,7 +12,7 @@ import subprocess
 import time
 import uuid
 import wave
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Callable
 from urllib.request import urlretrieve
@@ -107,7 +107,31 @@ class PreviewRequest(BaseModel):
     seed: int | None = None
 
 
-def create_admin_router(settings: Settings, rebuild_components, get_llm: Callable[[], Any] | None = None) -> APIRouter:
+class MemoryAddRequest(BaseModel):
+    content: str
+    category: str = "manual"
+    tags: list[str] = Field(default_factory=list)
+
+
+class MemoryUpdateRequest(BaseModel):
+    uri: str
+    content: str
+    category: str | None = None
+    tags: list[str] | None = None
+
+
+class MemoryRecallRequest(BaseModel):
+    query: str
+    limit: int = 5
+    min_score: float = 0.0
+
+
+def create_admin_router(
+    settings: Settings,
+    rebuild_components,
+    get_llm: Callable[[], Any] | None = None,
+    get_memory: Callable[[], Any] | None = None,
+) -> APIRouter:
     store = ConfigStore.default()
     router = APIRouter()
 
@@ -164,6 +188,7 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
             },
             "kokoro_voices": _kokoro_voice_options(),
             "metrics": store.metrics(80),
+            "memory": get_memory().stats() if get_memory else None,
         }
 
     @router.get("/api/settings")
@@ -504,6 +529,67 @@ def create_admin_router(settings: Settings, rebuild_components, get_llm: Callabl
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    @router.get("/api/memories")
+    async def list_memories(limit: int = 50, offset: int = 0, q: str = "") -> dict[str, Any]:
+        if not get_memory or (prov := get_memory()) is None:
+            raise HTTPException(status_code=422, detail="memory not configured")
+        try:
+            hits = await prov.list_memories(limit=limit, offset=offset, q=q)
+        except Exception as exc:
+            logger.warning("list_memories failed: %s", exc)
+            return {"memories": []}
+        return {"memories": [asdict(h) for h in hits]}
+
+    @router.post("/api/memories")
+    async def add_memory(payload: MemoryAddRequest) -> dict[str, Any]:
+        if not get_memory or (prov := get_memory()) is None:
+            raise HTTPException(status_code=422, detail="memory not configured")
+        uri = await prov.add_memory(content=payload.content, category=payload.category, tags=payload.tags)
+        return {"ok": True, "uri": uri}
+
+    @router.get("/api/memories/activity")
+    async def memory_activity(limit: int = 20) -> dict[str, Any]:
+        metrics = store.metrics(limit)
+        memory_activity = [
+            m for m in metrics
+            if m["kind"] in ("memory_read", "memory_commit", "memory_extract", "memory_record_turn")
+        ][:limit]
+        return {"activity": memory_activity}
+
+    @router.post("/api/memories/recall")
+    async def recall_memories(payload: MemoryRecallRequest) -> dict[str, Any]:
+        if not get_memory or (prov := get_memory()) is None:
+            raise HTTPException(status_code=422, detail="memory not configured")
+        started = time.perf_counter()
+        hits = await prov.recall(payload.query, limit=payload.limit, min_score=payload.min_score)
+        ms = int((time.perf_counter() - started) * 1000)
+        return {"hits": [asdict(h) for h in hits], "ms": ms}
+
+    @router.get("/api/memories/{uri:path}")
+    async def get_memory_endpoint(uri: str) -> dict[str, Any]:
+        if not get_memory or (prov := get_memory()) is None:
+            raise HTTPException(status_code=422, detail="memory not configured")
+        hit = await prov.get_memory(uri)
+        if not hit:
+            raise HTTPException(status_code=404, detail="memory not found")
+        return {"memory": asdict(hit)}
+
+    @router.put("/api/memories/{uri:path}")
+    async def update_memory_endpoint(uri: str, payload: MemoryUpdateRequest) -> dict[str, Any]:
+        if not get_memory or (prov := get_memory()) is None:
+            raise HTTPException(status_code=422, detail="memory not configured")
+        await prov.update_memory(uri, content=payload.content, category=payload.category, tags=payload.tags)
+        return {"ok": True}
+
+    @router.delete("/api/memories/{uri:path}")
+    async def delete_memory_endpoint(uri: str) -> dict[str, Any]:
+        if not get_memory or (prov := get_memory()) is None:
+            raise HTTPException(status_code=422, detail="memory not configured")
+        ok = await prov.delete_memory(uri)
+        if not ok:
+            raise HTTPException(status_code=404, detail="memory not found")
+        return {"ok": True}
+
     return router
 
 
@@ -520,6 +606,10 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "hermes_history_max_messages",
             "hermes_history_max_chars",
             "hermes_history_idle_reset_seconds",
+            "memory_enabled",
+            "memory_provider",
+            "memory_remember_in_hermes",
+            "web_search_enabled",
         ],
         "stt": ["stt_provider", "sherpa_sensevoice_model", "sherpa_sensevoice_tokens"],
         "tts": [
@@ -556,6 +646,32 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "qwentts_cpp_codec",
             "qwentts_cpp_extra_args",
             "qwentts_cpp_seed",
+        ],
+        "memory": [
+            "memory_enabled",
+            "memory_provider",
+            "memory_remember_in_hermes",
+            "memory_injection_budget",
+            "memory_recall_limit",
+            "memory_recall_min_score",
+            "memory_commit_interval_turns",
+            "memory_commit_idle_seconds",
+            "memory_extract_enabled",
+            "memory_extract_max_per_turn",
+            "openviking_base_url",
+            "openviking_api_key",
+            "openviking_account",
+            "openviking_user",
+            "openviking_target_uri",
+            "openviking_timeout_seconds",
+            "openviking_commit_timeout_seconds",
+            "sqlite_memory_path",
+            "web_search_enabled",
+            "tavily_api_key",
+            "tavily_search_depth",
+            "tavily_max_results",
+            "tavily_timeout_seconds",
+            "tavily_base_url",
         ],
     }
     return {
@@ -696,6 +812,14 @@ def _requires_rebuild(changed: dict[str, Any]) -> bool:
         "sherpa_kokoro_data_dir",
         "sherpa_sensevoice_model",
         "sherpa_sensevoice_tokens",
+        "memory_enabled",
+        "memory_provider",
+        "web_search_enabled",
+        "tavily_api_key",
+        "openviking_base_url",
+        "openviking_api_key",
+        "openviking_account",
+        "openviking_user",
     }
     return bool(keys & rebuild_keys)
 
@@ -716,6 +840,24 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
     provider = values.get("tts_provider")
     if provider is not None and provider not in {"qwen3tts", "sherpa_kokoro", "tone", "sapi", "sherpa_onnx"}:
         raise HTTPException(status_code=422, detail=f"unsupported tts provider: {provider}")
+    memory_provider = values.get("memory_provider")
+    if memory_provider is not None and memory_provider not in {"sqlite", "openviking", "noop"}:
+        raise HTTPException(status_code=422, detail=f"unsupported memory provider: {memory_provider}")
+    if memory_provider == "openviking":
+        api_key = values.get("openviking_api_key")
+        if api_key is not None and not api_key.strip():
+            raise HTTPException(status_code=422, detail="openviking_api_key is required when memory_provider=openviking")
+    search_depth = values.get("tavily_search_depth")
+    if search_depth is not None and search_depth not in {"ultra-fast", "fast", "basic"}:
+        raise HTTPException(status_code=422, detail=f"unsupported tavily search depth: {search_depth}")
+    tavily_timeout = values.get("tavily_timeout_seconds")
+    if tavily_timeout is not None:
+        try:
+            tv = float(tavily_timeout)
+            if tv > 3.0:
+                raise HTTPException(status_code=422, detail="tavily_timeout_seconds must not exceed 3.0")
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="tavily_timeout_seconds must be a number")
 
 
 def _voice_ref_key(mode: str) -> str:
