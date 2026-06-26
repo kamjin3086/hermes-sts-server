@@ -5,6 +5,7 @@ import {
   Activity,
   AudioLines,
   Bot,
+  Brain,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -60,6 +61,7 @@ type AdminState = {
   qwen: { speakers: string[]; models: ModelStatus; modes: string[] };
   kokoro_voices: Array<{ id: number; name: string; note: string }>;
   metrics: Metric[];
+  memory?: Record<string, any> | null;
 };
 
 const navItems = [
@@ -67,6 +69,7 @@ const navItems = [
   { id: "studio", label: "角色声线", icon: AudioLines },
   { id: "setup", label: "首次设置", icon: Wand2 },
   { id: "advanced", label: "高级", icon: SlidersHorizontal },
+  { id: "memory", label: "记忆", icon: Brain },
 ] as const;
 
 const modeLabels: Record<string, { title: string; text: string }> = {
@@ -186,6 +189,7 @@ function App() {
         {tab === "studio" && <Studio state={state} patch={patch} reload={load} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={() => setTab("setup")} />}
         {tab === "setup" && <Setup state={state} patch={patch} reload={load} setBusy={setBusy} setNotice={setNotice} />}
         {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} reload={load} setNotice={setNotice} />}
+        {tab === "memory" && <MemoryPanel state={state} patch={patch} reload={load} setNotice={setNotice} />}
       </main>
     </div>
   );
@@ -1493,10 +1497,47 @@ function formatDuration(seconds: number) {
   return `${minutes}m ${safe % 60}s`;
 }
 
+function formatTime(unix: number): string {
+  if (!unix) return "—";
+  const d = new Date(unix * 1000);
+  if (isNaN(d.getTime())) return "—";
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hour = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hour}:${min}`;
+}
+
+function activityLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    memory_read: "记忆注入",
+    memory_commit: "记忆提交",
+    memory_extract: "记忆提取",
+    memory_record_turn: "回合记录",
+  };
+  return labels[kind] || kind;
+}
+
+function activitySnippet(value: any): string {
+  if (!value) return "";
+  if (typeof value === "string") return value.slice(0, 100);
+  if (typeof value === "object") {
+    const parts: string[] = [];
+    if (value.query) parts.push(`q="${value.query}"`);
+    if (value.hits != null) parts.push(`${value.hits} hits`);
+    if (value.uri) parts.push(value.uri);
+    if (value.count != null) parts.push(`${value.count} 条`);
+    if (value.session_id) parts.push(`session=${String(value.session_id).slice(0, 8)}`);
+    return parts.join(" · ").slice(0, 120) || JSON.stringify(value).slice(0, 100);
+  }
+  return String(value).slice(0, 100);
+}
+
 function headlineFor(tab: string) {
   if (tab === "studio") return "人格和声线，一处调整";
   if (tab === "setup") return "首次设置向导";
   if (tab === "advanced") return "低频但可控的底层设置";
+  if (tab === "memory") return "记忆管理与检索";
   return "语音助手状态大屏";
 }
 
@@ -1505,6 +1546,437 @@ function base64ToBlob(base64: string, mime: string) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
   return new Blob([bytes], { type: mime });
+}
+
+function MemoryPanel({
+  state,
+  patch,
+  reload,
+  setNotice,
+}: {
+  state: AdminState;
+  patch: (v: SettingsValues) => Promise<void>;
+  reload: () => Promise<void>;
+  setNotice: (v: string) => void;
+}) {
+  const values = state.settings.values;
+  const memState = state.memory;
+  const enabled = Boolean(values.memory_enabled);
+  const provider = String(values.memory_provider || "noop");
+  const webSearchEnabled = Boolean(values.web_search_enabled);
+  const limit = 50;
+
+  const [memories, setMemories] = useState<any[]>([]);
+  const [query, setQuery] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [activity, setActivity] = useState<any[]>([]);
+  const [recallQuery, setRecallQuery] = useState("");
+  const [recallHits, setRecallHits] = useState<any[]>([]);
+  const [recallMs, setRecallMs] = useState<number | null>(null);
+  const [recalling, setRecalling] = useState(false);
+  const [editor, setEditor] = useState<{ uri: string; content: string; category: string; tags: string } | null>(null);
+  const [editorSaving, setEditorSaving] = useState(false);
+
+  const fetchList = async (q: string, off: number) => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await api<{ memories: any[] }>(`/api/memories?limit=${limit}&offset=${off}&q=${encodeURIComponent(q)}`);
+      setMemories(data.memories || []);
+      setHasMore((data.memories || []).length >= limit);
+    } catch (err) {
+      setError(errorMessage(err));
+      setMemories([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchActivity = async () => {
+    try {
+      const data = await api<{ activity: any[] }>("/api/memories/activity?limit=20");
+      setActivity(data.activity || []);
+    } catch {
+      // activity stream is non-critical — silent failure
+    }
+  };
+
+  useEffect(() => {
+    if (enabled) {
+      fetchList("", 0);
+      fetchActivity();
+    } else {
+      setMemories([]);
+      setActivity([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled]);
+
+  const doSearch = () => {
+    setOffset(0);
+    fetchList(query, 0);
+  };
+
+  const prevPage = () => {
+    const next = Math.max(0, offset - limit);
+    setOffset(next);
+    fetchList(query, next);
+  };
+
+  const nextPage = () => {
+    if (!hasMore) return;
+    const next = offset + limit;
+    setOffset(next);
+    fetchList(query, next);
+  };
+
+  const openAdd = () => {
+    setEditor({ uri: "", content: "", category: "manual", tags: "" });
+  };
+
+  const openEdit = async (uri: string) => {
+    try {
+      const data = await api<{ memory: any }>(`/api/memories/${encodeURIComponent(uri)}`);
+      const m = data.memory;
+      setEditor({
+        uri,
+        content: m.content || "",
+        category: m.category || "manual",
+        tags: Array.isArray(m.tags) ? m.tags.join(", ") : String(m.tags || ""),
+      });
+    } catch (err) {
+      setNotice(`读取失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 2400);
+    }
+  };
+
+  const saveEditor = async () => {
+    if (!editor) return;
+    const content = editor.content.trim();
+    if (!content) {
+      setNotice("内容不能为空");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    setEditorSaving(true);
+    try {
+      const tags = splitTags(editor.tags);
+      if (editor.uri) {
+        await api(`/api/memories/${encodeURIComponent(editor.uri)}`, {
+          method: "PUT",
+          body: JSON.stringify({ uri: editor.uri, content, category: editor.category, tags }),
+        });
+        setNotice("记忆已更新");
+      } else {
+        await api("/api/memories", {
+          method: "POST",
+          body: JSON.stringify({ content, category: editor.category, tags }),
+        });
+        setNotice("记忆已添加");
+      }
+      setEditor(null);
+      window.setTimeout(() => setNotice(""), 1600);
+      await fetchList(query, offset);
+      await fetchActivity();
+      await reload();
+    } catch (err) {
+      setNotice(`保存失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    } finally {
+      setEditorSaving(false);
+    }
+  };
+
+  const deleteMemory = async (uri: string) => {
+    if (!window.confirm("删除这条记忆？删除后不可恢复。")) return;
+    try {
+      await api(`/api/memories/${encodeURIComponent(uri)}`, { method: "DELETE" });
+      setNotice("记忆已删除");
+      window.setTimeout(() => setNotice(""), 1600);
+      await fetchList(query, offset);
+      await fetchActivity();
+      await reload();
+    } catch (err) {
+      setNotice(`删除失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    }
+  };
+
+  const runRecall = async () => {
+    const q = recallQuery.trim();
+    if (!q) return;
+    setRecalling(true);
+    setRecallHits([]);
+    setRecallMs(null);
+    try {
+      const data = await api<{ hits: any[]; ms: number }>("/api/memories/recall", {
+        method: "POST",
+        body: JSON.stringify({ query: q, limit: 5, min_score: 0 }),
+      });
+      setRecallHits(data.hits || []);
+      setRecallMs(data.ms);
+    } catch (err) {
+      setNotice(`检索失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    } finally {
+      setRecalling(false);
+    }
+  };
+
+  return (
+    <div className="grid">
+      <section className="panel span-12" style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "12px" }}>
+        <div className="kpi">
+          <span>记忆状态</span>
+          <strong>{enabled ? "已启用" : "未启用"}</strong>
+          <em>{provider}</em>
+        </div>
+        <div className="kpi">
+          <span>记忆条数</span>
+          <strong>{String(memState?.count ?? "--")}</strong>
+          <em>{memState?.latest_updated_at ? `最近 ${formatTime(memState.latest_updated_at)}` : "暂无更新"}</em>
+        </div>
+        <div className="kpi">
+          <span>Web 搜索</span>
+          <strong>{webSearchEnabled ? "已启用" : "未启用"}</strong>
+          <em>{values.tavily_search_depth || "—"}</em>
+        </div>
+        <div className="kpi">
+          <span>检索延迟</span>
+          <strong>{recallMs != null ? `${recallMs}ms` : "—"}</strong>
+          <em>最近一次 recall</em>
+        </div>
+      </section>
+
+      <section className="panel span-6">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Brain size={15} /> 记忆后端</span>
+            <h2>Provider 配置</h2>
+          </div>
+        </div>
+        <div className="switch-line">
+          <span>启用记忆</span>
+          <SwitchControl checked={enabled} onChange={(checked) => patch({ memory_enabled: checked })} onLabel="开启" offLabel="关闭" />
+        </div>
+        <label className="field">
+          <span>Provider</span>
+          <div className="select-wrap">
+            <select value={provider} onChange={(e) => patch({ memory_provider: e.target.value })}>
+              <option value="sqlite">sqlite（本地）</option>
+              <option value="openviking">openviking</option>
+              <option value="noop">noop（禁用）</option>
+            </select>
+            <ChevronDown size={16} />
+          </div>
+        </label>
+        {provider === "openviking" && (
+          <>
+            <EditableField label="OpenViking Base URL" value={values.openviking_base_url} onSave={(v) => patch({ openviking_base_url: v })} />
+            <EditableField label="OpenViking API Key" value={values.openviking_api_key} secret onSave={(v) => patch({ openviking_api_key: v })} />
+            <EditableField label="Account" value={values.openviking_account} onSave={(v) => patch({ openviking_account: v })} />
+            <EditableField label="User" value={values.openviking_user} onSave={(v) => patch({ openviking_user: v })} />
+          </>
+        )}
+      </section>
+
+      <section className="panel span-6">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Gauge size={15} /> Web 搜索</span>
+            <h2>Tavily 配置</h2>
+          </div>
+        </div>
+        <div className="switch-line">
+          <span>启用 Web 搜索</span>
+          <SwitchControl checked={webSearchEnabled} onChange={(checked) => patch({ web_search_enabled: checked })} onLabel="开启" offLabel="关闭" />
+        </div>
+        <EditableField label="Tavily API Key" value={values.tavily_api_key} secret onSave={(v) => patch({ tavily_api_key: v })} />
+        <label className="field">
+          <span>搜索深度</span>
+          <div className="select-wrap">
+            <select value={values.tavily_search_depth || "fast"} onChange={(e) => patch({ tavily_search_depth: e.target.value })}>
+              <option value="ultra-fast">ultra-fast</option>
+              <option value="fast">fast</option>
+              <option value="basic">basic</option>
+            </select>
+            <ChevronDown size={16} />
+          </div>
+        </label>
+        <EditableField label="超时（秒，最大 3.0）" value={values.tavily_timeout_seconds ?? 2.0} onSave={(v) => patch({ tavily_timeout_seconds: Math.min(3.0, Number(v) || 2.0) })} />
+      </section>
+
+      <section className="panel span-8">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Activity size={15} /> 记忆库</span>
+            <h2>记忆列表</h2>
+          </div>
+          <button className="primary" onClick={openAdd} disabled={!enabled}><Plus size={16} />新增</button>
+        </div>
+        {!enabled ? (
+          <p className="muted">记忆未启用。在上方开启记忆后即可浏览、搜索和管理。</p>
+        ) : (
+          <>
+            <div className="field-row" style={{ marginBottom: "12px" }}>
+              <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doSearch(); }} placeholder="搜索记忆内容..." />
+              <button className="secondary" onClick={doSearch} disabled={loading}>搜索</button>
+            </div>
+            {error && (
+              <div style={{ color: "#ffd0c7", background: "rgba(217,149,69,0.12)", border: "1px solid rgba(217,149,69,0.3)", padding: "10px 14px", borderRadius: "13px", marginBottom: "12px", fontSize: "13px" }}>
+                {error}
+              </div>
+            )}
+            {loading ? (
+              <p className="muted" style={{ display: "flex", alignItems: "center", gap: "8px" }}><LoaderCircle className="spin" size={16} /> 加载中...</p>
+            ) : memories.length === 0 ? (
+              <p className="muted">暂无记忆。点击"新增"添加第一条。</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "#9aa8a1", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                      <th style={{ padding: "8px 10px", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", textTransform: "uppercase", letterSpacing: ".06em" }}>URI</th>
+                      <th style={{ padding: "8px 10px" }}>分类</th>
+                      <th style={{ padding: "8px 10px" }}>摘要</th>
+                      <th style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>创建时间</th>
+                      <th style={{ padding: "8px 10px", textAlign: "right" }}>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {memories.map((m) => (
+                      <tr key={m.uri} style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                        <td style={{ padding: "8px 10px", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", color: "#9fb5aa", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.uri}>{m.uri}</td>
+                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>{m.category || "—"}</td>
+                        <td style={{ padding: "8px 10px", color: "#b7c7bd", maxWidth: "260px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.abstract || (m.content || "").slice(0, 80)}</td>
+                        <td style={{ padding: "8px 10px", color: "#9aa8a1", fontSize: "12px", whiteSpace: "nowrap" }}>{formatTime(m.created_at)}</td>
+                        <td style={{ padding: "8px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
+                          <button className="icon-btn" style={{ width: "32px", height: "32px", display: "inline-grid", placeItems: "center", marginRight: "6px" }} onClick={() => openEdit(m.uri)} title="编辑"><Save size={14} /></button>
+                          <button className="icon-btn danger" style={{ width: "32px", height: "32px", display: "inline-grid", placeItems: "center" }} onClick={() => deleteMemory(m.uri)} title="删除"><Trash2 size={14} /></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "14px" }}>
+              <span className="subtle" style={{ fontSize: "12px" }}>{memories.length > 0 ? `${offset + 1}–${offset + memories.length} 条` : "无结果"}</span>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button className="secondary" onClick={prevPage} disabled={offset === 0 || loading}>上一页</button>
+                <button className="secondary" onClick={nextPage} disabled={!hasMore || loading}>下一页</button>
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="panel span-4">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Clock3 size={15} /> 活动流</span>
+            <h2>近期活动</h2>
+          </div>
+          <button className="icon-btn" onClick={fetchActivity} title="刷新活动"><RefreshCw size={16} /></button>
+        </div>
+        {!enabled ? (
+          <p className="muted">记忆未启用。</p>
+        ) : activity.length === 0 ? (
+          <p className="muted">暂无活动。</p>
+        ) : (
+          <div className="tiny-models">
+            {activity.map((a, i) => (
+              <div className="check-line" key={i} style={{ gridTemplateColumns: "minmax(0, 1fr) auto", gap: "8px", alignItems: "start" }}>
+                <div style={{ minWidth: 0 }}>
+                  <strong style={{ fontSize: "13px" }}>{activityLabel(a.kind)}</strong>
+                  <span style={{ display: "block", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{activitySnippet(a.value)}</span>
+                </div>
+                <em style={{ fontSize: "11px", whiteSpace: "nowrap" }}>{formatTime(a.created_at)}</em>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel span-12">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Sparkles size={15} /> 召回测试</span>
+            <h2>检索验证</h2>
+          </div>
+        </div>
+        <p className="muted">输入查询语句，验证记忆检索效果。返回最相关的 5 条结果及其分数。</p>
+        <div className="field-row" style={{ marginTop: "14px" }}>
+          <input value={recallQuery} onChange={(e) => setRecallQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runRecall(); }} placeholder="例如：用户喜欢什么音乐" disabled={!enabled} />
+          <button className="primary" onClick={runRecall} disabled={!enabled || recalling || !recallQuery.trim()}>
+            {recalling ? <LoaderCircle className="spin" size={16} /> : null}
+            {recalling ? "检索中" : "检索"}
+          </button>
+        </div>
+        {recallMs != null && (
+          <span className="subtle" style={{ fontSize: "12px", marginTop: "8px", display: "block" }}>{recallHits.length} 条命中 · {recallMs}ms</span>
+        )}
+        {recallHits.length > 0 && (
+          <div className="tiny-models" style={{ marginTop: "14px" }}>
+            {recallHits.map((h, i) => (
+              <div className="suggestion-card" key={i}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "12px" }}>
+                  <strong style={{ fontSize: "13px", lineHeight: "1.5" }}>{h.abstract || (h.content || "").slice(0, 120)}</strong>
+                  <em style={{ fontSize: "12px", color: "#e8d8b4", fontFamily: '"JetBrains Mono", monospace', whiteSpace: "nowrap", flexShrink: 0 }}>{Number(h.score).toFixed(3)}</em>
+                </div>
+                <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", color: "#9fb5aa", wordBreak: "break-all" }}>{h.uri}</span>
+                <span>{h.source || "—"}{h.category ? ` · ${h.category}` : ""}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {editor && (
+        <div
+          style={{ position: "fixed", inset: 0, zIndex: 50, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)", padding: "20px" }}
+          onClick={() => { if (!editorSaving) setEditor(null); }}
+        >
+          <div className="panel" style={{ maxWidth: "640px", width: "100%", maxHeight: "90vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <div className="panel-head">
+              <div>
+                <span className="eyebrow">{editor.uri ? "编辑记忆" : "新增记忆"}</span>
+                <h2>{editor.uri ? "修改内容" : "添加一条记忆"}</h2>
+              </div>
+              <button className="icon-btn" onClick={() => { if (!editorSaving) setEditor(null); }} title="关闭"><span style={{ fontSize: "16px", lineHeight: 1 }}>×</span></button>
+            </div>
+            {editor.uri && (
+              <code style={{ display: "block", color: "#9fb5aa", fontFamily: '"JetBrains Mono", monospace', fontSize: "11px", marginBottom: "12px", wordBreak: "break-all" }}>{editor.uri}</code>
+            )}
+            <label className="field">
+              <span>内容</span>
+              <textarea value={editor.content} onChange={(e) => setEditor({ ...editor, content: e.target.value })} placeholder="记忆的完整内容..." style={{ minHeight: "160px" }} />
+            </label>
+            <div className="field-row">
+              <label className="field">
+                <span>分类</span>
+                <input value={editor.category} onChange={(e) => setEditor({ ...editor, category: e.target.value })} placeholder="manual" />
+              </label>
+              <label className="field">
+                <span>标签（逗号分隔）</span>
+                <input value={editor.tags} onChange={(e) => setEditor({ ...editor, tags: e.target.value })} placeholder="偏好,事实" />
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: "10px", marginTop: "16px", justifyContent: "flex-end" }}>
+              <button className="secondary" onClick={() => setEditor(null)} disabled={editorSaving}>取消</button>
+              <button className="primary" onClick={saveEditor} disabled={editorSaving || !editor.content.trim()}>
+                {editorSaving ? <LoaderCircle className="spin" size={16} /> : null}
+                {editorSaving ? "保存中" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
