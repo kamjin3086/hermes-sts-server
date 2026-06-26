@@ -6,7 +6,11 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hermes_sts.config import Settings
+    from hermes_sts.websearch import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
@@ -171,3 +175,56 @@ class ToolRegistry:
     @staticmethod
     def _is_valid_tool_name(name: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", name))
+
+
+def register_default_local_tools(
+    registry: ToolRegistry,
+    settings: Settings,
+    *,
+    web_search_provider: WebSearchProvider | None = None,
+) -> None:
+    """Register STS-local tools gated by settings and provider.
+
+    Currently only web_search for openai_compatible mode.
+    """
+    if settings.llm_provider.strip().lower() != "openai_compatible":
+        return
+    if not settings.web_search_enabled:
+        return
+    if web_search_provider is None or web_search_provider.description() == "noop":
+        return
+    registry.register_local(
+        ToolSpec(
+            name="web_search",
+            description="Search the web for current information. Returns titles, URLs and short snippets. Use when user asks about current events, weather, news, prices or anything you don't know. Keep queries concise.",
+            kind="slow",
+            mode="local",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query in user's language"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=_make_web_search_handler(web_search_provider),
+        )
+    )
+
+
+def _make_web_search_handler(provider: WebSearchProvider) -> ToolHandler:
+    async def handler(args: dict[str, Any]) -> str:
+        query = args.get("query", "") if isinstance(args, dict) else ""
+        if not query:
+            return "No search query provided."
+        try:
+            hits = await provider.search(query)
+        except Exception:
+            return "Search temporarily unavailable."
+        if not hits:
+            return "No results found."
+        lines = []
+        for i, h in enumerate(hits[:5], 1):
+            snippet = (h.content or "")[:300]
+            lines.append(f"{i}. {h.title or '(no title)'}\n   {h.url}\n   {snippet}")
+        return "\n\n".join(lines)[:2000]
+
+    return handler
