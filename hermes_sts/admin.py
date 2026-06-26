@@ -98,6 +98,11 @@ class WorkshopSuggestRequest(BaseModel):
     current_voice: str = ""
 
 
+class PersonaOptimizeRequest(BaseModel):
+    prompt: str
+    name: str = ""
+
+
 class PreviewRequest(BaseModel):
     text: str = "你好，我是 Hermes STS。现在使用当前角色和音色进行试听。"
     voice_mode: str | None = None
@@ -233,6 +238,13 @@ def create_admin_router(
             "health": _health(current),
             "state": await admin_state(),
         }
+
+    @router.post("/api/settings/reset-default")
+    async def reset_settings_default(payload: SettingsPatch) -> dict[str, Any]:
+        for key in payload.values:
+            store.delete_setting(key)
+        refresh_settings()
+        return {"ok": True, "state": await admin_state()}
 
     @router.post("/api/setup/import-env")
     async def import_env() -> dict[str, Any]:
@@ -476,6 +488,50 @@ def create_admin_router(
         current = refresh_settings()
         suggestion = await _suggest_voice_with_llm(payload, current)
         return {"ok": True, "suggestion": suggestion}
+
+    @router.post("/api/persona/optimize")
+    async def persona_optimize(payload: PersonaOptimizeRequest) -> dict[str, Any]:
+        current = refresh_settings()
+        if not payload.prompt.strip():
+            raise HTTPException(status_code=422, detail="prompt is required")
+        prompt_name = payload.name.strip()[:60] or "当前人格"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是一个专门优化语音助手人格提示词的专家。你的目标：保留原意，去掉冗余，让指令更精炼。\n"
+                    "规则：只返回纯文本优化后的提示词，不要任何解释、不要 Markdown、不要编号、不要 JSON。\n"
+                    f"当前人格名称：{prompt_name}\n"
+                    "优化方向：保持角色核心设定；删除重复或啰嗦的描述；让语言更口语化、更适合短轮次语音对话；"
+                    "输出结果不要比原文长。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"请优化以下人格提示词：\n\n{payload.prompt}",
+            },
+        ]
+        body = {
+            "model": current.hermes_model or current.llm_model,
+            "messages": messages,
+            "stream": False,
+            "max_tokens": min(max(current.hermes_max_tokens, 300), 900),
+            "temperature": 0.5,
+        }
+        headers = {}
+        if current.hermes_api_key:
+            headers["Authorization"] = f"Bearer {current.hermes_api_key}"
+        try:
+            async with httpx.AsyncClient(timeout=current.hermes_timeout_seconds) as client:
+                resp = await client.post(f"{current.hermes_base_url.rstrip('/')}/chat/completions", json=body, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"LLM optimize failed: {exc}") from exc
+        optimized = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if not optimized:
+            optimized = payload.prompt
+        return {"optimized_prompt": optimized}
 
     @router.post("/api/tts/preview")
     async def tts_preview(payload: PreviewRequest) -> dict[str, Any]:

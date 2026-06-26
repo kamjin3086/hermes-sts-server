@@ -491,6 +491,10 @@ class ConfigStore:
             row = conn.execute("select value_json from settings where key=?", (key,)).fetchone()
         return json.loads(row["value_json"]) if row else default
 
+    def delete_setting(self, key: str) -> None:
+        with self.connect() as conn:
+            conn.execute("delete from settings where key=?", (key,))
+
     def set_settings(self, values: dict[str, Any]) -> dict[str, Any]:
         now = time.time()
         normalized: dict[str, Any] = {}
