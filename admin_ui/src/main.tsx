@@ -13,6 +13,7 @@ import {
   Cpu,
   Download,
   Gauge,
+  HelpCircle,
   KeyRound,
   LoaderCircle,
   Maximize2,
@@ -32,6 +33,7 @@ import {
   Trash2,
   Upload,
   Wand2,
+  Wrench,
 } from "lucide-react";
 import {
   Area,
@@ -51,11 +53,53 @@ import "./styles.css";
 type SettingsValues = Record<string, any>;
 type Persona = { id: string; name: string; prompt: string; voice_mode: string; voice_ref: string };
 type VoiceProfile = Record<string, any>;
+type ConversationSummary = {
+  id: string;
+  title?: string;
+  status?: string;
+  message_count?: number;
+  created_at?: number;
+  updated_at?: number;
+  ended_at?: number;
+  ended_reason?: string;
+};
+type ConversationMessage = {
+  id?: number;
+  conversation_id?: string;
+  role: string;
+  content: string;
+  seq?: number;
+  created_at?: number;
+};
+type LlmProfile = {
+  id: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+  max_tokens: number;
+  timeout_seconds: number;
+  voice_no_think: boolean;
+  wait_fillers_enabled: boolean;
+  max_wait_seconds: number;
+  fallback_enabled: boolean;
+  web_search_enabled: boolean;
+  notes: string;
+};
+type ToolSnapshot = { name: string; description: string; mode: string; kind: string; parameters_count: number; required?: string[]; parameters?: string[] };
+type DiagnosticItem = { status: "ok" | "warn" | "error" | string; message: string; last_error?: string };
 type ModelStatus = Record<string, { path: string; installed: boolean }>;
 type Metric = { id: number; kind: string; value: Record<string, any>; created_at: number };
 type AdminState = {
   health: Record<string, any>;
   llm_context: Record<string, any>;
+  llm_profiles: LlmProfile[];
+  active_llm_profile_id: string;
+  tools: { local: ToolSnapshot[]; client: ToolSnapshot[] };
+  diagnostics?: Record<string, DiagnosticItem>;
+  conversation?: { enabled: boolean; active?: ConversationSummary | null; reset_available?: boolean; error?: string };
+  web_search?: Record<string, any>;
   settings: { values: SettingsValues; groups: Record<string, string[]>; raw: SettingsValues };
   setup: { complete: boolean; env_imported: boolean };
   runtime?: { started_at: number; uptime_seconds: number };
@@ -70,10 +114,9 @@ type AdminState = {
 const navItems = [
   { id: "dashboard", label: "总览", icon: Activity },
   { id: "studio", label: "角色声线", icon: AudioLines },
-  { id: "setup", label: "首次设置", icon: Wand2 },
-  { id: "advanced", label: "高级", icon: SlidersHorizontal },
+  { id: "setup", label: "连接配置", icon: Wand2 },
   { id: "memory", label: "记忆", icon: Brain },
-  { id: "conversation", label: "对话", icon: MessageSquare },
+  { id: "advanced", label: "运行参数", icon: SlidersHorizontal },
 ] as const;
 
 const modeLabels: Record<string, { title: string; text: string }> = {
@@ -190,19 +233,30 @@ function App() {
         </header>
 
         <div className="main-scroll">
-          {tab === "dashboard" && <Dashboard state={state} patch={patch} goStudio={() => setTab("studio")} />}
+          {tab === "dashboard" && <Dashboard state={state} patch={patch} reload={load} goStudio={() => setTab("studio")} goAdvanced={() => setTab("advanced")} />}
           {tab === "studio" && <Studio state={state} patch={patch} reload={load} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={() => setTab("setup")} />}
           {tab === "setup" && <Setup state={state} patch={patch} reload={load} setBusy={setBusy} setNotice={setNotice} />}
           {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} reload={load} setNotice={setNotice} />}
           {tab === "memory" && <MemoryPanel state={state} patch={patch} reload={load} setNotice={setNotice} />}
-          {tab === "conversation" && <ConversationCard />}
         </div>
       </main>
     </div>
   );
 }
 
-function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: SettingsValues) => Promise<void>; goStudio: () => void }) {
+function Dashboard({
+  state,
+  patch,
+  reload,
+  goStudio,
+  goAdvanced,
+}: {
+  state: AdminState;
+  patch: (v: SettingsValues) => Promise<void>;
+  reload: () => Promise<void>;
+  goStudio: () => void;
+  goAdvanced: () => void;
+}) {
   const metrics = useMemo(() => chartMetrics(state.metrics), [state.metrics]);
   const latest = state.metrics.find((item) => item.kind === "tts_preview")?.value;
   const turns = useMemo(() => turnStats(state.metrics), [state.metrics]);
@@ -213,21 +267,27 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
   const rawWaveStyle = state.settings.values.dashboard_wave_style || "scanner";
   const waveStyle = waveStyles.some((item) => item.id === rawWaveStyle) ? rawWaveStyle : "scanner";
   const waveIndex = Math.max(0, waveStyles.findIndex((item) => item.id === waveStyle));
+  const personaSummary = shortText(state.health.persona_prompt || "", 42);
+  const healthKeys = ["llm", "stt", "tts", "tools", "memory", "web_search"];
   const selectWave = (id: string) => patch({ dashboard_wave_style: id });
+  const resetContext = async () => {
+    await api("/api/llm/context/reset", { method: "POST" });
+    await reload();
+  };
   return (
     <div className={fullscreen ? "cockpit fullscreen" : "cockpit"}>
       <motion.section className="cockpit-hero panel" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-        <div className="cockpit-copy">
-          <span className="eyebrow"><Bot size={15} /> Voice cockpit</span>
+        <div className="cockpit-status">
+          <span className="eyebrow"><Bot size={15} /> 当前助手</span>
           <h2>{currentPersona?.name ?? "自定义角色"}</h2>
-          <p>{state.health.persona_prompt}</p>
-          <div className="chips">
+          <p title={state.health.persona_prompt}>{personaSummary || "保持当前人格、声线和连接状态。"}</p>
+          <div className="cockpit-now">
             <Chip icon={<Mic2 size={14} />} label={voiceLabel(state)} />
             <Chip icon={<Cpu size={14} />} label={state.health.tts_provider === "qwen3tts" ? `Qwen3TTS · ${state.health.qwen_backend || "CPU"}` : "Kokoro 回退"} />
             <Chip icon={<Gauge size={14} />} label={latest?.rtf ? `RTF ${Number(latest.rtf).toFixed(2)}` : "等待试听数据"} />
           </div>
         </div>
-        <div className="cockpit-visual">
+        <div className="cockpit-wave">
           <button className="icon-btn cockpit-max" onClick={() => setFullscreen((v) => !v)} title={fullscreen ? "退出全屏视图" : "最大化驾驶舱"}>
             {fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
           </button>
@@ -244,6 +304,18 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
             ))}
           </div>
         </div>
+        <div className="cockpit-health-dock">
+          <div>
+            <span className="eyebrow"><CheckCircle2 size={15} /> 链路状态</span>
+            <p>判断语音助手现在是否能听、想、说和调用能力。</p>
+          </div>
+          <button className="secondary icon-compact" onClick={goAdvanced} title="排障"><SlidersHorizontal size={16} /></button>
+          <div className="health-grid">
+          {healthKeys.map((key) => (
+            <HealthTile key={key} label={diagnosticLabel(key)} item={state.diagnostics?.[key]} />
+          ))}
+          </div>
+        </div>
       </motion.section>
 
       <section className="stat-strip">
@@ -254,14 +326,14 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
       </section>
 
       <section className="panel signal-board">
-        <div className="panel-head">
+        <div className="panel-head compact-head">
           <div>
-            <span className="eyebrow"><Activity size={15} /> Recent signal</span>
-            <h2>延迟轨迹</h2>
+            <span className="eyebrow"><Activity size={15} /> 最近信号</span>
+            <h2>首声延迟轨迹</h2>
           </div>
-          <span className="subtle">{latest?.elapsed_ms ? `${latest.elapsed_ms}ms last` : "no samples"}</span>
+          <span className="subtle">{latest?.elapsed_ms ? `${latest.elapsed_ms}ms` : "暂无样本"}</span>
         </div>
-        <ResponsiveContainer width="100%" height={210}>
+        <ResponsiveContainer width="100%" height={170}>
           <AreaChart data={metrics}>
             <defs>
               <linearGradient id="latencyFill" x1="0" y1="0" x2="0" y2="1">
@@ -278,7 +350,18 @@ function Dashboard({ state, patch, goStudio }: { state: AdminState; patch: (v: S
         </ResponsiveContainer>
       </section>
 
-      <section className="quick-actions">
+      <section className="quick-actions cockpit-ops">
+        <div className="action-card context-card">
+          <MessageSquare size={21} />
+          <strong>当前上下文</strong>
+          <span>{state.conversation?.active ? `${state.conversation.active.message_count ?? 0} 条 · ${state.conversation.active.updated_at ? timeAgo(state.conversation.active.updated_at) : "未知时间"}` : "尚未开始语音上下文"}</span>
+          <button className="secondary" onClick={resetContext} disabled={!state.conversation?.reset_available}><RefreshCw size={15} />开启新上下文</button>
+        </div>
+        <button className="action-card muted-action" onClick={goAdvanced}>
+          <Gauge size={21} />
+          <strong>最近异常/慢点</strong>
+          <span>{state.diagnostics?.recent?.message || "暂无语音回合数据"}</span>
+        </button>
         <button className="action-card" onClick={goStudio}>
           <AudioLines size={21} />
           <strong>调角色声线</strong>
@@ -1190,16 +1273,12 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
   const allModelsInstalled = Object.values(state.qwen.models).every((m) => m.installed);
   return (
     <div className="grid">
-      <section className="panel span-6">
-        <span className="eyebrow"><KeyRound size={15} /> 服务与 LLM</span>
-        <h2>第一次只需要填这里</h2>
-        <EditableField label="Hermes / LLM 地址" value={values.hermes_base_url} onSave={(v) => patch({ hermes_base_url: v, llm_base_url: v })} />
-        <EditableField label="模型名称" value={values.hermes_model} onSave={(v) => patch({ hermes_model: v, llm_model: v })} />
-        <EditableField label="API Key" value={values.hermes_api_key} secret onSave={(v) => patch({ hermes_api_key: v, llm_api_key: v })} />
+      <section className="panel span-7">
+        <LlmProfiles state={state} reload={reload} setNotice={setNotice} compact />
       </section>
-      <section className="panel span-6">
+      <section className="panel span-5">
         <span className="eyebrow"><Cpu size={15} /> Qwen3TTS</span>
-        <h2>本机模型</h2>
+        <h2>语音模型</h2>
         <div className="model-grid single">
           {Object.entries(state.qwen.models).map(([key, model]) => {
             const isInstalling = installingAll || installingModel === key;
@@ -1228,25 +1307,26 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
         )}
       </section>
       <section className="panel span-12">
-        <span className="eyebrow"><CheckCircle2 size={15} /> 部署边界</span>
-        <h2>新机器先跑脚本，再进界面</h2>
-        <div className="deploy-grid">
-          <div className="deploy-step">
-            <strong>1. 系统和编译环境</strong>
-            <code>./scripts/bootstrap_fedora_amd.sh --system</code>
-            <span>安装 Fedora/Vulkan/构建依赖，适合脚本阶段。</span>
+        <details className="soft-details setup-scripts">
+          <summary><CheckCircle2 size={15} /> 新机器部署脚本</summary>
+          <div className="deploy-grid">
+            <div className="deploy-step">
+              <strong>1. 系统和编译环境</strong>
+              <code>./scripts/bootstrap_fedora_amd.sh --system</code>
+              <span>安装 Fedora/Vulkan/构建依赖，适合脚本阶段。</span>
+            </div>
+            <div className="deploy-step">
+              <strong>2. Python、模型实验室、前端</strong>
+              <code>./scripts/bootstrap_fedora_amd.sh</code>
+              <span>准备 `.venv-sts`、Kokoro/SenseVoice、hermes-tts-lab、控制台构建。</span>
+            </div>
+            <div className="deploy-step">
+              <strong>3. 运行期配置</strong>
+              <code>http://127.0.0.1:8765/</code>
+              <span>LLM 地址、API Key、TTS 引擎、声线和提示词放在界面里保存。</span>
+            </div>
           </div>
-          <div className="deploy-step">
-            <strong>2. Python、模型实验室、前端</strong>
-            <code>./scripts/bootstrap_fedora_amd.sh</code>
-            <span>准备 `.venv-sts`、Kokoro/SenseVoice、hermes-tts-lab、控制台构建。</span>
-          </div>
-          <div className="deploy-step">
-            <strong>3. 运行期配置</strong>
-            <code>http://127.0.0.1:8765/</code>
-            <span>LLM 地址、API Key、TTS 引擎、声线和提示词放在界面里保存。</span>
-          </div>
-        </div>
+        </details>
       </section>
     </div>
   );
@@ -1291,7 +1371,8 @@ function Advanced({
   return (
     <div className="grid">
       <section className="panel span-6">
-        <span className="eyebrow"><Bot size={15} /> 上下文控制</span>
+        <span className="eyebrow"><Bot size={15} /> LLM 上下文</span>
+        <h2>短期对话历史</h2>
         <div className="context-meter">
           <div>
             <strong>{state.llm_context?.messages ?? 0}</strong>
@@ -1302,24 +1383,28 @@ function Advanced({
             <span>约字符数</span>
           </div>
         </div>
-        <p className="muted">控制 STS 调用 Hermes/Agent 时附带的短期对话历史。它不是人格提示词，也不会删除 Hermes 自己的长期记忆。</p>
         <button className="secondary" onClick={resetContext} disabled={!state.llm_context?.reset_available}>
           <RefreshCw size={16} />立即清空短期上下文
         </button>
-        <EditableField label="最多保留消息数" value={values.hermes_history_max_messages ?? 300} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} onReset={showReset("hermes_history_max_messages")} />
-        <EditableField label="最多保留字符数" value={values.hermes_history_max_chars ?? 65536} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} onReset={showReset("hermes_history_max_chars")} />
-        <EditableField label="空闲多久后自动清空（秒）" value={values.hermes_history_idle_reset_seconds ?? 14400} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} onReset={showReset("hermes_history_idle_reset_seconds")} />
+        <EditableField label={<TooltipLabel label="保留消息数" tip="STS 每次请求 LLM 时携带的本地短期历史条数；不影响人格提示词或长期记忆。" />} value={values.hermes_history_max_messages ?? 300} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} onReset={showReset("hermes_history_max_messages")} />
+        <EditableField label={<TooltipLabel label="保留字符数" tip="短期历史的字符上限，越大越能保持上下文，但请求更重。" />} value={values.hermes_history_max_chars ?? 65536} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} onReset={showReset("hermes_history_max_chars")} />
+        <EditableField label={<TooltipLabel label="空闲清空（秒）" tip="超过这个时间没有调用 LLM，就自动开启新的短期上下文。" />} value={values.hermes_history_idle_reset_seconds ?? 14400} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} onReset={showReset("hermes_history_idle_reset_seconds")} />
       </section>
+      <ConversationCard />
       <section className="panel span-6">
-        <span className="eyebrow"><Mic2 size={15} /> 识别与打断</span>
-        <EditableField label="VAD 阈值" value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} onReset={showReset("vad_threshold")} />
-        <EditableField label="最短静音（秒）" value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} onReset={showReset("vad_min_silence_seconds")} />
+        <span className="eyebrow"><Mic2 size={15} /> 听音与打断</span>
+        <h2>一句话何时结束</h2>
+        <EditableField label={<TooltipLabel label="VAD 阈值" tip="判断用户是否正在说话的灵敏度。数值越高越不容易误触发，也越可能漏掉轻声。" />} value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} onReset={showReset("vad_threshold")} />
+        <EditableField label={<TooltipLabel label="最短静音（秒）" tip="用户停顿超过这个时间后，系统认为一句话结束并开始处理。" />} value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} onReset={showReset("vad_min_silence_seconds")} />
         <p className="muted">{busy === "saving" ? "正在保存..." : "高级项保存后会按需重建 STT/TTS/LLM 组件。"}</p>
       </section>
+      <ToolsPanel tools={state.tools} />
+      <WebSearchDiagnostics state={state} />
       <section className="panel span-6">
-        <span className="eyebrow"><Gauge size={15} /> 对话节奏</span>
+        <span className="eyebrow"><Gauge size={15} /> 等待与播报</span>
+        <h2>回答慢时怎么处理</h2>
         <label className="field">
-          <span>Hermes 语音快答</span>
+          <TooltipLabel label="Hermes 快答" tip="给 Hermes Agent 请求加 /no_think，让语音回答更快更短。只影响 Hermes Agent 路径。" />
           <SwitchControl
             checked={values.hermes_voice_no_think !== false}
             onChange={(checked) => patch({ hermes_voice_no_think: checked })}
@@ -1327,22 +1412,369 @@ function Advanced({
             offLabel="关闭"
           />
         </label>
-        <EditableField label="最多等待 Hermes（秒）" value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} onReset={showReset("hermes_agent_max_wait_seconds")} />
-        <EditableField label="首次等待提示延迟（秒）" value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} onReset={showReset("hermes_first_filler_delay_seconds")} />
-        <EditableField label="等待提示间隔（秒）" value={values.hermes_filler_interval_seconds ?? 12} onSave={(v) => patch({ hermes_filler_interval_seconds: Number(v) })} onReset={showReset("hermes_filler_interval_seconds")} />
-        <EditableField label="最多等待提示次数" value={values.hermes_max_fillers ?? 1} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} onReset={showReset("hermes_max_fillers")} />
-        <EditableField label="每段最多字符" value={values.tts_segment_max_chars ?? 90} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} onReset={showReset("tts_segment_max_chars")} />
+        <label className="field">
+          <TooltipLabel label="LLM 流式首句" tip="LLM 生成出完整第一句后立即交给 TTS 播报；如果模型转为工具调用，会回退到完整工具链。" />
+          <SwitchControl
+            checked={values.llm_streaming_enabled !== false}
+            onChange={(checked) => patch({ llm_streaming_enabled: checked })}
+            onLabel="开启"
+            offLabel="关闭"
+          />
+        </label>
+        <EditableField label={<TooltipLabel label="最大等待（秒）" tip="超过这个时间还没有 LLM 结果时，系统会使用兜底回答结束本轮。" />} value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} onReset={showReset("hermes_agent_max_wait_seconds")} />
+        <EditableField label={<TooltipLabel label="等待提示延迟（秒）" tip="开启等待语音提示时，LLM 超过这个时间未返回才会播第一句等待提示。" />} value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} onReset={showReset("hermes_first_filler_delay_seconds")} />
+        <EditableField label={<TooltipLabel label="等待提示次数" tip="0 表示不播等待提示；1 表示最多播一句。默认关闭以减少打扰。" />} value={values.hermes_max_fillers ?? 0} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} onReset={showReset("hermes_max_fillers")} />
+        <EditableField label={<TooltipLabel label="首段最少字符" tip="第一句达到这个长度就会先合成，数值越小越快出声。" />} value={values.tts_segment_min_chars ?? 8} onSave={(v) => patch({ tts_segment_min_chars: Number(v) })} onReset={showReset("tts_segment_min_chars")} />
+        <EditableField label={<TooltipLabel label="每段最多字符" tip="TTS 分段长度。越短越快出声，越长越接近完整语气。" />} value={values.tts_segment_max_chars ?? 48} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} onReset={showReset("tts_segment_max_chars")} />
+        <EditableField label={<TooltipLabel label="音频上限（秒）" tip="防止 Qwen3TTS 偶发生成超长异常音频；超过会裁剪并写入日志。" />} value={values.tts_max_audio_seconds ?? 18} onSave={(v) => patch({ tts_max_audio_seconds: Number(v) })} onReset={showReset("tts_max_audio_seconds")} />
+        <EditableField label={<TooltipLabel label="发包间隔（毫秒）" tip="服务器发送音频包之间的等待。0 表示尽快交给客户端缓冲播放。" />} value={values.response_audio_chunk_send_delay_ms ?? 0} onSave={(v) => patch({ response_audio_chunk_send_delay_ms: Number(v) })} onReset={showReset("response_audio_chunk_send_delay_ms")} />
       </section>
       <section className="panel span-6">
-        <span className="eyebrow"><Settings2 size={15} /> Qwen 底层配置</span>
-        <EditableField label="后端" value={values.qwentts_cpp_backend} onSave={(v) => patch({ qwentts_cpp_backend: v })} onReset={showReset("qwentts_cpp_backend")} />
-        <EditableField label="固定声线种子" value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} onReset={showReset("qwentts_cpp_seed")} />
+        <span className="eyebrow"><Settings2 size={15} /> TTS 底层</span>
+        <h2>Qwen 运行选项</h2>
+        <EditableField label={<TooltipLabel label="推理后端" tip="qwentts.cpp 使用的运行后端，例如 Vulkan0 或 CPU。改动通常需要重建 TTS 组件。" />} value={values.qwentts_cpp_backend} onSave={(v) => patch({ qwentts_cpp_backend: v })} onReset={showReset("qwentts_cpp_backend")} />
+        <EditableField label={<TooltipLabel label="默认 seed" tip="默认音色模式下的固定随机种子；改变它会改变默认声线的细微气质。" />} value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} onReset={showReset("qwentts_cpp_seed")} />
+        <EditableField label={<TooltipLabel label="最大音频帧" tip="传给 qwentts.cpp 的 --max-new。数值越小越不容易生成超长异常音频，也更快；太小会截短长回复。" />} value={values.qwentts_cpp_max_new_frames ?? 512} onSave={(v) => patch({ qwentts_cpp_max_new_frames: Number(v) })} onReset={showReset("qwentts_cpp_max_new_frames")} />
       </section>
     </div>
   );
 }
 
-function EditableField({ label, value, secret, onSave, onReset }: { label: string; value: any; secret?: boolean; onSave: (value: string) => void; onReset?: () => void }) {
+function LlmProfiles({
+  state,
+  reload,
+  setNotice,
+  compact = false,
+}: {
+  state: AdminState;
+  reload: () => Promise<void>;
+  setNotice: (v: string) => void;
+  compact?: boolean;
+}) {
+  const values = state.settings.values;
+  const activeId = state.active_llm_profile_id || values.active_llm_profile_id || state.llm_profiles[0]?.id || "";
+  const activeProfile = state.llm_profiles.find((profile) => profile.id === activeId) || state.llm_profiles[0];
+  const [selectedId, setSelectedId] = useState(activeProfile?.id || "");
+  const selectedProfile = state.llm_profiles.find((profile) => profile.id === selectedId) || activeProfile;
+  const [draft, setDraft] = useState<LlmProfile>(() => llmDraftFromProfile(selectedProfile, values));
+  const [saving, setSaving] = useState("");
+  const [diagnostic, setDiagnostic] = useState("");
+
+  useEffect(() => {
+    if (selectedId && !state.llm_profiles.some((item) => item.id === selectedId)) return;
+    const profile = state.llm_profiles.find((item) => item.id === selectedId) || activeProfile;
+    setDraft(llmDraftFromProfile(profile, values));
+  }, [selectedId, state.llm_profiles, activeProfile?.id]);
+
+  const updateDraft = (patch: Partial<LlmProfile>) => setDraft((current) => ({ ...current, ...patch }));
+
+  const saveProfile = async () => {
+    setSaving("save");
+    try {
+      const data = await api<{ state: AdminState }>("/api/llm/profiles", {
+        method: "POST",
+        body: JSON.stringify(draft),
+      });
+      setSelectedId(data.state.llm_profiles.find((p) => p.name === draft.name && p.model === draft.model)?.id || draft.id);
+      setNotice("LLM Profile 已保存");
+      window.setTimeout(() => setNotice(""), 1800);
+      await reload();
+    } catch (err) {
+      setNotice(`保存失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const applyProfile = async (profileId = draft.id) => {
+    if (!profileId) return;
+    setSaving("apply");
+    try {
+      const data = await api<{ state: AdminState; restart_scheduled?: boolean }>(`/api/llm/profiles/${encodeURIComponent(profileId)}/apply`, { method: "POST" });
+      setNotice(data.restart_scheduled ? "Profile 已启用，服务正在重启" : "Profile 已启用");
+      window.setTimeout(() => setNotice(""), data.restart_scheduled ? 3600 : 1800);
+      await reload();
+    } catch (err) {
+      setNotice(`启用失败：${errorMessage(err)}`);
+      window.setTimeout(() => setNotice(""), 3000);
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const deleteProfile = async (profileId: string) => {
+    if (state.llm_profiles.length <= 1) {
+      setNotice("至少保留一个 LLM Profile");
+      window.setTimeout(() => setNotice(""), 1800);
+      return;
+    }
+    if (!window.confirm("删除这个 LLM Profile？")) return;
+    setSaving("delete");
+    try {
+      await api(`/api/llm/profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
+      setSelectedId(state.llm_profiles.find((p) => p.id !== profileId)?.id || "");
+      setNotice("LLM Profile 已删除");
+      window.setTimeout(() => setNotice(""), 1800);
+      await reload();
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const newProfile = () => {
+    const next = llmDraftFromProfile(undefined, values);
+    next.id = `llm_${Date.now()}`;
+    next.name = "新的 LLM Profile";
+    setSelectedId(next.id);
+    setDraft(next);
+  };
+
+  const testConnection = async () => {
+    setSaving("test");
+    try {
+      const data = await api<{ ok: boolean; ms?: number; error?: string; text?: string }>("/api/diagnostics/llm", { method: "POST" });
+      setDiagnostic(data.ok ? `连接正常 · ${data.ms ?? 0}ms` : `连接失败：${data.error || "未知错误"}`);
+    } catch (err) {
+      setDiagnostic(`连接失败：${errorMessage(err)}`);
+    } finally {
+      setSaving("");
+    }
+  };
+
+  return (
+    <div className={compact ? "llm-profile-box compact" : "llm-profile-box"}>
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow"><KeyRound size={15} /> LLM / Agent</span>
+          <h2>当前连接</h2>
+        </div>
+        <button className="secondary" onClick={newProfile}><Plus size={16} />新增</button>
+      </div>
+      <div className="profile-picker">
+        <label className="field">
+          <TooltipLabel label="选择 Profile" tip="选择一组已保存的连接配置。点“使用”后才会真正切换运行中的 LLM/Agent。" />
+          <select value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
+            {state.llm_profiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.name}{profile.id === activeId ? " · 当前使用" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="active-profile-summary">
+          <StatusDot ok={draft.id === activeId} />
+          <strong>{draft.id === activeId ? "正在使用" : "编辑中"}</strong>
+          <span>{profileModeLabel(draft.provider)} · {draft.model || "未填写模型"}</span>
+        </div>
+      </div>
+      <div className="llm-editor">
+        <div className="field-row">
+          <label className="field">
+            <span>名称</span>
+            <input value={draft.name} onChange={(e) => updateDraft({ name: e.target.value })} />
+          </label>
+          <label className="field">
+            <TooltipLabel label="调用路径" tip="两种路径都调用 OpenAI-compatible Chat Completions API。Agent 服务表示后端自己有 agent 能力；LLM 直连表示由 STS 注入本地工具和联网搜索。" />
+            <select value={draft.provider} onChange={(e) => updateDraft({ provider: e.target.value })}>
+              <option value="hermes_agent">Agent 服务</option>
+              <option value="openai_compatible">LLM 直连</option>
+            </select>
+          </label>
+        </div>
+        <label className="field">
+          <TooltipLabel label="API 地址" tip="Chat Completions 接口的 base URL，例如 http://127.0.0.1:8642/v1。" />
+          <input value={draft.base_url} onChange={(e) => updateDraft({ base_url: e.target.value })} />
+        </label>
+        <div className="field-row">
+          <label className="field">
+            <span>模型</span>
+            <input value={draft.model} onChange={(e) => updateDraft({ model: e.target.value })} />
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input type="password" value={draft.api_key || ""} onChange={(e) => updateDraft({ api_key: e.target.value })} />
+          </label>
+        </div>
+        <div className="llm-toggles">
+          <LabeledSwitch label="等待语音" tip="LLM 超过延迟仍未返回时，是否先播一句“稍等”。默认关闭，避免打扰。" checked={draft.wait_fillers_enabled} onChange={(checked) => updateDraft({ wait_fillers_enabled: checked })} onLabel="开启" offLabel="关闭" />
+          <LabeledSwitch label="联网搜索" tip="只影响 LLM 直连路径。开启后 STS 会把 web_search 作为本地工具注入给 LLM。" checked={draft.web_search_enabled} onChange={(checked) => updateDraft({ web_search_enabled: checked })} onLabel="开启" offLabel="关闭" />
+          <LabeledSwitch label="Hermes 快答" tip="只影响 Agent 服务路径，会给 Hermes 请求加 /no_think，让语音回答更快。" checked={draft.voice_no_think} onChange={(checked) => updateDraft({ voice_no_think: checked })} onLabel="开启" offLabel="关闭" />
+        </div>
+        <details className="soft-details">
+          <summary>高级连接参数</summary>
+          <div className="field-row">
+            <label className="field">
+              <TooltipLabel label="Max tokens" tip="单次回答最多生成的 token 数。越大越能长答，也可能更慢。" />
+              <input value={draft.max_tokens} onChange={(e) => updateDraft({ max_tokens: Number(e.target.value) })} />
+            </label>
+            <label className="field">
+              <TooltipLabel label="请求超时（秒）" tip="等待 LLM HTTP 请求完成的时间上限。" />
+              <input value={draft.timeout_seconds} onChange={(e) => updateDraft({ timeout_seconds: Number(e.target.value) })} />
+            </label>
+          </div>
+          <div className="field-row">
+            <label className="field">
+              <TooltipLabel label="最大等待（秒）" tip="语音回合最多等 LLM 多久。超时后使用兜底回答。" />
+              <input value={draft.max_wait_seconds} onChange={(e) => updateDraft({ max_wait_seconds: Number(e.target.value) })} />
+            </label>
+            <label className="field">
+              <span>备注</span>
+              <input value={draft.notes || ""} onChange={(e) => updateDraft({ notes: e.target.value })} />
+            </label>
+          </div>
+          <LabeledSwitch label="兜底回答" tip="LLM 请求失败或超时时，是否用本地兜底文本结束本轮语音。" checked={draft.fallback_enabled} onChange={(checked) => updateDraft({ fallback_enabled: checked })} onLabel="开启" offLabel="关闭" />
+        </details>
+        <div className="profile-actions">
+          <button className="secondary" onClick={saveProfile} disabled={saving === "save"}><Save size={16} />{saving === "save" ? "保存中" : "保存"}</button>
+          <button className="primary" onClick={() => applyProfile(draft.id)} disabled={!draft.id || saving === "apply"}><CheckCircle2 size={16} />{saving === "apply" ? "启用中" : "使用"}</button>
+          <button className="secondary" onClick={testConnection} disabled={saving === "test"}><Activity size={16} />{saving === "test" ? "测试中" : "测试连接"}</button>
+          {draft.id && state.llm_profiles.some((p) => p.id === draft.id) && (
+            <button className="icon-btn danger" onClick={() => deleteProfile(draft.id)} disabled={saving === "delete"} title="删除 Profile"><Trash2 size={16} /></button>
+          )}
+        </div>
+        {diagnostic && <span className="diagnostic-note">{diagnostic}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ToolsPanel({ tools }: { tools?: { local: ToolSnapshot[]; client: ToolSnapshot[] } }) {
+  const local = tools?.local || [];
+  const client = tools?.client || [];
+  return (
+    <section className="panel span-12">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow"><Wrench size={15} /> Tools</span>
+          <h2>当前可调用工具</h2>
+        </div>
+        <span className="subtle">{local.length} 系统 / {client.length} 客户端</span>
+      </div>
+      <div className="tools-grid">
+        <ToolGroup title="系统工具" tools={local} empty="系统工具未启用" />
+        <ToolGroup title="客户端工具" tools={client} empty="等待 Reachy App 注入 tools" />
+      </div>
+    </section>
+  );
+}
+
+function ToolGroup({ title, tools, empty }: { title: string; tools: ToolSnapshot[]; empty: string }) {
+  return (
+    <div className="tool-group">
+      <strong>{title}</strong>
+      {tools.length === 0 ? (
+        <span className="muted">{empty}</span>
+      ) : (
+        tools.map((tool) => (
+          <div className="tool-row" key={`${tool.mode}-${tool.name}`}>
+            <div>
+              <strong>{tool.name}</strong>
+              <span>{tool.description || "无描述"}</span>
+            </div>
+            <em>{tool.parameters_count} 参数</em>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function WebSearchDiagnostics({ state }: { state: AdminState }) {
+  const [result, setResult] = useState("");
+  const [busy, setBusy] = useState(false);
+  const web = state.web_search || {};
+  const runTest = async () => {
+    setBusy(true);
+    try {
+      const data = await api<{ ok: boolean; ms?: number; error?: string; hits?: any[]; state?: any }>("/api/diagnostics/web-search", { method: "POST" });
+      setResult(data.ok ? `搜索可用 · ${data.ms ?? 0}ms · ${data.hits?.length ?? 0} 条` : `搜索不可用：${data.error || "无结果"}`);
+    } catch (err) {
+      setResult(`搜索不可用：${errorMessage(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="panel span-6">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow"><Wrench size={15} /> Web Search</span>
+          <h2>联网搜索诊断</h2>
+        </div>
+        <button className="secondary" onClick={runTest} disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Activity size={15} />}{busy ? "测试中" : "测试"}</button>
+      </div>
+      <div className="diag-list">
+        <div><strong>当前链路</strong><span>{web.provider || "noop"}</span></div>
+        <div><strong>配置顺序</strong><span>{(web.configured_providers || []).join(" → ") || "未配置"}</span></div>
+        <div><strong>最近成功</strong><span>{web.recent_success || "暂无"}</span></div>
+        <div><strong>最近错误</strong><span>{web.last_error || "无"}</span></div>
+      </div>
+      {result && <span className="diagnostic-note">{result}</span>}
+    </section>
+  );
+}
+
+function llmDraftFromProfile(profile: LlmProfile | undefined, values: SettingsValues): LlmProfile {
+  if (profile) return { ...profile };
+  return {
+    id: values.active_llm_profile_id || "",
+    name: values.llm_provider === "openai_compatible" ? "OpenAI compatible" : "Hermes Agent",
+    provider: values.llm_provider || "hermes_agent",
+    base_url: values.llm_provider === "openai_compatible" ? values.llm_base_url || "" : values.hermes_base_url || "",
+    model: values.llm_provider === "openai_compatible" ? values.llm_model || "" : values.hermes_model || "",
+    api_key: values.llm_provider === "openai_compatible" ? values.llm_api_key || "" : values.hermes_api_key || "",
+    max_tokens: Number(values.llm_provider === "openai_compatible" ? values.llm_max_tokens || 220 : values.hermes_max_tokens || 220),
+    timeout_seconds: Number(values.llm_provider === "openai_compatible" ? values.llm_timeout_seconds || 45 : values.hermes_timeout_seconds || 45),
+    voice_no_think: values.hermes_voice_no_think !== false,
+    wait_fillers_enabled: Number(values.hermes_max_fillers || 0) > 0,
+    max_wait_seconds: Number(values.hermes_agent_max_wait_seconds || 60),
+    fallback_enabled: values.hermes_allow_fallback !== false && values.llm_fallback_enabled !== false,
+    web_search_enabled: Boolean(values.web_search_enabled),
+    notes: "",
+  };
+}
+
+function profileModeLabel(provider: string) {
+  return provider === "hermes_agent" ? "Agent 服务" : "LLM 直连";
+}
+
+function TooltipLabel({ label, tip }: { label: string; tip: string }) {
+  return (
+    <span className="label-with-tip">
+      <span>{label}</span>
+      <span className="tip-wrap">
+        <HelpCircle size={14} />
+        <span className="tip-bubble">{tip}</span>
+      </span>
+    </span>
+  );
+}
+
+function LabeledSwitch({
+  label,
+  tip,
+  checked,
+  onChange,
+  onLabel,
+  offLabel,
+}: {
+  label: string;
+  tip: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  onLabel: string;
+  offLabel: string;
+}) {
+  return (
+    <div className="labeled-switch">
+      <TooltipLabel label={label} tip={tip} />
+      <SwitchControl checked={checked} onChange={onChange} onLabel={onLabel} offLabel={offLabel} />
+    </div>
+  );
+}
+
+function EditableField({ label, value, secret, onSave, onReset }: { label: React.ReactNode; value: any; secret?: boolean; onSave: (value: string) => void; onReset?: () => void }) {
   const [draft, setDraft] = useState(String(value ?? ""));
   useEffect(() => setDraft(String(value ?? "")), [value]);
   return (
@@ -1409,6 +1841,22 @@ function SwitchControl({
 
 function Kpi({ label, value, hint }: { label: string; value: string; hint: string }) {
   return <div className="kpi"><span>{label}</span><strong>{value}</strong><em>{hint}</em></div>;
+}
+
+function HealthTile({ label, item }: { label: string; item?: DiagnosticItem }) {
+  const status = item?.status || "warn";
+  return (
+    <div className={`health-tile status-${status}`}>
+      <StatusDot ok={status === "ok"} />
+      <strong>{label}</strong>
+      <span>{item?.message || "暂无状态"}</span>
+      {item?.last_error && <em>{item.last_error}</em>}
+    </div>
+  );
+}
+
+function diagnosticLabel(key: string) {
+  return ({ llm: "LLM", stt: "STT", tts: "TTS", tools: "Tools", memory: "Memory", web_search: "Web Search" } as Record<string, string>)[key] || key;
 }
 
 async function api<T = any>(path: string, init: RequestInit & { raw?: boolean } = {}): Promise<T> {
@@ -1601,11 +2049,10 @@ function activitySnippet(value: any): string {
 
 function headlineFor(tab: string) {
   if (tab === "studio") return "人格和声线，一处调整";
-  if (tab === "setup") return "首次设置向导";
-  if (tab === "advanced") return "低频但可控的底层设置";
+  if (tab === "setup") return "连接、模型和运行入口";
+  if (tab === "advanced") return "影响语音链路的运行参数";
   if (tab === "memory") return "记忆管理与检索";
-  if (tab === "conversation") return "对话记录管理";
-  return "语音助手状态大屏";
+  return "语音助手总览";
 }
 
 function base64ToBlob(base64: string, mime: string) {
@@ -1625,34 +2072,61 @@ function timeAgo(ts: number): string {
   return `${Math.floor(hours / 24)}天前`;
 }
 
+function shortText(text: string, max = 96): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, max).trim()}...`;
+}
+
 function ConversationCard() {
-  const [active, setActive] = useState<{ id: string; title?: string; message_count?: number; created_at?: number; updated_at?: number } | null>(null);
+  const [active, setActive] = useState<ConversationSummary | null>(null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [ending, setEnding] = useState(false);
   const [msg, setMsg] = useState("");
 
-  const fetchActive = useCallback(async () => {
+  const fetchState = useCallback(async () => {
     try {
-      const data = await api<{ id: string; title?: string; message_count?: number; created_at?: number; updated_at?: number }>("/api/conversations/active");
-      setActive(data && data.id ? data : null);
+      const [activeData, list] = await Promise.all([
+        api<ConversationSummary>("/api/conversations/active"),
+        api<ConversationSummary[]>("/api/conversations?limit=20"),
+      ]);
+      const nextActive = activeData && activeData.id ? activeData : null;
+      setActive(nextActive);
+      setConversations(Array.isArray(list) ? list : []);
+      setSelectedId((current) => current || nextActive?.id || list?.[0]?.id || "");
     } catch {
       setActive(null);
+      setConversations([]);
     }
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    fetchActive();
-    const id = window.setInterval(fetchActive, 15000);
+    fetchState();
+    const id = window.setInterval(fetchState, 15000);
     return () => window.clearInterval(id);
-  }, [fetchActive]);
+  }, [fetchState]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setMessages([]);
+      return;
+    }
+    api<{ messages: ConversationMessage[] }>(`/api/conversations/${encodeURIComponent(selectedId)}/messages?limit=80`)
+      .then((data) => setMessages(data.messages || []))
+      .catch(() => setMessages([]));
+  }, [selectedId]);
 
   const handleEnd = async () => {
     setEnding(true);
     try {
-      await api("/api/conversations/end", { method: "POST" });
-      await fetchActive();
-      setMsg("已结束旧对话，开启新对话");
+      const ended = await api<{ id?: string }>("/api/conversations/end", { method: "POST" });
+      await fetchState();
+      setSelectedId(ended.id || "");
+      setMsg("已开启新的语音上下文");
       window.setTimeout(() => setMsg(""), 2000);
     } catch {
       setMsg("操作失败");
@@ -1661,72 +2135,102 @@ function ConversationCard() {
     setEnding(false);
   };
 
-  if (loading) return <div className="p-4">加载中...</div>;
+  const selected = conversations.find((item) => item.id === selectedId) || active;
 
-  if (!active) {
+  if (loading) {
     return (
-      <div className="p-4 space-y-3">
-        {msg && <p className="text-sm text-green-600">{msg}</p>}
-        <p className="text-gray-500">尚未开始对话</p>
-        <button disabled className="px-4 py-2 bg-gray-300 text-gray-500 rounded cursor-not-allowed">End & Start New</button>
-        <RecentConversations />
+      <div className="grid conversation-page span-12">
+        <section className="panel span-12"><p className="muted">正在读取会话上下文...</p></section>
       </div>
     );
   }
 
   return (
-    <div className="p-4 space-y-3">
-      {msg && <p className="text-sm text-green-600">{msg}</p>}
-      <div className="bg-white rounded-lg shadow-sm border p-4 space-y-2">
-        <h3 className="font-medium truncate">{active.title || "无标题"}</h3>
-        <div className="text-sm text-gray-500 space-y-1">
-          <p>消息数: {active.message_count ?? 0}</p>
-          <p>开始: {active.created_at ? new Date(active.created_at * 1000).toLocaleString() : "-"}</p>
-          <p>活动: {active.updated_at ? timeAgo(active.updated_at * 1000) : "-"}</p>
+    <div className="grid conversation-page span-12">
+      <section className="panel span-12 conversation-hero">
+        <div>
+          <span className="eyebrow"><MessageSquare size={15} /> Context</span>
+          <h2>语音上下文，而不是聊天收件箱</h2>
+          <p className="muted">这个页面只处理一件事：当助手被旧对话影响时，查看当前短期上下文，并一键开启新上下文。</p>
         </div>
-        <button onClick={handleEnd} disabled={ending}
-          className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50">
-          {ending ? "处理中..." : "End & Start New"}
-        </button>
-      </div>
-      <RecentConversations />
+        <div className="conversation-actions">
+          {msg && <span className="notice inline">{msg}</span>}
+          <button className="primary" onClick={handleEnd} disabled={ending || !active}>
+            <RefreshCw size={16} />{ending ? "处理中" : "开启新上下文"}
+          </button>
+        </div>
+      </section>
+
+      <section className="stat-strip span-12 conversation-stats">
+        <Kpi label="当前消息" value={String(active?.message_count ?? 0)} hint={active ? "本地短期上下文" : "尚未开始"} />
+        <Kpi label="最近活动" value={active?.updated_at ? timeAgo(active.updated_at) : "--"} hint={active?.title || "无活动会话"} />
+        <Kpi label="历史会话" value={String(conversations.length)} hint="最近 20 条" />
+        <Kpi label="选中状态" value={selected?.status === "active" ? "活动中" : selected ? "已归档" : "--"} hint={selected?.ended_reason ? reasonLabel(selected.ended_reason) : "当前查看对象"} />
+      </section>
+
+      <section className="panel span-5 conversation-list-panel">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Clock3 size={15} /> Recent</span>
+            <h2>最近上下文</h2>
+          </div>
+          <button className="icon-btn" onClick={fetchState} title="刷新"><RefreshCw size={16} /></button>
+        </div>
+        <div className="conversation-list">
+          {conversations.length === 0 && <p className="muted">暂无会话。第一次语音问答后会自动出现。</p>}
+          {conversations.map((conversation) => (
+            <button
+              key={conversation.id}
+              className={conversation.id === selectedId ? "conversation-row selected" : "conversation-row"}
+              onClick={() => setSelectedId(conversation.id)}
+            >
+              <div>
+                <strong>{conversation.title || "无标题上下文"}</strong>
+                <span>{conversation.message_count ?? 0} 条 · {conversation.updated_at ? timeAgo(conversation.updated_at) : "未知时间"}</span>
+              </div>
+              <em>{conversation.status === "active" ? "当前" : reasonLabel(conversation.ended_reason)}</em>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel span-7 conversation-detail-panel">
+        <div className="panel-head">
+          <div>
+            <span className="eyebrow"><Bot size={15} /> Preview</span>
+            <h2>{selected?.title || "选择一个上下文"}</h2>
+          </div>
+          {selected && <span className="subtle">{selected.message_count ?? messages.length} 条消息</span>}
+        </div>
+        {!selected ? (
+          <p className="muted">左侧选择一个上下文查看摘要。</p>
+        ) : messages.length === 0 ? (
+          <p className="muted">这个上下文还没有可显示的消息。</p>
+        ) : (
+          <div className="conversation-messages">
+            {messages.map((message, index) => (
+              <div key={message.id ?? `${message.role}-${index}`} className={`conversation-message role-${message.role}`}>
+                <strong>{roleLabel(message.role)}</strong>
+                <p>{message.content}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
 
-function RecentConversations() {
-  const [open, setOpen] = useState(false);
-  const [list, setList] = useState<any[]>([]);
+function roleLabel(role: string) {
+  return ({ system: "系统", user: "用户", assistant: "助手", tool: "工具" } as Record<string, string>)[role] || role;
+}
 
-  useEffect(() => {
-    if (!open) return;
-    api<{ conversations: any[] }>("/api/conversations?limit=10")
-      .then((data) => setList(data.conversations || []))
-      .catch(() => setList([]));
-  }, [open]);
-
-  return (
-    <div className="space-y-2">
-      <button onClick={() => setOpen(!open)} className="text-sm text-blue-600 hover:underline">
-        {open ? "收起" : "展开"} 近期对话 ({list.length || "..."})
-      </button>
-      {open && (
-        <div className="space-y-1 text-sm">
-          {list.length === 0 && <p className="text-gray-400">暂无历史对话</p>}
-          {list.map((c: any) => (
-            <div key={c.id} className="p-2 bg-gray-50 rounded border text-gray-700 cursor-default"
-                 title={c.ended_reason ? `结束原因: ${c.ended_reason}` : undefined}>
-              <span className="font-medium">{c.title || "(无标题)"}</span>
-              <span className="text-gray-400 ml-2">
-                {c.message_count}条 | {c.created_at ? new Date(c.created_at * 1000).toLocaleDateString() : ""}
-                {c.ended_at ? " | 结束" : ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function reasonLabel(reason?: string) {
+  if (!reason) return "归档";
+  if (reason === "admin_end" || reason === "admin_reset") return "手动";
+  if (reason === "superseded") return "新会话";
+  if (reason.startsWith("idle_")) return "空闲";
+  return reason;
 }
 
 function MemoryPanel({
