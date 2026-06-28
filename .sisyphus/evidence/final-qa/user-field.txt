@@ -1,0 +1,10 @@
+test_chat_includes_user_in_body_when_conversation_id_set (tests.test_llm_user_field.TestUserField.test_chat_includes_user_in_body_when_conversation_id_set)
+When conversation_id is set on provider, body['user'] matches it. ... ok
+test_chat_omits_user_when_none (tests.test_llm_user_field.TestUserField.test_chat_omits_user_when_none)
+When conversation_id is None, body should NOT contain user field. ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+OK
+exit=0

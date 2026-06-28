@@ -1,0 +1,64 @@
+
+> hermes-sts-admin-ui@0.1.0 build
+> tsc -b && vite build
+
+vite v6.4.3 building for production...
+transforming...
+✓ 2601 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                                     0.41 kB │ gzip:   0.29 kB
+dist/assets/jetbrains-mono-greek-400-normal-C190GLew.woff2          4.23 kB
+dist/assets/jetbrains-mono-cyrillic-400-normal-BEIGL1Tu.woff2       5.33 kB
+dist/assets/jetbrains-mono-vietnamese-400-normal-CqNFfHCs.woff      5.37 kB
+dist/assets/jetbrains-mono-greek-400-normal-B9oWc5Lo.woff           5.66 kB
+dist/assets/ibm-plex-sans-vietnamese-400-normal-fK1oJ5dG.woff       6.39 kB
+dist/assets/ibm-plex-sans-vietnamese-600-normal-DgdngZtN.woff       6.58 kB
+dist/assets/ibm-plex-sans-vietnamese-500-normal-BEb3_waV.woff       6.59 kB
+dist/assets/jetbrains-mono-cyrillic-400-normal-ugxPyKxw.woff        6.98 kB
+dist/assets/jetbrains-mono-latin-ext-400-normal-Bc8Ftmh3.woff2      7.34 kB
+dist/assets/ibm-plex-sans-vietnamese-400-normal-DG4YqDda.woff2      8.20 kB
+dist/assets/ibm-plex-sans-vietnamese-500-normal-e4dixQRQ.woff2      8.42 kB
+dist/assets/ibm-plex-sans-vietnamese-600-normal-DpPYBSTl.woff2      8.46 kB
+dist/assets/ibm-plex-sans-greek-400-normal-D9ESIMu3.woff            8.76 kB
+dist/assets/ibm-plex-sans-greek-500-normal-CuWXN6rf.woff            9.15 kB
+dist/assets/ibm-plex-sans-greek-600-normal-D-CqTdkO.woff            9.22 kB
+dist/assets/ibm-plex-sans-greek-400-normal-_efipK4i.woff2           9.94 kB
+dist/assets/jetbrains-mono-latin-ext-400-normal-fXTG6kC5.woff      10.13 kB
+dist/assets/ibm-plex-sans-cyrillic-ext-400-normal-Dsrv2Tcn.woff    10.29 kB
+dist/assets/ibm-plex-sans-greek-600-normal-DzTrcv_p.woff2          10.37 kB
+dist/assets/ibm-plex-sans-greek-500-normal-JMMifIXV.woff2          10.38 kB
+dist/assets/ibm-plex-sans-cyrillic-ext-500-normal-DB5PtV2g.woff    10.59 kB
+dist/assets/ibm-plex-sans-cyrillic-ext-600-normal-Bz0x94Yp.woff    10.62 kB
+dist/assets/ibm-plex-sans-cyrillic-ext-400-normal-g30qAdWV.woff2   12.15 kB
+dist/assets/ibm-plex-sans-cyrillic-ext-600-normal-DUMzJB7m.woff2   12.30 kB
+dist/assets/ibm-plex-sans-cyrillic-ext-500-normal-Cs5J6C77.woff2   12.31 kB
+dist/assets/ibm-plex-sans-cyrillic-400-normal-BTotfTJu.woff        13.51 kB
+dist/assets/ibm-plex-sans-cyrillic-500-normal-ByOcLdNv.woff        13.86 kB
+dist/assets/ibm-plex-sans-cyrillic-600-normal-BGq0mW3O.woff        13.89 kB
+dist/assets/ibm-plex-sans-latin-ext-400-normal-RBey6euL.woff       14.36 kB
+dist/assets/ibm-plex-sans-latin-ext-500-normal-D0aIdm-b.woff       14.74 kB
+dist/assets/ibm-plex-sans-latin-ext-600-normal-DIrixKbi.woff       14.77 kB
+dist/assets/ibm-plex-sans-cyrillic-400-normal-DZqxrq2p.woff2       14.80 kB
+dist/assets/ibm-plex-sans-cyrillic-500-normal-CocWQlwt.woff2       15.00 kB
+dist/assets/ibm-plex-sans-cyrillic-600-normal-71GNu3SW.woff2       15.04 kB
+dist/assets/ibm-plex-sans-latin-ext-400-normal-C5H60-Va.woff2      15.98 kB
+dist/assets/ibm-plex-sans-latin-ext-600-normal-DOrvGEcy.woff2      16.45 kB
+dist/assets/ibm-plex-sans-latin-ext-500-normal-DakdToA3.woff2      16.46 kB
+dist/assets/jetbrains-mono-latin-400-normal-V6pRDFza.woff2         21.17 kB
+dist/assets/ibm-plex-sans-latin-400-normal-CYLoc0-x.woff           22.10 kB
+dist/assets/ibm-plex-sans-latin-400-normal-CDDApCn2.woff2          22.59 kB
+dist/assets/ibm-plex-sans-latin-600-normal-Cu4Hd6ag.woff           23.88 kB
+dist/assets/ibm-plex-sans-latin-500-normal-BgVn5rGT.woff           23.92 kB
+dist/assets/ibm-plex-sans-latin-500-normal-6ng42L7E.woff2          24.18 kB
+dist/assets/ibm-plex-sans-latin-600-normal-CuJfVYMP.woff2          24.25 kB
+dist/assets/jetbrains-mono-latin-400-normal-6-qcROiO.woff          27.50 kB
+dist/assets/index-BHTcYoO-.css                                     54.56 kB │ gzip:  17.38 kB
+dist/assets/index-wfjz9bhY.js                                     790.38 kB │ gzip: 231.72 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 2.65s
+exit=0

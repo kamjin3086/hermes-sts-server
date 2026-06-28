@@ -1,0 +1,3 @@
+=== Scenario 1: GET /api/conversations/active (fresh start) ===
+{"id":null}
+--- Expected: {"id": null}

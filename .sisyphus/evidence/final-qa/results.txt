@@ -1,0 +1,33 @@
+=== Backend API: /api/memories ===
+memories is array: 0
+
+=== Backend API: /api/admin/state memory block ===
+memory in state: False noop
+
+=== POST /api/memories (noop provider) ===
+{"ok":true,"uri":"noop://b4b38c1039804bdd8c08fdcac93a36ec"}
+
+=== SQLite Memory CRUD (fresh db) ===
+SQLite CRUD OK
+
+=== OpenViking graceful degradation ===
+OpenViking request failed: POST /api/v1/search/find: All connection attempts failed
+OpenViking request failed: POST /api/v1/sessions: All connection attempts failed
+OpenViking session creation failed for session_id=s1
+OV degradation OK
+
+=== Unittest suite ===
+
+----------------------------------------------------------------------
+Ran 64 tests in 0.185s
+
+OK
+
+=== Frontend build ===
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 2.24s
+
+=== Frontend MemoryPanel presence ===
+2
+1

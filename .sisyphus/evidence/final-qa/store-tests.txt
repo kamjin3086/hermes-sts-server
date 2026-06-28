@@ -1,0 +1,15 @@
+test_append_message_seq_increments (tests.test_conversation_store.TestConversationStore.test_append_message_seq_increments) ... ok
+test_archive_sets_ended (tests.test_conversation_store.TestConversationStore.test_archive_sets_ended) ... ok
+test_concurrent_append_within_lock (tests.test_conversation_store.TestConversationStore.test_concurrent_append_within_lock) ... ok
+test_create_and_get_active (tests.test_conversation_store.TestConversationStore.test_create_and_get_active) ... ok
+test_maybe_archive_on_idle_disabled_never_archives (tests.test_conversation_store.TestConversationStore.test_maybe_archive_on_idle_disabled_never_archives) ... ok
+test_maybe_archive_on_idle_over_threshold_archives (tests.test_conversation_store.TestConversationStore.test_maybe_archive_on_idle_over_threshold_archives) ... ok
+test_maybe_archive_on_idle_within_threshold_keeps_active (tests.test_conversation_store.TestConversationStore.test_maybe_archive_on_idle_within_threshold_keeps_active) ... ok
+test_reload_history_into_overwrites (tests.test_conversation_store.TestConversationStore.test_reload_history_into_overwrites) ... ok
+test_wal_journal_mode_pragma (tests.test_conversation_store.TestConversationStore.test_wal_journal_mode_pragma) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.048s
+
+OK
+exit=0

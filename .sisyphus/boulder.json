@@ -1,0 +1,67 @@
+{
+  "active_plan": "/home/kamjin/projects/hermes-sts-server/.sisyphus/plans/context-coherence.md",
+  "started_at": "2026-06-28T05:40:48.365Z",
+  "session_ids": [
+    "ses_0f37a42ccffe3Ww4k05R6NXgWF",
+    "ses_0f3332f87ffePgxzFkBSfQy5wa",
+    "ses_0f33320ebffeuJqZALvVFcsgYV",
+    "ses_0f3330f9cffeZFE8y3gZVkYQf8",
+    "ses_0f332feb4ffepJZK67TghP8Tz2"
+  ],
+  "session_origins": {
+    "ses_0f37a42ccffe3Ww4k05R6NXgWF": "direct",
+    "ses_0f3332f87ffePgxzFkBSfQy5wa": "appended",
+    "ses_0f33320ebffeuJqZALvVFcsgYV": "appended",
+    "ses_0f3330f9cffeZFE8y3gZVkYQf8": "appended",
+    "ses_0f332feb4ffepJZK67TghP8Tz2": "appended"
+  },
+  "plan_name": "context-coherence",
+  "agent": "atlas",
+  "task_sessions": {
+    "todo:1": {
+      "task_key": "todo:1",
+      "task_label": "1",
+      "task_title": "ConversationStore + Settings + 表 schema",
+      "session_id": "ses_0f3404908ffe0oY8GZPcrfPugl",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-06-28T05:44:09.476Z"
+    },
+    "todo:4": {
+      "task_key": "todo:4",
+      "task_label": "4",
+      "task_title": "llm.py 写穿 + archive_conversation() + reset_history 新语义",
+      "session_id": "ses_0f33cd560ffeHi9s2de7xLns3Q",
+      "agent": "Sisyphus-Junior",
+      "category": "deep",
+      "updated_at": "2026-06-28T05:48:25.945Z"
+    },
+    "todo:5": {
+      "task_key": "todo:5",
+      "task_label": "5",
+      "task_title": "server.py 启动智能 reload（idle 边界判定 + 透明续接）",
+      "session_id": "ses_0f339a044ffeKB9qKLRD4310hU",
+      "agent": "Sisyphus-Junior",
+      "category": "unspecified-high",
+      "updated_at": "2026-06-28T05:52:35.016Z"
+    },
+    "todo:8": {
+      "task_key": "todo:8",
+      "task_label": "8",
+      "task_title": "admin_ui/src/main.tsx — ConversationCard + End 按钮 + 折叠只读 Recent",
+      "session_id": "ses_0f335b3f8ffeCHFOgs3G0B3QEd",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-06-28T05:55:28.909Z"
+    },
+    "final-wave:f1": {
+      "task_key": "final-wave:f1",
+      "task_label": "F1",
+      "task_title": "**Plan Compliance Audit** — `oracle`",
+      "session_id": "ses_0f327d345ffeJlAH4hFqve4wPF",
+      "agent": "Sisyphus-Junior",
+      "category": "quick",
+      "updated_at": "2026-06-28T06:09:11.028Z"
+    }
+  }
+}

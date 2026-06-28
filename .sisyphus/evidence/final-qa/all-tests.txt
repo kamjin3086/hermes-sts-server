@@ -1,0 +1,115 @@
+test_append_message_seq_increments (test_conversation_store.TestConversationStore.test_append_message_seq_increments) ... ok
+test_archive_sets_ended (test_conversation_store.TestConversationStore.test_archive_sets_ended) ... ok
+test_concurrent_append_within_lock (test_conversation_store.TestConversationStore.test_concurrent_append_within_lock) ... ok
+test_create_and_get_active (test_conversation_store.TestConversationStore.test_create_and_get_active) ... ok
+test_maybe_archive_on_idle_disabled_never_archives (test_conversation_store.TestConversationStore.test_maybe_archive_on_idle_disabled_never_archives) ... ok
+test_maybe_archive_on_idle_over_threshold_archives (test_conversation_store.TestConversationStore.test_maybe_archive_on_idle_over_threshold_archives) ... ok
+test_maybe_archive_on_idle_within_threshold_keeps_active (test_conversation_store.TestConversationStore.test_maybe_archive_on_idle_within_threshold_keeps_active) ... ok
+test_reload_history_into_overwrites (test_conversation_store.TestConversationStore.test_reload_history_into_overwrites) ... ok
+test_wal_journal_mode_pragma (test_conversation_store.TestConversationStore.test_wal_journal_mode_pragma) ... ok
+test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied (test_core.CoreTests.test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied) ... ok
+test_admin_state_exposes_ui_required_values_and_validates_qwen_speaker (test_core.CoreTests.test_admin_state_exposes_ui_required_values_and_validates_qwen_speaker) ... ok
+test_build_energy_vad (test_core.CoreTests.test_build_energy_vad) ... ok
+test_build_qwentts_cpp_requires_runtime_paths (test_core.CoreTests.test_build_qwentts_cpp_requires_runtime_paths) ... ok
+test_config_store_deleted_persona_stays_deleted_after_defaults (test_core.CoreTests.test_config_store_deleted_persona_stays_deleted_after_defaults) ... ok
+test_config_store_falls_back_to_base_when_optional_qwen_voice_model_missing (test_core.CoreTests.test_config_store_falls_back_to_base_when_optional_qwen_voice_model_missing) ... ok
+test_config_store_keeps_clone_mode_without_selected_clone (test_core.CoreTests.test_config_store_keeps_clone_mode_without_selected_clone) ... ok
+test_config_store_keeps_qwen_legacy_fields_in_sync_when_switching_modes (test_core.CoreTests.test_config_store_keeps_qwen_legacy_fields_in_sync_when_switching_modes) ... ok
+test_config_store_seeds_kokoro_defaults_for_ui_switching (test_core.CoreTests.test_config_store_seeds_kokoro_defaults_for_ui_switching) ... ok
+test_config_store_sqlite_overrides_env_and_maps_qwen_modes (test_core.CoreTests.test_config_store_sqlite_overrides_env_and_maps_qwen_modes) ... ok
+test_decode_audio_append_rejects_invalid_chunks (test_core.CoreTests.test_decode_audio_append_rejects_invalid_chunks) ... ok
+test_design_voice_profiles_keep_prompt_note_and_map_to_settings (test_core.CoreTests.test_design_voice_profiles_keep_prompt_note_and_map_to_settings) ... ok
+test_effective_tts_voice_respects_source_and_override (test_core.CoreTests.test_effective_tts_voice_respects_source_and_override) ... ok
+test_energy_vad_detects_turn (test_core.CoreTests.test_energy_vad_detects_turn) ... ok
+test_hermes_voice_no_think_can_be_disabled (test_core.CoreTests.test_hermes_voice_no_think_can_be_disabled) ... ok
+test_hermes_voice_no_think_does_not_duplicate_prefix (test_core.CoreTests.test_hermes_voice_no_think_does_not_duplicate_prefix) ... ok
+test_hermes_voice_no_think_prefixes_last_user_message (test_core.CoreTests.test_hermes_voice_no_think_prefixes_last_user_message) ... ok
+test_llm_history_resets_after_idle_limit (test_core.CoreTests.test_llm_history_resets_after_idle_limit) ... ok
+test_llm_system_prompt_uses_persona_label (test_core.CoreTests.test_llm_system_prompt_uses_persona_label) ... ok
+test_parse_tool_calls (test_core.CoreTests.test_parse_tool_calls) ... ok
+test_post_speak_cooldown_suppresses_input_after_response (test_core.CoreTests.test_post_speak_cooldown_suppresses_input_after_response) ... ok
+test_post_speak_cooldown_zero_disables_window (test_core.CoreTests.test_post_speak_cooldown_zero_disables_window) ... ok
+test_qwen3tts_command_accepts_voice_clone_args (test_core.CoreTests.test_qwen3tts_command_accepts_voice_clone_args) ... ok
+test_qwen3tts_command_uses_voice_snapshot_for_deterministic_turns (test_core.CoreTests.test_qwen3tts_command_uses_voice_snapshot_for_deterministic_turns) ... ok
+test_qwentts_cpp_subprocess_returns_resampled_pcm16 (test_core.CoreTests.test_qwentts_cpp_subprocess_returns_resampled_pcm16) ... ok
+test_realtime_persona_source_switch_selects_settings_or_ws (test_core.CoreTests.test_realtime_persona_source_switch_selects_settings_or_ws) ... ok
+test_realtime_session_extracts_text_item (test_core.CoreTests.test_realtime_session_extracts_text_item) ... ok
+test_realtime_turn_gate_serializes_sessions (test_core.CoreTests.test_realtime_turn_gate_serializes_sessions) ... ok
+test_realtime_turn_metrics_are_persisted (test_core.CoreTests.test_realtime_turn_metrics_are_persisted) ... ok
+test_realtime_turn_voice_is_reused_for_waiting_and_answer_audio (test_core.CoreTests.test_realtime_turn_voice_is_reused_for_waiting_and_answer_audio) ... ok
+test_session_forwards_client_tool_call_event (test_core.CoreTests.test_session_forwards_client_tool_call_event) ... ok
+test_suppress_input_disabled_allows_everything (test_core.CoreTests.test_suppress_input_disabled_allows_everything) ... ok
+test_synthesize_tts_falls_back_to_settings_voice_when_ws_voice_fails (test_core.CoreTests.test_synthesize_tts_falls_back_to_settings_voice_when_ws_voice_fails) ... TTS failed with WS voice speaker:bad_ws; retrying configured voice
+Traceback (most recent call last):
+  File "/home/kamjin/projects/hermes-sts-server/hermes_sts/realtime.py", line 1004, in _synthesize_tts
+    pcm16 = await self.tts.synthesize(text, voice=voice)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kamjin/projects/hermes-sts-server/tests/test_core.py", line 484, in synthesize
+    raise RuntimeError("unknown speaker")
+RuntimeError: unknown speaker
+ok
+test_tool_registry_accepts_realtime_client_tool (test_core.CoreTests.test_tool_registry_accepts_realtime_client_tool) ... ok
+test_tool_registry_executes_registered_tool (test_core.CoreTests.test_tool_registry_executes_registered_tool) ... ok
+test_tool_result_turn_uses_returned_tool_output (test_core.CoreTests.test_tool_result_turn_uses_returned_tool_output) ... ok
+test_tts_text_is_split_on_punctuation (test_core.CoreTests.test_tts_text_is_split_on_punctuation) ... ok
+test_tts_text_strips_bracketed_expression_cues (test_core.CoreTests.test_tts_text_strips_bracketed_expression_cues) ... ok
+test_chat_includes_user_in_body_when_conversation_id_set (test_llm_user_field.TestUserField.test_chat_includes_user_in_body_when_conversation_id_set)
+When conversation_id is set on provider, body['user'] matches it. ... ok
+test_chat_omits_user_when_none (test_llm_user_field.TestUserField.test_chat_omits_user_when_none)
+When conversation_id is None, body should NOT contain user field. ... ok
+test_disabled_returns_noop (test_memory_websearch.BuildMemoryProbeTests.test_disabled_returns_noop) ... ok
+test_explicit_noop_provider (test_memory_websearch.BuildMemoryProbeTests.test_explicit_noop_provider) ... ok
+test_explicit_sqlite_provider (test_memory_websearch.BuildMemoryProbeTests.test_explicit_sqlite_provider) ... ok
+test_openviking_missing_apikey_falls_back_to_sqlite (test_memory_websearch.BuildMemoryProbeTests.test_openviking_missing_apikey_falls_back_to_sqlite) ... openviking_api_key not configured, falling back to SqliteMemoryProvider
+ok
+test_openviking_probe_ok_uses_openviking (test_memory_websearch.BuildMemoryProbeTests.test_openviking_probe_ok_uses_openviking) ... ok
+test_openviking_probe_unreachable_falls_back_to_sqlite (test_memory_websearch.BuildMemoryProbeTests.test_openviking_probe_unreachable_falls_back_to_sqlite) ... OpenViking server unreachable at http://ov.example.test, falling back to SqliteMemoryProvider
+ok
+test_unknown_provider_falls_back_to_noop (test_memory_websearch.BuildMemoryProbeTests.test_unknown_provider_falls_back_to_noop) ... Unknown memory_provider='weird', falling back to NoopMemoryProvider
+ok
+test_all_methods_return_empty_or_safe_defaults (test_memory_websearch.NoopMemoryProviderTests.test_all_methods_return_empty_or_safe_defaults) ... ok
+test_stats_shape (test_memory_websearch.NoopMemoryProviderTests.test_stats_shape) ... ok
+test_search_returns_empty (test_memory_websearch.NoopWebSearchProviderTests.test_search_returns_empty) ... ok
+test_delete_unreachable_returns_false (test_memory_websearch.OpenVikingMemoryProviderTests.test_delete_unreachable_returns_false) ... OpenViking request failed: DELETE /api/v1/fs?uri=viking%3A%2F%2Fuser%2Fmemories%2Fx&recursive=false: All connection attempts failed
+ok
+test_list_unreachable_returns_empty (test_memory_websearch.OpenVikingMemoryProviderTests.test_list_unreachable_returns_empty) ... OpenViking request failed: GET /api/v1/fs/ls?uri=viking%3A%2F%2Fuser%2Fmemories%2F&recursive=true: All connection attempts failed
+ok
+test_recall_unreachable_returns_empty (test_memory_websearch.OpenVikingMemoryProviderTests.test_recall_unreachable_returns_empty) ... OpenViking request failed: POST /api/v1/search/find: All connection attempts failed
+ok
+test_record_turn_unreachable_returns_silently (test_memory_websearch.OpenVikingMemoryProviderTests.test_record_turn_unreachable_returns_silently) ... OpenViking request failed: POST /api/v1/sessions: All connection attempts failed
+OpenViking session creation failed for session_id=sess_ov
+ok
+test_stats_unreachable_returns_dict (test_memory_websearch.OpenVikingMemoryProviderTests.test_stats_unreachable_returns_dict) ... ok
+test_any_http_response_returns_true (test_memory_websearch.ProbeOpenVikingTests.test_any_http_response_returns_true) ... ok
+test_transport_error_returns_false (test_memory_websearch.ProbeOpenVikingTests.test_transport_error_returns_false) ... ok
+test_add_and_recall_cjk (test_memory_websearch.SqliteMemoryProviderTests.test_add_and_recall_cjk) ... ok
+test_add_and_recall_english (test_memory_websearch.SqliteMemoryProviderTests.test_add_and_recall_english) ... ok
+test_delete_memory (test_memory_websearch.SqliteMemoryProviderTests.test_delete_memory) ... ok
+test_list_memories_pagination (test_memory_websearch.SqliteMemoryProviderTests.test_list_memories_pagination) ... ok
+test_recall_no_match (test_memory_websearch.SqliteMemoryProviderTests.test_recall_no_match) ... ok
+test_recall_no_results (test_memory_websearch.SqliteMemoryProviderTests.test_recall_no_results) ... ok
+test_record_turn_with_failing_llm_does_not_crash (test_memory_websearch.SqliteMemoryProviderTests.test_record_turn_with_failing_llm_does_not_crash) ... Memory extract failed: llm unavailable
+ok
+test_record_turn_without_llm_is_noop (test_memory_websearch.SqliteMemoryProviderTests.test_record_turn_without_llm_is_noop) ... ok
+test_stats_after_operations (test_memory_websearch.SqliteMemoryProviderTests.test_stats_after_operations) ... ok
+test_update_memory (test_memory_websearch.SqliteMemoryProviderTests.test_update_memory) ... ok
+test_advanced_search_depth_downgraded (test_memory_websearch.TavilySearchProviderTests.test_advanced_search_depth_downgraded) ... tavily_search_depth 'advanced' is not supported, falling back to 'basic'
+ok
+test_search_unreachable_returns_empty (test_memory_websearch.TavilySearchProviderTests.test_search_unreachable_returns_empty) ... Tavily search failed: All connection attempts failed
+ok
+test_timeout_clamped (test_memory_websearch.TavilySearchProviderTests.test_timeout_clamped) ... tavily_timeout_seconds > 3.0 is clamped to 3.0
+ok
+test_inject_memory_appends_hits_to_instructions (test_realtime_memory.RealtimeMemoryTests.test_inject_memory_appends_hits_to_instructions) ... ok
+test_inject_memory_budget_caps_block (test_realtime_memory.RealtimeMemoryTests.test_inject_memory_budget_caps_block) ... ok
+test_inject_memory_skips_in_hermes_when_disabled (test_realtime_memory.RealtimeMemoryTests.test_inject_memory_skips_in_hermes_when_disabled) ... ok
+test_inject_memory_skips_when_disabled (test_realtime_memory.RealtimeMemoryTests.test_inject_memory_skips_when_disabled) ... ok
+test_record_turn_dispatched_in_openai_mode (test_realtime_memory.RealtimeMemoryTests.test_record_turn_dispatched_in_openai_mode) ... ok
+test_record_turn_skipped_in_hermes_mode (test_realtime_memory.RealtimeMemoryTests.test_record_turn_skipped_in_hermes_mode) ... ok
+test_register_default_local_tools_in_openai_mode (test_realtime_memory.RealtimeMemoryTests.test_register_default_local_tools_in_openai_mode) ... ok
+test_web_search_tool_not_registered_in_hermes_mode (test_realtime_memory.RealtimeMemoryTests.test_web_search_tool_not_registered_in_hermes_mode) ... ok
+
+----------------------------------------------------------------------
+Ran 87 tests in 0.201s
+
+OK
+exit=0
