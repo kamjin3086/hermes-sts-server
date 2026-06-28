@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import WebSocket
@@ -20,7 +21,7 @@ from starlette.websockets import WebSocketDisconnect
 from hermes_sts.audio import Utterance, chunk_pcm16
 from hermes_sts.config import Settings
 from hermes_sts.config_store import ConfigStore
-from hermes_sts.llm import LLMProvider, LLMResponse, Message, ToolCall
+from hermes_sts.llm import LLMProvider, LLMResponse, LLMToolCallDetected, Message, ToolCall
 from hermes_sts.persona import build_persona_instructions
 from hermes_sts.stt import SttProvider
 from hermes_sts.tools import ToolExecution, ToolRegistry
@@ -74,7 +75,7 @@ class RealtimeSession:
 
     def __post_init__(self) -> None:
         self.vad = build_vad(self.settings)
-        self.tools = ToolRegistry()
+        self.tools.set_client_tools(None)
         from hermes_sts.tools import register_default_local_tools
 
         register_default_local_tools(self.tools, self.settings, web_search_provider=self.web_search)
@@ -387,9 +388,9 @@ class RealtimeSession:
 
     def _effective_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
         if self.settings.tts_voice_source.strip().lower() == "ws":
-            for voice in (response_voice, self.session_voice):
-                if voice and not voice.is_empty():
-                    return voice
+            logger.warning(
+                "Ignoring websocket-provided voice because STS now uses settings as the single voice source"
+            )
         return TtsVoice.from_settings(self.settings)
 
     def _turn_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
@@ -631,6 +632,17 @@ class RealtimeSession:
             "DBG respond_with_agent_wait session_id=%s transcript_chars=%d instructions_chars=%d",
             self.session_id, len(transcript), len(instructions),
         )
+        if self.settings.llm_streaming_enabled and callable(getattr(self.llm, "stream_text", None)):
+            try:
+                if await self._respond_with_llm_stream(
+                    transcript,
+                    metrics=metrics,
+                    instructions=instructions,
+                    voice=voice,
+                ):
+                    return
+            except Exception:
+                logger.warning("LLM streaming path failed before speech; falling back to complete turn", exc_info=True)
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
         llm_task = asyncio.create_task(
@@ -726,6 +738,84 @@ class RealtimeSession:
                 with contextlib.suppress(asyncio.CancelledError):
                     await first_filler_pcm_task
 
+    async def _respond_with_llm_stream(
+        self,
+        transcript: str,
+        *,
+        metrics: TurnMetrics | None = None,
+        instructions: str | None = None,
+        voice: TtsVoice | None = None,
+    ) -> bool:
+        if instructions is None:
+            instructions = self._effective_instructions()
+        instructions = await self._inject_memory(transcript, instructions)
+        await self.llm.ensure_active_conversation()
+        response_id = f"resp_{uuid.uuid4().hex}"
+        item_id = f"item_{uuid.uuid4().hex}"
+        started = time.perf_counter()
+        created = False
+        sent_any = False
+        pending = ""
+        answer_parts: list[str] = []
+        try:
+            async for chunk in self.llm.stream_text(
+                transcript,
+                instructions=instructions,
+                tools=self.tools.openai_tools(),
+            ):
+                answer_parts.append(chunk)
+                pending += chunk
+                ready, pending = self._pop_stream_tts_segments(pending)
+                for segment in ready:
+                    if not created:
+                        await self._send_response_created(response_id, item_id, metrics=metrics)
+                        created = True
+                    await self._send_tts_segment(
+                        segment,
+                        response_id=response_id,
+                        item_id=item_id,
+                        metrics=metrics,
+                        voice=voice,
+                    )
+                    sent_any = True
+        except LLMToolCallDetected:
+            if sent_any:
+                logger.warning("LLM stream switched to tool calls after speech started; ending partial spoken response")
+            else:
+                return False
+        except Exception:
+            if not sent_any:
+                raise
+            logger.warning("LLM stream failed after speech started; ending partial spoken response", exc_info=True)
+
+        if metrics:
+            metrics.llm_ms = (time.perf_counter() - started) * 1000
+        answer = "".join(answer_parts).strip()
+        if pending.strip():
+            if not created:
+                await self._send_response_created(response_id, item_id, metrics=metrics)
+                created = True
+            await self._send_text_segments(
+                pending,
+                response_id=response_id,
+                item_id=item_id,
+                metrics=metrics,
+                voice=voice,
+            )
+            sent_any = True
+        if not sent_any or not answer:
+            return False
+        logger.info(
+            "LLM streamed session_id=%s turn_id=%s llm_ms=%.0f text_chars=%d",
+            self.session_id,
+            metrics.turn_id if metrics else "-",
+            (time.perf_counter() - started) * 1000,
+            len(answer),
+        )
+        self._fire_record_turn(transcript, answer)
+        await self._send_response_done(response_id=response_id, item_id=item_id, transcript=answer)
+        return True
+
     async def _ask_llm_with_tools(
         self,
         transcript: str,
@@ -788,9 +878,7 @@ class RealtimeSession:
                 self.session_id,
                 len(messages),
             )
-            final_text = response.text.strip()
-            self._fire_record_turn(transcript, final_text)
-            return final_text
+            return ""
         final_started = time.perf_counter()
         final = await self.llm.chat(messages=messages, instructions=instructions)
         if metrics:
@@ -909,14 +997,29 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         voice: TtsVoice | None = None,
     ) -> None:
-        for segment in self._split_tts_segments(self._sanitize_tts_text(text)):
-            await self._send_audio_segment(
-                segment,
-                response_id=response_id,
-                item_id=item_id,
-                metrics=metrics,
-                voice=voice,
+        segments = self._split_tts_segments(self._sanitize_tts_text(text))
+        if not segments:
+            return
+        if getattr(getattr(self, "tts", None), "supports_streaming", False):
+            for segment in segments:
+                await self._send_tts_segment(
+                    segment,
+                    response_id=response_id,
+                    item_id=item_id,
+                    metrics=metrics,
+                    voice=voice,
+                )
+            return
+        pending = asyncio.create_task(self._synthesize_tts(segments[0], metrics=metrics, voice=voice))
+        for index, segment in enumerate(segments):
+            pcm16 = await pending
+            next_index = index + 1
+            pending = (
+                asyncio.create_task(self._synthesize_tts(segments[next_index], metrics=metrics, voice=voice))
+                if next_index < len(segments)
+                else None
             )
+            await self._send_pcm_segment(pcm16, response_id=response_id, item_id=item_id, metrics=metrics)
 
     async def _send_audio_segment(
         self,
@@ -927,8 +1030,89 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         voice: TtsVoice | None = None,
     ) -> None:
+        await self._send_tts_segment(
+            text,
+            response_id=response_id,
+            item_id=item_id,
+            metrics=metrics,
+            voice=voice,
+        )
+
+    async def _send_tts_segment(
+        self,
+        text: str,
+        *,
+        response_id: str,
+        item_id: str,
+        metrics: TurnMetrics | None = None,
+        voice: TtsVoice | None = None,
+    ) -> None:
+        if getattr(getattr(self, "tts", None), "supports_streaming", False):
+            try:
+                await self._stream_tts_segment(
+                    text,
+                    response_id=response_id,
+                    item_id=item_id,
+                    metrics=metrics,
+                    voice=voice,
+                )
+                return
+            except Exception:
+                logger.warning("Streaming TTS failed; falling back to complete segment synthesis", exc_info=True)
         pcm16 = await self._synthesize_tts(text, metrics=metrics, voice=voice)
         await self._send_pcm_segment(pcm16, response_id=response_id, item_id=item_id, metrics=metrics)
+
+    async def _stream_tts_segment(
+        self,
+        text: str,
+        *,
+        response_id: str,
+        item_id: str,
+        metrics: TurnMetrics | None = None,
+        voice: TtsVoice | None = None,
+    ) -> None:
+        voice = self._effective_tts_voice(voice)
+        stream = getattr(self.tts, "stream_pcm")
+        started = time.perf_counter()
+        byte_limit = self._tts_audio_byte_limit(text)
+        sent_bytes = 0
+        first_chunk = True
+        async for pcm16 in stream(text, voice=voice):
+            if not pcm16:
+                continue
+            if self.active_response_id != response_id:
+                break
+            if byte_limit > 0:
+                remaining = byte_limit - sent_bytes
+                if remaining <= 0:
+                    logger.warning(
+                        "Stopping abnormal streaming TTS text_chars=%d allowed_seconds=%.2f voice=%s",
+                        len(text),
+                        byte_limit / 2 / self.settings.sample_rate,
+                        self._voice_label(voice) or "default",
+                    )
+                    break
+                if len(pcm16) > remaining:
+                    pcm16 = pcm16[:remaining]
+            if first_chunk:
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if metrics:
+                    metrics.tts_segments += 1
+                    if metrics.first_tts_ms == 0:
+                        metrics.first_tts_ms = elapsed_ms
+                logger.info(
+                    "TTS stream started in %.0f ms chars=%d voice=%s seed=%s model=%s",
+                    elapsed_ms,
+                    len(text),
+                    self._voice_label(voice) or "default",
+                    voice.seed if voice and voice.seed is not None else self.settings.qwentts_cpp_seed,
+                    Path(voice.model).name if voice and voice.model else Path(self.settings.qwentts_cpp_model).name,
+                )
+                first_chunk = False
+            sent_bytes += len(pcm16)
+            await self._send_pcm_segment(pcm16, response_id=response_id, item_id=item_id, metrics=metrics)
+        if first_chunk and metrics:
+            metrics.tts_segments += 1
 
     async def _synthesize_tts(
         self,
@@ -951,13 +1135,53 @@ class RealtimeSession:
                 exc_info=True,
             )
             pcm16 = await self.tts.synthesize(text, voice=fallback_voice)
+        pcm16 = self._limit_tts_audio(text, pcm16, voice=voice)
         elapsed_ms = (time.perf_counter() - started) * 1000
         if metrics:
             metrics.tts_segments += 1
             if metrics.first_tts_ms == 0:
                 metrics.first_tts_ms = elapsed_ms
-        logger.info("TTS segment completed in %.0f ms chars=%d", elapsed_ms, len(text))
+        audio_seconds = len(pcm16) / 2 / self.settings.sample_rate if pcm16 else 0.0
+        logger.info(
+            "TTS segment completed in %.0f ms chars=%d audio_seconds=%.2f voice=%s seed=%s model=%s",
+            elapsed_ms,
+            len(text),
+            audio_seconds,
+            self._voice_label(voice) or "default",
+            voice.seed if voice and voice.seed is not None else self.settings.qwentts_cpp_seed,
+            Path(voice.model).name if voice and voice.model else Path(self.settings.qwentts_cpp_model).name,
+        )
         return pcm16
+
+    def _limit_tts_audio(self, text: str, pcm16: bytes, *, voice: TtsVoice | None = None) -> bytes:
+        allowed_bytes = self._tts_audio_byte_limit(text)
+        if allowed_bytes <= 0 or not pcm16:
+            return pcm16
+        sample_rate = self.settings.sample_rate
+        actual_seconds = len(pcm16) / 2 / sample_rate
+        allowed_seconds = allowed_bytes / 2 / sample_rate
+        if len(pcm16) <= allowed_bytes:
+            return pcm16
+        logger.warning(
+            "Trimming abnormal TTS audio text_chars=%d audio_seconds=%.2f allowed_seconds=%.2f voice=%s",
+            len(text),
+            actual_seconds,
+            allowed_seconds,
+            self._voice_label(voice) or "default",
+        )
+        return pcm16[:allowed_bytes]
+
+    def _tts_audio_byte_limit(self, text: str) -> int:
+        max_seconds = float(getattr(self.settings, "tts_max_audio_seconds", 0.0) or 0.0)
+        if max_seconds <= 0:
+            return 0
+        text_budget = max_seconds
+        if len(text) <= 16:
+            text_budget = min(max_seconds, 8.0)
+        elif len(text) <= 48:
+            text_budget = min(max_seconds, 12.0)
+        allowed_seconds = max(3.0, text_budget)
+        return int(allowed_seconds * self.settings.sample_rate) * 2
 
     async def _send_pcm_segment(
         self,
@@ -989,13 +1213,17 @@ class RealtimeSession:
                     "delta": base64.b64encode(part).decode("ascii"),
                 }
             )
-            await asyncio.sleep(0.01)
+            delay_ms = max(0, int(getattr(self.settings, "response_audio_chunk_send_delay_ms", 0) or 0))
+            if delay_ms:
+                await asyncio.sleep(delay_ms / 1000)
 
     def _tool_system_prompt(self, *, instructions: str | None = None) -> str:
         base = (
             "你正在通过 Reachy Mini Lite 机器人和用户语音对话。"
             "请根据工具结果继续用用户语言给出简短、自然、适合语音播报的回答。"
             "工具名、JSON、动作参数和表情标签不能作为语音内容读出来。"
+            "只输出要被朗读的自然语言；不要输出 emoji、颜文字、舞台提示、括号里的情绪动作，"
+            "也不要写音色、嗓音、语速、语调或口音描述。音色描述由 TTS 声音配置单独控制。"
             "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
         )
         effective = instructions if instructions is not None else self._effective_instructions()
@@ -1047,7 +1275,13 @@ class RealtimeSession:
 
         segments: list[str] = []
         current = ""
-        for piece in pieces:
+        fast_first_min_chars = min(min_chars, 6)
+        for index, piece in enumerate(pieces):
+            is_first = index == 0
+            if is_first and len(piece) >= fast_first_min_chars and re.search(r"[。！？!?]$", piece):
+                segments.append(piece)
+                current = ""
+                continue
             if current and len(current) + len(piece) > max_chars and len(current) >= min_chars:
                 segments.append(current)
                 current = piece
@@ -1056,6 +1290,33 @@ class RealtimeSession:
         if current:
             segments.append(current)
         return [part for segment in segments for part in self._split_long_tts_segment(segment, max_chars)]
+
+    def _pop_stream_tts_segments(self, text: str) -> tuple[list[str], str]:
+        if not text.strip():
+            return [], ""
+        pieces = [piece for piece in re.split(r"(?<=[。！？!?.\n])\s*", text) if piece]
+        if not pieces:
+            return [], text
+        remainder = ""
+        if not re.search(r"[。！？!?.\n]\s*$", text):
+            remainder = pieces.pop() if pieces else text
+        ready_text = "".join(pieces).strip()
+        if not ready_text:
+            return [], remainder
+        max_chars = max(max(8, self.settings.tts_segment_min_chars), self.settings.tts_segment_max_chars)
+        sentence_segments = [
+            piece.strip()
+            for piece in re.split(r"(?<=[。！？!?.\n])\s*", self._sanitize_tts_text(ready_text))
+            if piece.strip()
+        ]
+        segments = [
+            part
+            for segment in sentence_segments
+            for part in self._split_long_tts_segment(segment, max_chars)
+        ]
+        if not segments:
+            return [], text
+        return segments, remainder
 
     @staticmethod
     def _split_long_tts_segment(text: str, max_chars: int) -> list[str]:
@@ -1092,9 +1353,21 @@ class RealtimeSession:
             return match.group(0)
 
         cleaned = bracketed.sub(replace, text)
+        if self.settings.tts_strip_emoji:
+            cleaned = self._strip_emoji_and_symbols(cleaned)
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
         cleaned = re.sub(r"\s+([。！？!?，,；;、])", r"\1", cleaned)
         return cleaned.strip()
+
+    @staticmethod
+    def _strip_emoji_and_symbols(text: str) -> str:
+        # Qwen3TTS is more stable when spoken text contains only speakable text,
+        # not emoji, pictographs, or decorative variation selectors.
+        return re.sub(
+            r"[\U0001F000-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF\uFE0F\u200D]+",
+            "",
+            text,
+        )
 
     @staticmethod
     def _looks_like_tts_cue(cue: str) -> bool:
