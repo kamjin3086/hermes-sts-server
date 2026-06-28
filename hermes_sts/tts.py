@@ -9,7 +9,7 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Protocol
+from typing import AsyncIterator, Protocol
 
 from hermes_sts.audio import tone_pcm16
 from hermes_sts.config import Settings
@@ -87,6 +87,9 @@ class TtsProvider(Protocol):
     async def synthesize(self, text: str, *, voice: TtsVoice | None = None) -> bytes:
         ...
 
+    def stream_pcm(self, text: str, *, voice: TtsVoice | None = None) -> AsyncIterator[bytes]:
+        ...
+
 
 def _qwen_model_path(settings: Settings) -> str:
     mode = settings.qwentts_cpp_voice_mode.strip().lower()
@@ -145,12 +148,16 @@ class ToneTts:
 
 class CommandWavTts:
     provider_name = "command_wav"
+    supports_streaming = False
 
     def __init__(self, settings: Settings):
         self.settings = settings
 
     async def synthesize(self, text: str, *, voice: TtsVoice | None = None) -> bytes:
         return await asyncio.to_thread(self._synthesize_sync, text, voice)
+
+    async def stream_pcm(self, text: str, *, voice: TtsVoice | None = None) -> AsyncIterator[bytes]:
+        yield await self.synthesize(text, voice=voice)
 
     def _synthesize_sync(self, text: str, voice: TtsVoice | None = None) -> bytes:
         wav_path = Path(NamedTemporaryFile(delete=False, suffix=".wav").name)
@@ -258,6 +265,7 @@ class SherpaKokoroTts:
 
 class QwenTtsCpp(CommandWavTts):
     provider_name = "qwentts.cpp"
+    supports_streaming = True
 
     def __init__(self, settings: Settings):
         super().__init__(settings)
@@ -315,11 +323,66 @@ class QwenTtsCpp(CommandWavTts):
         if voice.ref_rvq:
             cmd.extend(["--ref-rvq", voice.ref_rvq])
         cmd.extend(["--seed", str(voice.seed if voice.seed is not None else self.settings.qwentts_cpp_seed)])
+        if self.settings.qwentts_cpp_max_new_frames > 0:
+            cmd.extend(["--max-new", str(self.settings.qwentts_cpp_max_new_frames)])
         extra_args = voice.extra_args if voice.extra_args else self.settings.qwentts_cpp_extra_args
         if extra_args:
             cmd.extend(shlex.split(extra_args))
         cmd.extend(["-o", str(wav_path)])
         return cmd
+
+    async def stream_pcm(self, text: str, *, voice: TtsVoice | None = None) -> AsyncIterator[bytes]:
+        voice = voice or TtsVoice.from_settings(self.settings)
+        cmd = self._command(Path("-"), voice=voice)
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._environment(),
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stderr_task = asyncio.create_task(process.stderr.read())
+        decoder = _StreamingWavPcm16Decoder(target_rate=self.settings.sample_rate)
+        try:
+            process.stdin.write(text.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+            while True:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(8192),
+                    timeout=self._timeout_seconds(),
+                )
+                if not chunk:
+                    break
+                for pcm16 in decoder.feed(chunk):
+                    if pcm16:
+                        yield pcm16
+            for pcm16 in decoder.flush():
+                if pcm16:
+                    yield pcm16
+            code = await process.wait()
+            if code != 0:
+                stderr = await stderr_task
+                raise RuntimeError(
+                    f"{self.provider_name} stream failed with code {code}: "
+                    f"{stderr.decode('utf-8', errors='replace').strip()}"
+                )
+        except Exception:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            if not stderr_task.done():
+                stderr_task.cancel()
+            raise
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            if not stderr_task.done():
+                stderr_task.cancel()
 
     def _environment(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -347,6 +410,172 @@ def _read_wav_as_pcm16_mono(path: Path, target_rate: int) -> bytes:
     if rate != target_rate and audio.size:
         audio = _resample_linear(audio.astype(np.float32), rate, target_rate).astype(np.int16)
     return audio.tobytes()
+
+
+class _StreamingWavPcm16Decoder:
+    def __init__(self, *, target_rate: int):
+        self.target_rate = target_rate
+        self.buffer = bytearray()
+        self.riff_seen = False
+        self.in_data = False
+        self.sample_rate = 0
+        self.channels = 1
+        self.bits_per_sample = 16
+        self.data_pending = bytearray()
+        self.resampler: _StreamingPcm16Resampler | None = None
+
+    def feed(self, data: bytes) -> list[bytes]:
+        if not data:
+            return []
+        self.buffer.extend(data)
+        out: list[bytes] = []
+        if not self.in_data:
+            out.extend(self._parse_until_data())
+        if self.in_data and self.buffer:
+            out.extend(self._consume_data(bytes(self.buffer), final=False))
+            self.buffer.clear()
+        return out
+
+    def flush(self) -> list[bytes]:
+        out: list[bytes] = []
+        if self.in_data and self.buffer:
+            out.extend(self._consume_data(bytes(self.buffer), final=True))
+            self.buffer.clear()
+        if self.data_pending:
+            out.extend(self._consume_data(b"", final=True))
+        if self.resampler is not None:
+            flushed = self.resampler.flush()
+            if flushed:
+                out.append(flushed)
+        return out
+
+    def _parse_until_data(self) -> list[bytes]:
+        out: list[bytes] = []
+        if not self.riff_seen:
+            if len(self.buffer) < 12:
+                return out
+            if bytes(self.buffer[:4]) != b"RIFF" or bytes(self.buffer[8:12]) != b"WAVE":
+                raise RuntimeError("qwentts.cpp stdout is not a WAV stream")
+            del self.buffer[:12]
+            self.riff_seen = True
+        while len(self.buffer) >= 8:
+            chunk_id = bytes(self.buffer[:4])
+            chunk_size = int.from_bytes(self.buffer[4:8], "little", signed=False)
+            if chunk_id == b"data":
+                del self.buffer[:8]
+                self.in_data = True
+                self.resampler = _StreamingPcm16Resampler(
+                    source_rate=self.sample_rate or self.target_rate,
+                    target_rate=self.target_rate,
+                )
+                return out
+            padded = chunk_size + (chunk_size % 2)
+            if len(self.buffer) < 8 + padded:
+                return out
+            payload = bytes(self.buffer[8 : 8 + chunk_size])
+            if chunk_id == b"fmt ":
+                self._parse_fmt(payload)
+            del self.buffer[: 8 + padded]
+        return out
+
+    def _parse_fmt(self, payload: bytes) -> None:
+        if len(payload) < 16:
+            raise RuntimeError("Invalid WAV fmt chunk from qwentts.cpp")
+        audio_format = int.from_bytes(payload[0:2], "little")
+        self.channels = int.from_bytes(payload[2:4], "little")
+        self.sample_rate = int.from_bytes(payload[4:8], "little")
+        self.bits_per_sample = int.from_bytes(payload[14:16], "little")
+        if audio_format != 1 or self.bits_per_sample != 16 or self.channels <= 0:
+            raise RuntimeError(
+                f"Unsupported qwentts.cpp WAV format format={audio_format} "
+                f"bits={self.bits_per_sample} channels={self.channels}"
+            )
+
+    def _consume_data(self, data: bytes, *, final: bool) -> list[bytes]:
+        self.data_pending.extend(data)
+        frame_bytes = max(2, self.channels * 2)
+        complete = len(self.data_pending) - (len(self.data_pending) % frame_bytes)
+        if complete <= 0:
+            return []
+        raw = bytes(self.data_pending[:complete])
+        del self.data_pending[:complete]
+        if self.channels == 1:
+            mono = raw
+        else:
+            import numpy as np
+
+            audio = np.frombuffer(raw, dtype=np.int16).reshape(-1, self.channels)
+            mono = audio.mean(axis=1).astype(np.int16).tobytes()
+        if self.resampler is None:
+            self.resampler = _StreamingPcm16Resampler(
+                source_rate=self.sample_rate or self.target_rate,
+                target_rate=self.target_rate,
+            )
+        resampled = self.resampler.feed(mono)
+        return [resampled] if resampled else []
+
+
+class _StreamingPcm16Resampler:
+    def __init__(self, *, source_rate: int, target_rate: int):
+        self.source_rate = max(1, int(source_rate))
+        self.target_rate = max(1, int(target_rate))
+        self.start_index = 0
+        self.next_target_index = 0
+        self.samples = None
+
+    def feed(self, pcm16: bytes) -> bytes:
+        import numpy as np
+
+        if not pcm16:
+            return b""
+        incoming = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32)
+        if self.source_rate == self.target_rate:
+            return incoming.astype(np.int16).tobytes()
+        if self.samples is None or len(self.samples) == 0:
+            self.samples = incoming
+        else:
+            self.samples = np.concatenate([self.samples, incoming])
+        return self._drain(include_tail=False)
+
+    def flush(self) -> bytes:
+        if self.source_rate == self.target_rate:
+            return b""
+        return self._drain(include_tail=True)
+
+    def _drain(self, *, include_tail: bool) -> bytes:
+        import numpy as np
+
+        if self.samples is None or len(self.samples) == 0:
+            return b""
+        out: list[float] = []
+        max_source = self.start_index + len(self.samples) - 1
+        while True:
+            source_pos = self.next_target_index * self.source_rate / self.target_rate
+            if include_tail:
+                if source_pos > max_source:
+                    break
+            elif source_pos + 1 > max_source:
+                break
+            left = int(source_pos)
+            frac = source_pos - left
+            local = left - self.start_index
+            if local < 0 or local >= len(self.samples):
+                break
+            if local + 1 < len(self.samples):
+                sample = self.samples[local] * (1.0 - frac) + self.samples[local + 1] * frac
+            else:
+                sample = self.samples[local]
+            out.append(float(sample))
+            self.next_target_index += 1
+
+        keep_from_source = int(self.next_target_index * self.source_rate / self.target_rate) - 1
+        drop = max(0, keep_from_source - self.start_index)
+        if drop > 0:
+            self.samples = self.samples[drop:]
+            self.start_index += drop
+        if not out:
+            return b""
+        return np.clip(np.asarray(out, dtype=np.float32), -32768, 32767).astype(np.int16).tobytes()
 
 
 def _resample_linear(samples, source_rate: int, target_rate: int):
