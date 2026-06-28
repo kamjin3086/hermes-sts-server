@@ -38,6 +38,7 @@ class LLMProvider(Protocol):
         messages: list[Message] | None = None,
         instructions: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        conversation_id: str | None = None,
     ) -> LLMResponse:
         ...
 
@@ -56,6 +57,7 @@ class BaseOpenAIChatProvider:
         messages: list[Message] | None = None,
         instructions: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        conversation_id: str | None = None,
     ) -> LLMResponse:
         queued_at = time.monotonic()
         async with self._request_gate:
@@ -67,6 +69,7 @@ class BaseOpenAIChatProvider:
                 messages=messages,
                 instructions=instructions,
                 tools=tools,
+                conversation_id=conversation_id,
             )
 
     async def _chat_once(
@@ -76,6 +79,7 @@ class BaseOpenAIChatProvider:
         messages: list[Message] | None,
         instructions: str | None,
         tools: list[dict[str, Any]] | None,
+        conversation_id: str | None = None,
     ) -> LLMResponse:
         now = time.monotonic()
         self._reset_history_if_idle(now)
@@ -88,6 +92,8 @@ class BaseOpenAIChatProvider:
             "stream": False,
             "max_tokens": self.max_tokens,
         }
+        if conversation_id is not None:
+            body["user"] = conversation_id
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
