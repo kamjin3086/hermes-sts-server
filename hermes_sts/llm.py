@@ -4,12 +4,16 @@ import asyncio
 import logging
 import random
 import time
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TYPE_CHECKING
 
 import httpx
 
 from hermes_sts.config import Settings
+
+if TYPE_CHECKING:
+    from hermes_sts.conversation_store import ConversationStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,8 @@ class BaseOpenAIChatProvider:
         self.history: list[Message] = []
         self.last_llm_call_started_at: float | None = None
         self._request_gate = asyncio.Semaphore(max(1, settings.llm_max_concurrent_requests))
+        self.conversation_id: str | None = None
+        self.conversation_store: "ConversationStore | None" = None
 
     async def chat(
         self,
@@ -92,8 +98,8 @@ class BaseOpenAIChatProvider:
             "stream": False,
             "max_tokens": self.max_tokens,
         }
-        if conversation_id is not None:
-            body["user"] = conversation_id
+        if self.conversation_id is not None:
+            body["user"] = self.conversation_id
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -118,6 +124,14 @@ class BaseOpenAIChatProvider:
         if transcript and text and not tool_calls:
             self.history.append({"role": "user", "content": transcript})
             self.history.append({"role": "assistant", "content": text})
+            # Write-through must stay inside _request_gate critical section.
+            if self.conversation_store is not None and self.conversation_id is not None:
+                self.conversation_store.append_message(
+                    self.conversation_id, "user", transcript, set_title_if_first=True
+                )
+                self.conversation_store.append_message(
+                    self.conversation_id, "assistant", text
+                )
         return LLMResponse(text=text, tool_calls=tool_calls)
 
     async def _post_chat_completions(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -198,10 +212,32 @@ class BaseOpenAIChatProvider:
     def _prepare_messages(self, messages: list[Message]) -> list[Message]:
         return messages
 
+    def archive_current_conversation(self, reason: str) -> None:
+        if self.conversation_store is None or self.conversation_id is None:
+            self.history.clear()
+            return
+        self.conversation_store.archive_conversation(self.conversation_id, reason)
+        self.history.clear()
+        self.conversation_id = None
+
     def reset_history(self, reason: str = "manual") -> None:
         if self.history:
             logger.info("Resetting local LLM history reason=%s messages=%s", reason, len(self.history))
-        self.history.clear()
+        self.archive_current_conversation(reason)
+
+    async def ensure_active_conversation(self) -> str:
+        if self.conversation_id is not None:
+            return self.conversation_id
+        if self.conversation_store is not None:
+            cid = await asyncio.to_thread(self.conversation_store.create_conversation)
+            self.conversation_id = cid
+            await asyncio.to_thread(
+                self.conversation_store.reload_history_into, cid, self
+            )
+            return cid
+        cid = f"conv_{uuid.uuid4().hex}"
+        self.conversation_id = cid
+        return cid
 
     def _reset_history_if_idle(self, now: float) -> None:
         idle_limit = max(0.0, self.settings.hermes_history_idle_reset_seconds)

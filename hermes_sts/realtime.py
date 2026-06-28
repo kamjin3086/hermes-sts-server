@@ -56,6 +56,7 @@ class RealtimeSession:
     turn_gate: asyncio.Lock | None = None
     instructions: str = ""
     state: SessionState = "idle"
+    post_speak_until: float = 0.0
     vad: VadProvider = field(init=False)
     processing: asyncio.Task[None] | None = None
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -110,6 +111,19 @@ class RealtimeSession:
                     except Exception:
                         logger.warning("Memory final_commit failed on disconnect", exc_info=True)
 
+    def _should_suppress_input(self) -> bool:
+        if not self.settings.suppress_input_while_speaking:
+            return False
+        if self.state == "speaking":
+            return True
+        return time.monotonic() < self.post_speak_until
+
+    def _arm_post_speak_cooldown(self) -> None:
+        cooldown = self.settings.post_speak_cooldown_ms
+        if cooldown > 0:
+            self.post_speak_until = time.monotonic() + cooldown / 1000.0
+            logger.debug("Post-speak cooldown armed session_id=%s cooldown_ms=%d", self.session_id, cooldown)
+
     async def _handle_message(self, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type")
         if msg_type == "session.update":
@@ -125,8 +139,12 @@ class RealtimeSession:
             return
 
         if msg_type == "input_audio_buffer.append":
-            if self.state == "speaking" and self.settings.suppress_input_while_speaking:
-                logger.debug("Dropping input audio while speaking to avoid self-listening")
+            if self._should_suppress_input():
+                logger.debug(
+                    "Dropping input audio to avoid self-listening session_id=%s state=%s",
+                    self.session_id,
+                    self.state,
+                )
                 return
             raw = await self._decode_audio_append(msg)
             if raw is None:
@@ -382,6 +400,10 @@ class RealtimeSession:
         return voice
 
     def _effective_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
+        if self.settings.tts_voice_source.strip().lower() == "ws":
+            for voice in (response_voice, self.session_voice):
+                if voice and not voice.is_empty():
+                    return voice
         return TtsVoice.from_settings(self.settings)
 
     def _turn_tts_voice(self, response_voice: TtsVoice | None = None) -> TtsVoice:
@@ -730,6 +752,7 @@ class RealtimeSession:
         if instructions is None:
             instructions = self._effective_instructions()
         instructions = await self._inject_memory(transcript, instructions)
+        await self.llm.ensure_active_conversation()
         started = time.perf_counter()
         response = await self.llm.chat(
             transcript,
@@ -907,7 +930,7 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         voice: TtsVoice | None = None,
     ) -> None:
-        voice = voice if voice is not None else self._turn_tts_voice()
+        voice = self._effective_tts_voice(voice)
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"item_{uuid.uuid4().hex}"
         await self._send_response_created(response_id, item_id, metrics=metrics)
@@ -975,9 +998,20 @@ class RealtimeSession:
         metrics: TurnMetrics | None = None,
         voice: TtsVoice | None = None,
     ) -> bytes:
-        voice = voice if voice is not None else self._turn_tts_voice()
+        voice = self._effective_tts_voice(voice)
         started = time.perf_counter()
-        pcm16 = await self.tts.synthesize(text, voice=voice)
+        try:
+            pcm16 = await self.tts.synthesize(text, voice=voice)
+        except Exception:
+            if self.settings.tts_voice_source.strip().lower() != "ws" or voice.is_empty():
+                raise
+            fallback_voice = TtsVoice.from_settings(self.settings)
+            logger.warning(
+                "TTS failed with WS voice %s; retrying configured voice",
+                self._voice_label(voice),
+                exc_info=True,
+            )
+            pcm16 = await self.tts.synthesize(text, voice=fallback_voice)
         elapsed_ms = (time.perf_counter() - started) * 1000
         if metrics:
             metrics.tts_segments += 1
@@ -1280,6 +1314,7 @@ class RealtimeSession:
         self.active_response_id = None
         self.active_item_id = None
         self.active_metrics = None
+        self._arm_post_speak_cooldown()
         self.state = "idle"
 
     async def _cancel_processing(self, *, reason: str = "cancelled", send_done: bool = True) -> None:
@@ -1295,6 +1330,7 @@ class RealtimeSession:
             response_id = self.active_response_id
             self.active_response_id = None
             self.active_item_id = None
+            self._arm_post_speak_cooldown()
             self.state = "cancelled"
             await self._send_response_done_status(response_id=response_id, status="cancelled", reason=reason)
             self._log_turn_metrics(self.active_metrics, status="cancelled")
