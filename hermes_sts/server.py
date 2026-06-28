@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 
 from hermes_sts.admin import create_admin_router
 from hermes_sts.config import settings
 from hermes_sts.config_store import ConfigStore
+from hermes_sts.conversation_store import ConversationStore
 from hermes_sts.llm import build_llm
 from hermes_sts.realtime import RealtimeSession
 from hermes_sts.singleton import acquire_singleton_lock
@@ -31,6 +34,49 @@ def _build_components(app: FastAPI) -> None:
         app.state.turn_gate = asyncio.Lock()
 
 
+async def _wire_conversation_store(app: FastAPI) -> None:
+    """No-op when ``settings.sts_conversations_enabled`` is False."""
+    if not settings.sts_conversations_enabled:
+        return
+
+    store = ConversationStore(db_path=settings.sts_conversations_db_path)
+    app.state.conversation_store = store
+    app.state.llm.conversation_store = store
+
+    archived = await asyncio.to_thread(
+        store.maybe_archive_on_idle, settings.hermes_history_idle_reset_seconds
+    )
+    active = await asyncio.to_thread(store.get_active_conversation)
+    if active is not None:
+        await asyncio.to_thread(
+            store.reload_history_into,
+            active["id"],
+            app.state.llm,
+            settings.sts_conversations_reload_max_messages,
+        )
+        app.state.llm.conversation_id = active["id"]
+    else:
+        app.state.llm.conversation_id = None
+
+    # CRITICAL: prevent idle fire immediately after restart.
+    app.state.llm.last_llm_call_started_at = time.monotonic()
+
+    logger.info(
+        "Conversation store wired: archived_on_start=%s active=%s",
+        archived,
+        app.state.llm.conversation_id,
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await _wire_conversation_store(app)
+    yield
+    store = getattr(app.state, "conversation_store", None)
+    if store is not None:
+        store.close()
+
+
 def create_app() -> FastAPI:
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -40,7 +86,7 @@ def create_app() -> FastAPI:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    app = FastAPI(title="Hermes STS Server", version="0.1.0")
+    app = FastAPI(title="Hermes STS Server", version="0.1.0", lifespan=lifespan)
     app.state.config_store = ConfigStore.default()
     _build_components(app)
     logger.info(

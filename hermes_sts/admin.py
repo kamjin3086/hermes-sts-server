@@ -18,7 +18,7 @@ from typing import Any, Callable
 from urllib.request import urlretrieve
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -256,14 +256,61 @@ def create_admin_router(
         store.set_setup_value("complete", True)
         return {"ok": True}
 
-    @router.post("/api/llm/context/reset")
-    async def reset_llm_context() -> dict[str, Any]:
+    def _conversation_store(request: Request):
+        store = getattr(request.app.state, "conversation_store", None)
+        if store is None:
+            raise HTTPException(status_code=400, detail="conversations disabled")
+        return store
+
+    async def _end_current_conversation(request: Request, reason: str) -> dict[str, Any]:
+        """Archive the active conversation and start a new active one.
+
+        Shared by /api/conversations/end and the repurposed
+        /api/llm/context/reset so both expose identical archive + new semantics.
+        """
+        store = _conversation_store(request)
+        turn_gate = request.app.state.turn_gate
         llm = get_llm() if get_llm else None
-        reset = getattr(llm, "reset_history", None)
-        if not callable(reset):
-            raise HTTPException(status_code=422, detail="current LLM provider does not expose local context")
-        reset("admin")
-        return {"ok": True, "context": _llm_context_payload(llm, settings), "state": await admin_state()}
+
+        async with turn_gate:
+            current = await asyncio.to_thread(store.get_active_conversation)
+            if current is None:
+                return {"id": None, "previous_id": None, "archived": False}
+            previous_id = current["id"]
+            if llm is not None and callable(getattr(llm, "archive_current_conversation", None)):
+                await asyncio.to_thread(llm.archive_current_conversation, reason)
+            new_id = await asyncio.to_thread(store.create_conversation)
+            if llm is not None:
+                llm.conversation_id = new_id
+                await asyncio.to_thread(store.reload_history_into, new_id, llm)
+            return {"id": new_id, "previous_id": previous_id, "archived": True}
+
+    @router.get("/api/conversations/active")
+    async def get_active_conversation(request: Request) -> dict[str, Any]:
+        store = _conversation_store(request)
+        active = await asyncio.to_thread(store.get_active_conversation)
+        if active is None:
+            return {"id": None}
+        return dict(active)
+
+    @router.get("/api/conversations")
+    async def list_conversations(
+        request: Request,
+        status: str | None = None,
+        limit: int = Query(default=10, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        store = _conversation_store(request)
+        return await asyncio.to_thread(store.list_conversations, status, limit, offset)
+
+    @router.post("/api/conversations/end")
+    async def end_conversation(request: Request) -> dict[str, Any]:
+        return await _end_current_conversation(request, "admin_end")
+
+    @router.post("/api/llm/context/reset")
+    async def reset_llm_context(request: Request) -> dict[str, Any]:
+        """Archives the current conversation and starts a new one, mirroring /api/conversations/end."""
+        return await _end_current_conversation(request, "admin_reset")
 
     @router.post("/api/personas")
     async def upsert_persona(payload: PersonaPatch) -> dict[str, Any]:
@@ -691,6 +738,7 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "hermes_filler_interval_seconds",
             "hermes_max_fillers",
             "suppress_input_while_speaking",
+            "post_speak_cooldown_ms",
             "tts_segment_min_chars",
             "tts_segment_max_chars",
         ],
