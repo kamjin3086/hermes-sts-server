@@ -15,7 +15,7 @@ from hermes_sts.llm import build_llm
 from hermes_sts.realtime import RealtimeSession
 from hermes_sts.singleton import acquire_singleton_lock
 from hermes_sts.stt import build_stt
-from hermes_sts.tools import ToolRegistry
+from hermes_sts.tools import ToolRegistry, register_default_local_tools
 from hermes_sts.tts import build_tts
 from hermes_sts.memory import build_memory
 from hermes_sts.websearch import build_websearch
@@ -30,6 +30,7 @@ def _build_components(app: FastAPI) -> None:
     app.state.memory = build_memory(settings, app.state.llm)
     app.state.web_search = build_websearch(settings)
     app.state.tools = ToolRegistry()
+    register_default_local_tools(app.state.tools, settings, web_search_provider=app.state.web_search)
     if not hasattr(app.state, "turn_gate"):
         app.state.turn_gate = asyncio.Lock()
 
@@ -115,7 +116,17 @@ def create_app() -> FastAPI:
             settings.sherpa_kokoro_voice,
         )
 
-    app.include_router(create_admin_router(settings, rebuild_components, lambda: app.state.llm, lambda: app.state.memory))
+    app.include_router(
+        create_admin_router(
+            settings,
+            rebuild_components,
+            lambda: app.state.llm,
+            lambda: app.state.memory,
+            lambda: app.state.tools,
+            lambda: getattr(app.state, "conversation_store", None),
+            lambda: app.state.web_search,
+        )
+    )
 
     @app.get("/health")
     async def health() -> dict:

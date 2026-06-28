@@ -103,6 +103,23 @@ class PersonaOptimizeRequest(BaseModel):
     name: str = ""
 
 
+class LlmProfilePatch(BaseModel):
+    id: str = ""
+    name: str
+    provider: str = "hermes_agent"
+    base_url: str
+    model: str
+    api_key: str = ""
+    max_tokens: int = 220
+    timeout_seconds: float = 45.0
+    voice_no_think: bool = True
+    wait_fillers_enabled: bool = False
+    max_wait_seconds: float = 60.0
+    fallback_enabled: bool = True
+    web_search_enabled: bool = False
+    notes: str = ""
+
+
 class PreviewRequest(BaseModel):
     text: str = "你好，我是 Hermes STS。现在使用当前角色和音色进行试听。"
     voice_mode: str | None = None
@@ -136,6 +153,9 @@ def create_admin_router(
     rebuild_components,
     get_llm: Callable[[], Any] | None = None,
     get_memory: Callable[[], Any] | None = None,
+    get_tools: Callable[[], Any] | None = None,
+    get_conversation_store: Callable[[], Any] | None = None,
+    get_web_search: Callable[[], Any] | None = None,
 ) -> APIRouter:
     store = ConfigStore.default()
     router = APIRouter()
@@ -172,10 +192,21 @@ def create_admin_router(
     @router.get("/api/admin/state")
     async def admin_state() -> dict[str, Any]:
         current = refresh_settings()
+        memory = get_memory() if get_memory else None
+        tools = get_tools() if get_tools else None
+        conv_store = get_conversation_store() if get_conversation_store else None
+        web_search = get_web_search() if get_web_search else None
+        metrics = store.metrics(80)
         return {
             "health": _health(current),
             "llm_context": _llm_context_payload(get_llm() if get_llm else None, current),
+            "diagnostics": _diagnostics_payload(current, metrics, memory=memory, tools=tools, web_search=web_search),
+            "conversation": _conversation_payload(conv_store),
+            "web_search": _web_search_payload(current, web_search),
             "settings": _settings_payload(current, store),
+            "llm_profiles": store.llm_profiles(),
+            "active_llm_profile_id": current.active_llm_profile_id,
+            "tools": _tools_payload(tools),
             "setup": {
                 "complete": store.setup_complete(),
                 "env_imported": False,
@@ -192,8 +223,8 @@ def create_admin_router(
                 "modes": ["default", "preset", "design", "clone"],
             },
             "kokoro_voices": _kokoro_voice_options(),
-            "metrics": store.metrics(80),
-            "memory": get_memory().stats() if get_memory else None,
+            "metrics": metrics,
+            "memory": memory.stats() if memory else None,
         }
 
     @router.get("/api/settings")
@@ -303,6 +334,19 @@ def create_admin_router(
         store = _conversation_store(request)
         return await asyncio.to_thread(store.list_conversations, status, limit, offset)
 
+    @router.get("/api/conversations/{conversation_id}/messages")
+    async def conversation_messages(
+        request: Request,
+        conversation_id: str,
+        limit: int = Query(default=80, ge=1, le=300),
+    ) -> dict[str, Any]:
+        store = _conversation_store(request)
+        conversation = await asyncio.to_thread(store.get_conversation, conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        messages = await asyncio.to_thread(store.get_messages, conversation_id, limit)
+        return {"conversation": conversation, "messages": messages}
+
     @router.post("/api/conversations/end")
     async def end_conversation(request: Request) -> dict[str, Any]:
         return await _end_current_conversation(request, "admin_end")
@@ -344,6 +388,39 @@ def create_admin_router(
             "restart_scheduled": restart_scheduled,
             "state": await admin_state(),
         }
+
+    @router.post("/api/llm/profiles")
+    async def upsert_llm_profile(payload: LlmProfilePatch) -> dict[str, Any]:
+        profile = payload.model_dump()
+        profile["id"] = _safe_profile_id(profile.get("id") or f"llm_{uuid.uuid4().hex[:12]}")
+        _validate_llm_profile(profile)
+        store.upsert_llm_profile(profile)
+        return {"ok": True, "profile": store.llm_profile(profile["id"]), "state": await admin_state()}
+
+    @router.post("/api/llm/profiles/{profile_id}/apply")
+    async def apply_llm_profile(profile_id: str) -> dict[str, Any]:
+        profile = store.llm_profile(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="llm profile not found")
+        changed = store.set_settings(store.settings_for_llm_profile(profile))
+        refresh_settings()
+        restart_scheduled = _restart_if_required(changed, "llm profile applied")
+        return {"ok": True, "profile": profile, "restart_scheduled": restart_scheduled, "state": await admin_state()}
+
+    @router.delete("/api/llm/profiles/{profile_id}")
+    async def delete_llm_profile(profile_id: str) -> dict[str, Any]:
+        if len(store.llm_profiles()) <= 1:
+            raise HTTPException(status_code=422, detail="cannot delete the last llm profile")
+        if not store.delete_llm_profile(profile_id):
+            raise HTTPException(status_code=404, detail="llm profile not found")
+        current = refresh_settings()
+        restart_scheduled = False
+        if current.active_llm_profile_id == profile_id:
+            fallback = store.llm_profiles()[0]
+            changed = store.set_settings(store.settings_for_llm_profile(fallback))
+            refresh_settings()
+            restart_scheduled = _restart_if_required(changed, "active llm profile deleted")
+        return {"ok": True, "restart_scheduled": restart_scheduled, "state": await admin_state()}
 
     @router.delete("/api/personas/{persona_id}")
     async def delete_persona(persona_id: str) -> dict[str, Any]:
@@ -632,6 +709,65 @@ def create_admin_router(
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    @router.post("/api/diagnostics/llm")
+    async def llm_diagnostics() -> dict[str, Any]:
+        current = refresh_settings()
+        base_url = current.hermes_base_url if current.llm_provider == "hermes_agent" else current.llm_base_url
+        model = current.hermes_model if current.llm_provider == "hermes_agent" else current.llm_model
+        api_key = current.hermes_api_key if current.llm_provider == "hermes_agent" else current.llm_api_key
+        timeout = min(
+            8.0,
+            float(current.hermes_connect_timeout_seconds + current.hermes_read_timeout_seconds)
+            if current.llm_provider == "hermes_agent"
+            else float(current.llm_timeout_seconds),
+        )
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "Return a short plain-text OK."},
+                            {"role": "user", "content": "ping"},
+                        ],
+                        "stream": False,
+                        "max_tokens": 8,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return {"ok": False, "ms": int((time.perf_counter() - started) * 1000), "error": str(exc)}
+        text = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        return {"ok": True, "ms": int((time.perf_counter() - started) * 1000), "model": model, "text": text[:120]}
+
+    @router.post("/api/diagnostics/web-search")
+    async def web_search_diagnostics() -> dict[str, Any]:
+        current = refresh_settings()
+        provider = get_web_search() if get_web_search else None
+        if provider is None:
+            from hermes_sts.websearch import build_websearch
+
+            provider = build_websearch(current)
+        started = time.perf_counter()
+        try:
+            hits = await provider.search("Hermes STS diagnostic", max_results=2)
+        except Exception as exc:
+            return {"ok": False, "ms": int((time.perf_counter() - started) * 1000), "error": str(exc), "state": _web_search_payload(current, provider)}
+        return {
+            "ok": bool(hits),
+            "ms": int((time.perf_counter() - started) * 1000),
+            "hits": [asdict(hit) for hit in hits],
+            "state": _web_search_payload(current, provider),
+            "error": "" if hits else "no results",
+        }
+
     @router.get("/api/memories")
     async def list_memories(limit: int = 50, offset: int = 0, q: str = "") -> dict[str, Any]:
         if not get_memory or (prov := get_memory()) is None:
@@ -701,10 +837,19 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
     visible = {
         "server": ["host", "port", "log_level"],
         "llm": [
+            "active_llm_profile_id",
+            "llm_provider",
             "hermes_base_url",
             "hermes_model",
             "hermes_api_key",
             "hermes_max_tokens",
+            "hermes_timeout_seconds",
+            "llm_base_url",
+            "llm_model",
+            "llm_api_key",
+            "llm_max_tokens",
+            "llm_timeout_seconds",
+            "llm_streaming_enabled",
             "hermes_voice_no_think",
             "hermes_history_max_messages",
             "hermes_history_max_chars",
@@ -713,6 +858,7 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "memory_provider",
             "memory_remember_in_hermes",
             "web_search_enabled",
+            "web_search_providers",
         ],
         "stt": ["stt_provider", "sherpa_sensevoice_model", "sherpa_sensevoice_tokens"],
         "tts": [
@@ -738,8 +884,11 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "hermes_filler_interval_seconds",
             "hermes_max_fillers",
             "suppress_input_while_speaking",
+            "response_audio_chunk_send_delay_ms",
             "tts_segment_min_chars",
             "tts_segment_max_chars",
+            "tts_strip_emoji",
+            "tts_max_audio_seconds",
         ],
         "advanced": [
             "qwentts_cpp_bin",
@@ -749,6 +898,7 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "qwentts_cpp_codec",
             "qwentts_cpp_extra_args",
             "qwentts_cpp_seed",
+            "qwentts_cpp_max_new_frames",
         ],
         "memory": [
             "memory_enabled",
@@ -775,6 +925,9 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "tavily_max_results",
             "tavily_timeout_seconds",
             "tavily_base_url",
+            "duckduckgo_timeout_seconds",
+            "searxng_base_url",
+            "searxng_timeout_seconds",
         ],
     }
     return {
@@ -828,6 +981,84 @@ def _llm_context_payload(llm: Any, settings: Settings) -> dict[str, Any]:
         "last_llm_call_started_at": getattr(llm, "last_llm_call_started_at", None),
         "reset_available": callable(getattr(llm, "reset_history", None)),
     }
+
+
+def _tools_payload(tools: Any) -> dict[str, Any]:
+    if tools is None or not callable(getattr(tools, "snapshot", None)):
+        return {"local": [], "client": []}
+    return tools.snapshot()
+
+
+def _conversation_payload(store: Any) -> dict[str, Any]:
+    if store is None:
+        return {"enabled": False, "active": None, "reset_available": False}
+    try:
+        active = store.get_active_conversation()
+    except Exception as exc:
+        return {"enabled": True, "active": None, "reset_available": False, "error": str(exc)}
+    return {
+        "enabled": True,
+        "active": active,
+        "reset_available": active is not None,
+    }
+
+
+def _web_search_payload(settings: Settings, provider: Any) -> dict[str, Any]:
+    configured = [item.strip() for item in settings.web_search_providers.split(",") if item.strip()]
+    base = {
+        "enabled": settings.web_search_enabled,
+        "configured_providers": configured,
+        "provider": provider.description() if provider is not None and callable(getattr(provider, "description", None)) else "noop",
+        "providers": [],
+        "recent_success": None,
+        "cooldowns": {},
+        "last_error": None,
+    }
+    if provider is not None and callable(getattr(provider, "state", None)):
+        base.update(provider.state())
+    return base
+
+
+def _diagnostics_payload(
+    settings: Settings,
+    metrics: list[dict[str, Any]],
+    *,
+    memory: Any = None,
+    tools: Any = None,
+    web_search: Any = None,
+) -> dict[str, Any]:
+    recent_turns = [item for item in metrics if item.get("kind") == "turn"]
+    latest_turn = recent_turns[0]["value"] if recent_turns else {}
+    local_tools = tools.local_tool_names() if tools is not None and callable(getattr(tools, "local_tool_names", None)) else []
+    client_tools = tools.client_tool_names() if tools is not None and callable(getattr(tools, "client_tool_names", None)) else []
+    memory_stats = memory.stats() if memory is not None and callable(getattr(memory, "stats", None)) else {}
+    web_state = _web_search_payload(settings, web_search)
+    return {
+        "llm": _diag_item("ok", f"{settings.llm_provider} · {settings.hermes_model if settings.llm_provider == 'hermes_agent' else settings.llm_model}"),
+        "stt": _diag_item("ok", settings.stt_provider),
+        "tts": _diag_item("ok", f"{settings.tts_provider} · {settings.qwentts_cpp_backend if settings.tts_provider == 'qwen3tts' else settings.sherpa_kokoro_voice}"),
+        "tools": _diag_item("ok" if local_tools or client_tools else "warn", f"{len(local_tools)} 系统 / {len(client_tools)} 客户端"),
+        "memory": _diag_item("ok" if settings.memory_enabled else "warn", f"{settings.memory_provider} · {memory_stats.get('count', 0)} 条" if settings.memory_enabled else "未开启"),
+        "web_search": _diag_item("ok" if settings.web_search_enabled and web_state.get("provider") != "noop" else "warn", web_state.get("provider") or "未开启"),
+        "recent": _recent_diag(latest_turn),
+    }
+
+
+def _diag_item(status: str, message: str, last_error: str = "") -> dict[str, str]:
+    return {"status": status, "message": message, "last_error": last_error}
+
+
+def _recent_diag(latest_turn: dict[str, Any]) -> dict[str, Any]:
+    if not latest_turn:
+        return {"status": "warn", "message": "暂无语音回合数据", "last_error": ""}
+    status = str(latest_turn.get("status") or "unknown")
+    total_ms = int(latest_turn.get("total_ms") or 0)
+    first_audio_ms = int(latest_turn.get("first_audio_ms") or 0)
+    if status != "completed":
+        return {"status": "warn", "message": f"最近回合 {status}", "last_error": str(latest_turn.get("reason") or "")}
+    if first_audio_ms > 3500 or total_ms > 12000:
+        return {"status": "warn", "message": f"最近首声 {first_audio_ms}ms / 总耗时 {total_ms}ms", "last_error": ""}
+    return {"status": "ok", "message": f"最近首声 {first_audio_ms or '-'}ms", "last_error": ""}
 
 
 def _health(settings: Settings) -> dict[str, Any]:
@@ -897,17 +1128,8 @@ def _requires_rebuild(changed: dict[str, Any]) -> bool:
         "stt_provider",
         "tts_provider",
         "llm_provider",
-        "qwentts_cpp_voice_mode",
-        "qwentts_cpp_voice_preset",
-        "qwentts_cpp_voice_design",
-        "qwentts_cpp_clone_voice_id",
+        "active_llm_profile_id",
         "qwentts_cpp_bin",
-        "qwentts_cpp_base_model",
-        "qwentts_cpp_customvoice_model",
-        "qwentts_cpp_voicedesign_model",
-        "qwentts_cpp_codec",
-        "qwentts_cpp_backend",
-        "qwentts_cpp_seed",
         "sherpa_kokoro_model",
         "sherpa_kokoro_voices",
         "sherpa_kokoro_tokens",
@@ -918,7 +1140,9 @@ def _requires_rebuild(changed: dict[str, Any]) -> bool:
         "memory_enabled",
         "memory_provider",
         "web_search_enabled",
+        "web_search_providers",
         "tavily_api_key",
+        "searxng_base_url",
         "openviking_base_url",
         "openviking_api_key",
         "openviking_account",
@@ -940,9 +1164,20 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
             int(seed)
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="qwen seed must be an integer") from exc
+    max_new = values.get("qwentts_cpp_max_new_frames")
+    if max_new is not None:
+        try:
+            max_new_int = int(max_new)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="qwen max-new must be an integer") from exc
+        if max_new_int < 0:
+            raise HTTPException(status_code=422, detail="qwen max-new must be >= 0")
     provider = values.get("tts_provider")
     if provider is not None and provider not in {"qwen3tts", "sherpa_kokoro", "tone", "sapi", "sherpa_onnx"}:
         raise HTTPException(status_code=422, detail=f"unsupported tts provider: {provider}")
+    llm_provider = values.get("llm_provider")
+    if llm_provider is not None and llm_provider not in {"hermes_agent", "openai_compatible"}:
+        raise HTTPException(status_code=422, detail=f"unsupported llm provider: {llm_provider}")
     memory_provider = values.get("memory_provider")
     if memory_provider is not None and memory_provider not in {"sqlite", "openviking", "noop"}:
         raise HTTPException(status_code=422, detail=f"unsupported memory provider: {memory_provider}")
@@ -961,6 +1196,46 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
                 raise HTTPException(status_code=422, detail="tavily_timeout_seconds must not exceed 3.0")
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="tavily_timeout_seconds must be a number")
+    providers = values.get("web_search_providers")
+    if providers is not None:
+        allowed = {"tavily", "duckduckgo", "ddg", "searxng"}
+        unsupported = sorted({item.strip().lower() for item in str(providers).split(",") if item.strip()} - allowed)
+        if unsupported:
+            raise HTTPException(status_code=422, detail=f"unsupported web search provider: {', '.join(unsupported)}")
+    for key in ("duckduckgo_timeout_seconds", "searxng_timeout_seconds"):
+        if key in values:
+            try:
+                if float(values[key]) <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"{key} must be a positive number")
+
+
+def _safe_profile_id(raw: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_-]+", "_", raw.strip())[:64].strip("_")
+    return value or f"llm_{uuid.uuid4().hex[:12]}"
+
+
+def _validate_llm_profile(profile: dict[str, Any]) -> None:
+    if profile.get("provider") not in {"hermes_agent", "openai_compatible"}:
+        raise HTTPException(status_code=422, detail=f"unsupported llm provider: {profile.get('provider')}")
+    if not str(profile.get("name") or "").strip():
+        raise HTTPException(status_code=422, detail="profile name is required")
+    if not str(profile.get("base_url") or "").strip():
+        raise HTTPException(status_code=422, detail="base_url is required")
+    if not str(profile.get("model") or "").strip():
+        raise HTTPException(status_code=422, detail="model is required")
+    try:
+        if int(profile.get("max_tokens", 0)) <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="max_tokens must be a positive integer")
+    for key in ("timeout_seconds", "max_wait_seconds"):
+        try:
+            if float(profile.get(key, 0)) <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail=f"{key} must be a positive number")
 
 
 def _voice_ref_key(mode: str) -> str:
@@ -1094,21 +1369,41 @@ def _normalize_tags(tags: Any) -> list[str]:
 
 def _preview_voice(payload: PreviewRequest, settings: Settings, store: ConfigStore) -> TtsVoice:
     mode = (payload.voice_mode or settings.qwentts_cpp_voice_mode).strip().lower()
+    base_voice = TtsVoice.from_settings(settings)
     if mode == "preset":
-        return TtsVoice(speaker=payload.speaker or settings.qwentts_cpp_voice_preset)
+        return replace(
+            base_voice,
+            speaker=payload.speaker or settings.qwentts_cpp_voice_preset,
+            instruct="",
+            ref_wav="",
+            ref_text="",
+            ref_spk="",
+            ref_rvq="",
+        )
     if mode == "design":
-        return TtsVoice(instruct=payload.design_prompt or settings.qwentts_cpp_voice_design)
+        return replace(
+            base_voice,
+            speaker="",
+            instruct=payload.design_prompt or settings.qwentts_cpp_voice_design,
+            ref_wav="",
+            ref_text="",
+            ref_spk="",
+            ref_rvq="",
+        )
     if mode == "clone":
         voice_id = payload.clone_voice_id or settings.qwentts_cpp_clone_voice_id
         voice = store.voice_profile(voice_id)
         if voice:
-            return TtsVoice(
+            return replace(
+                base_voice,
+                speaker="",
+                instruct="",
                 ref_wav=voice.get("ref_wav", ""),
                 ref_text=voice.get("ref_text", ""),
                 ref_spk=voice.get("ref_spk", ""),
                 ref_rvq=voice.get("ref_rvq", ""),
             )
-    return TtsVoice.from_settings(settings)
+    return base_voice
 
 
 def _pcm_to_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
