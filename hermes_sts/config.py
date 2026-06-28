@@ -71,7 +71,7 @@ class Settings:
     hermes_agent_max_wait_seconds: float = _float_env("HERMES_AGENT_MAX_WAIT_SECONDS", 60.0)
     hermes_first_filler_delay_seconds: float = _float_env("HERMES_FIRST_FILLER_DELAY_SECONDS", 3.0)
     hermes_filler_interval_seconds: float = _float_env("HERMES_FILLER_INTERVAL_SECONDS", 12.0)
-    hermes_max_fillers: int = _int_env("HERMES_MAX_FILLERS", 1)
+    hermes_max_fillers: int = _int_env("HERMES_MAX_FILLERS", 0)
     hermes_allow_fallback: bool = _bool_env("HERMES_ALLOW_FALLBACK", True)
     hermes_fallback_text: str = os.getenv(
         "HERMES_FALLBACK_TEXT",
@@ -87,7 +87,9 @@ class Settings:
     sts_conversations_reload_max_messages: int = int(os.environ.get("STS_CONVERSATIONS_RELOAD_MAX_MESSAGES", "0"))
     hermes_voice_no_think: bool = _bool_env("HERMES_VOICE_NO_THINK", True)
     llm_provider: str = os.getenv("STS_LLM_PROVIDER", "hermes_agent")
+    active_llm_profile_id: str = os.getenv("STS_ACTIVE_LLM_PROFILE_ID", "")
     llm_max_concurrent_requests: int = _int_env("STS_LLM_MAX_CONCURRENT_REQUESTS", 1)
+    llm_streaming_enabled: bool = _bool_env("STS_LLM_STREAMING_ENABLED", True)
     llm_base_url: str = os.getenv("LLM_BASE_URL", os.getenv("HERMES_BASE_URL", "http://127.0.0.1:8642/v1"))
     llm_model: str = os.getenv("LLM_MODEL", os.getenv("HERMES_MODEL", "hermes-agent"))
     llm_api_key: str = os.getenv("LLM_API_KEY", os.getenv("HERMES_API_KEY", ""))
@@ -167,8 +169,12 @@ class Settings:
     qwentts_cpp_ref_spk: str = _path_env("QWENTTS_CPP_REF_SPK")
     qwentts_cpp_ref_rvq: str = _path_env("QWENTTS_CPP_REF_RVQ")
     qwentts_cpp_format: str = os.getenv("QWENTTS_CPP_FORMAT", "wav16")
-    qwentts_cpp_extra_args: str = os.getenv("QWENTTS_CPP_EXTRA_ARGS", "")
+    qwentts_cpp_extra_args: str = os.getenv(
+        "QWENTTS_CPP_EXTRA_ARGS",
+        "--codec-chunk-dur 0.5 --codec-left-dur 0.1",
+    )
     qwentts_cpp_seed: int = _int_env("QWENTTS_CPP_SEED", 42)
+    qwentts_cpp_max_new_frames: int = _int_env("QWENTTS_CPP_MAX_NEW_FRAMES", 512)
     qwentts_cpp_timeout_seconds: float = _float_env("QWENTTS_CPP_TIMEOUT_SECONDS", 120.0)
 
     vad_provider: str = os.getenv("STS_VAD_PROVIDER", "energy")
@@ -184,9 +190,12 @@ class Settings:
     max_audio_chunk_bytes: int = _int_env("HERMES_STS_MAX_AUDIO_CHUNK_BYTES", 32000)
     suppress_input_while_speaking: bool = _bool_env("STS_SUPPRESS_INPUT_WHILE_SPEAKING", True)
     response_audio_chunk_ms: int = _int_env("STS_RESPONSE_AUDIO_CHUNK_MS", 80)
-    tts_segment_min_chars: int = _int_env("STS_TTS_SEGMENT_MIN_CHARS", 24)
-    tts_segment_max_chars: int = _int_env("STS_TTS_SEGMENT_MAX_CHARS", 90)
+    response_audio_chunk_send_delay_ms: int = _int_env("STS_RESPONSE_AUDIO_CHUNK_SEND_DELAY_MS", 0)
+    tts_segment_min_chars: int = _int_env("STS_TTS_SEGMENT_MIN_CHARS", 8)
+    tts_segment_max_chars: int = _int_env("STS_TTS_SEGMENT_MAX_CHARS", 48)
     tts_strip_bracketed_cues: bool = _bool_env("STS_TTS_STRIP_BRACKETED_CUES", True)
+    tts_strip_emoji: bool = _bool_env("STS_TTS_STRIP_EMOJI", True)
+    tts_max_audio_seconds: float = _float_env("STS_TTS_MAX_AUDIO_SECONDS", 18.0)
     latency_logging: bool = _bool_env("STS_LATENCY_LOGGING", True)
     dashboard_wave_style: str = os.getenv("DASHBOARD_WAVE_STYLE", "scanner")
 
@@ -209,11 +218,15 @@ class Settings:
     openviking_commit_timeout_seconds: float = _float_env("OPENVIKING_COMMIT_TIMEOUT_SECONDS", 30.0)
     sqlite_memory_path: str = _path_env("STS_SQLITE_MEMORY_PATH", "data/memory.sqlite3")
     web_search_enabled: bool = _bool_env("STS_WEB_SEARCH_ENABLED", False)
+    web_search_providers: str = os.getenv("STS_WEB_SEARCH_PROVIDERS", "tavily,duckduckgo,searxng")
     tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     tavily_search_depth: str = os.getenv("TAVILY_SEARCH_DEPTH", "ultra-fast")
     tavily_max_results: int = _int_env("TAVILY_MAX_RESULTS", 3)
     tavily_timeout_seconds: float = _float_env("TAVILY_TIMEOUT_SECONDS", 2.0)
     tavily_base_url: str = os.getenv("TAVILY_BASE_URL", "https://api.tavily.com")
+    duckduckgo_timeout_seconds: float = _float_env("DUCKDUCKGO_TIMEOUT_SECONDS", 2.5)
+    searxng_base_url: str = os.getenv("SEARXNG_BASE_URL", "")
+    searxng_timeout_seconds: float = _float_env("SEARXNG_TIMEOUT_SECONDS", 3.0)
 
     models_dir: Path = Path(_path_env("MODELS_DIR", str(ROOT / "models")))
     log_dir: Path = Path(_path_env("LOG_DIR", str(ROOT / "logs")))

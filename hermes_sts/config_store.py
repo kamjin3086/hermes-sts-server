@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import time
+import contextlib
 from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parents[1]
 
 logger = logging.getLogger(__name__)
+
+FAST_QWENTTS_EXTRA_ARGS = "--codec-chunk-dur 0.5 --codec-left-dur 0.1"
 
 ENV_TO_ATTR: dict[str, str] = {
     "HERMES_STS_HOST": "host",
@@ -42,7 +45,9 @@ ENV_TO_ATTR: dict[str, str] = {
     "HERMES_HISTORY_IDLE_RESET_SECONDS": "hermes_history_idle_reset_seconds",
     "HERMES_VOICE_NO_THINK": "hermes_voice_no_think",
     "STS_LLM_PROVIDER": "llm_provider",
+    "STS_ACTIVE_LLM_PROFILE_ID": "active_llm_profile_id",
     "STS_LLM_MAX_CONCURRENT_REQUESTS": "llm_max_concurrent_requests",
+    "STS_LLM_STREAMING_ENABLED": "llm_streaming_enabled",
     "LLM_BASE_URL": "llm_base_url",
     "LLM_MODEL": "llm_model",
     "LLM_API_KEY": "llm_api_key",
@@ -104,6 +109,7 @@ ENV_TO_ATTR: dict[str, str] = {
     "QWENTTS_CPP_FORMAT": "qwentts_cpp_format",
     "QWENTTS_CPP_EXTRA_ARGS": "qwentts_cpp_extra_args",
     "QWENTTS_CPP_SEED": "qwentts_cpp_seed",
+    "QWENTTS_CPP_MAX_NEW_FRAMES": "qwentts_cpp_max_new_frames",
     "QWENTTS_CPP_TIMEOUT_SECONDS": "qwentts_cpp_timeout_seconds",
     "STS_VAD_PROVIDER": "vad_provider",
     "VAD_ENERGY_THRESHOLD": "vad_energy_threshold",
@@ -117,9 +123,12 @@ ENV_TO_ATTR: dict[str, str] = {
     "VAD_THRESHOLD": "vad_threshold",
     "STS_SUPPRESS_INPUT_WHILE_SPEAKING": "suppress_input_while_speaking",
     "STS_RESPONSE_AUDIO_CHUNK_MS": "response_audio_chunk_ms",
+    "STS_RESPONSE_AUDIO_CHUNK_SEND_DELAY_MS": "response_audio_chunk_send_delay_ms",
     "STS_TTS_SEGMENT_MIN_CHARS": "tts_segment_min_chars",
     "STS_TTS_SEGMENT_MAX_CHARS": "tts_segment_max_chars",
     "STS_TTS_STRIP_BRACKETED_CUES": "tts_strip_bracketed_cues",
+    "STS_TTS_STRIP_EMOJI": "tts_strip_emoji",
+    "STS_TTS_MAX_AUDIO_SECONDS": "tts_max_audio_seconds",
     "STS_LATENCY_LOGGING": "latency_logging",
     "MODELS_DIR": "models_dir",
     "LOG_DIR": "log_dir",
@@ -143,11 +152,15 @@ ENV_TO_ATTR: dict[str, str] = {
     "OPENVIKING_COMMIT_TIMEOUT_SECONDS": "openviking_commit_timeout_seconds",
     "STS_SQLITE_MEMORY_PATH": "sqlite_memory_path",
     "STS_WEB_SEARCH_ENABLED": "web_search_enabled",
+    "STS_WEB_SEARCH_PROVIDERS": "web_search_providers",
     "TAVILY_API_KEY": "tavily_api_key",
     "TAVILY_SEARCH_DEPTH": "tavily_search_depth",
     "TAVILY_MAX_RESULTS": "tavily_max_results",
     "TAVILY_TIMEOUT_SECONDS": "tavily_timeout_seconds",
     "TAVILY_BASE_URL": "tavily_base_url",
+    "DUCKDUCKGO_TIMEOUT_SECONDS": "duckduckgo_timeout_seconds",
+    "SEARXNG_BASE_URL": "searxng_base_url",
+    "SEARXNG_TIMEOUT_SECONDS": "searxng_timeout_seconds",
     "HERMES_STS_CONFIG_DB": "config_db",
 }
 
@@ -271,6 +284,23 @@ class ConfigStore:
                     ref_rvq text not null default '',
                     updated_at real not null
                 );
+                create table if not exists llm_profiles (
+                    id text primary key,
+                    name text not null,
+                    provider text not null,
+                    base_url text not null,
+                    model text not null,
+                    api_key text not null default '',
+                    max_tokens integer not null,
+                    timeout_seconds real not null,
+                    voice_no_think integer not null default 1,
+                    wait_fillers_enabled integer not null default 0,
+                    max_wait_seconds real not null,
+                    fallback_enabled integer not null default 1,
+                    web_search_enabled integer not null default 0,
+                    notes text not null default '',
+                    updated_at real not null
+                );
                 create table if not exists setup_state (
                     key text primary key,
                     value_json text not null
@@ -348,18 +378,46 @@ class ConfigStore:
             for key, value in {
                 "tts_provider": "qwen3tts",
                 "tts_voice_source": "settings",
+                "llm_streaming_enabled": True,
                 "qwentts_cpp_seed": 42,
+                "qwentts_cpp_max_new_frames": 512,
+                "qwentts_cpp_extra_args": FAST_QWENTTS_EXTRA_ARGS,
                 "dashboard_wave_style": "scanner",
+                "hermes_max_fillers": 0,
             }.items():
                 conn.execute(
                     "insert or ignore into settings values (?, ?, ?)",
                     (key, json.dumps(value, ensure_ascii=False), now),
                 )
+            row = conn.execute("select value_json from settings where key='qwentts_cpp_extra_args'").fetchone()
+            if row is not None:
+                with contextlib.suppress(Exception):
+                    if json.loads(row["value_json"]) == "":
+                        conn.execute(
+                            "insert or replace into settings values (?, ?, ?)",
+                            ("qwentts_cpp_extra_args", json.dumps(FAST_QWENTTS_EXTRA_ARGS), now),
+                        )
+            legacy_speed_defaults = {
+                "tts_segment_min_chars": (24, 8),
+                "tts_segment_max_chars": (90, 48),
+            }
+            for key, (old_value, new_value) in legacy_speed_defaults.items():
+                row = conn.execute("select value_json from settings where key=?", (key,)).fetchone()
+                if row is None:
+                    continue
+                with contextlib.suppress(Exception):
+                    current_value = json.loads(row["value_json"])
+                    if current_value == old_value:
+                        conn.execute(
+                            "insert or replace into settings values (?, ?, ?)",
+                            (key, json.dumps(new_value, ensure_ascii=False), now),
+                        )
             for key, value in {
                 "memory_enabled": False,
                 "memory_provider": "sqlite",
                 "memory_remember_in_hermes": True,
                 "web_search_enabled": False,
+                "web_search_providers": "tavily,duckduckgo,searxng",
                 "memory_injection_budget": 500,
                 "memory_recall_limit": 5,
                 "memory_recall_min_score": 0.0,
@@ -368,6 +426,37 @@ class ConfigStore:
                     "insert or ignore into settings values (?, ?, ?)",
                     (key, json.dumps(value, ensure_ascii=False), now),
                 )
+            profile_id = "hermes_default"
+            conn.execute(
+                """
+                insert or ignore into llm_profiles
+                (id, name, provider, base_url, model, api_key, max_tokens, timeout_seconds,
+                 voice_no_think, wait_fillers_enabled, max_wait_seconds, fallback_enabled,
+                 web_search_enabled, notes, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    "Hermes Agent",
+                    "hermes_agent",
+                    os.getenv("HERMES_BASE_URL", "http://127.0.0.1:8642/v1"),
+                    os.getenv("HERMES_MODEL", "hermes-agent"),
+                    os.getenv("HERMES_API_KEY", ""),
+                    int(os.getenv("HERMES_MAX_TOKENS", "220")),
+                    float(os.getenv("HERMES_TIMEOUT_SECONDS", "45.0")),
+                    1,
+                    0,
+                    float(os.getenv("HERMES_AGENT_MAX_WAIT_SECONDS", "60.0")),
+                    1,
+                    0,
+                    "默认 Hermes Agent 连接",
+                    now,
+                ),
+            )
+            conn.execute(
+                "insert or ignore into settings values (?, ?, ?)",
+                ("active_llm_profile_id", json.dumps(profile_id, ensure_ascii=False), now),
+            )
             kokoro_dir = ROOT / "models" / "kokoro-multi-lang-v1_0"
             for key, value in {
                 "sherpa_kokoro_model": str(kokoro_dir / "model.onnx"),
@@ -417,6 +506,12 @@ class ConfigStore:
             if key not in field_map:
                 continue
             kwargs[key] = _coerce_attr(field_map[key].type, value)
+        active_profile_id = str(kwargs.get("active_llm_profile_id", base.active_llm_profile_id) or "")
+        active_profile = self.llm_profile(active_profile_id)
+        if active_profile is not None:
+            for key, value in self.settings_for_llm_profile(active_profile).items():
+                if key in field_map:
+                    kwargs[key] = _coerce_attr(field_map[key].type, value)
         for attr in ("models_dir", "log_dir", "data_dir", "config_db"):
             if attr in kwargs:
                 kwargs[attr] = Path(_resolve_path(str(kwargs[attr])))
@@ -654,6 +749,106 @@ class ConfigStore:
             cursor = conn.execute("delete from voice_profiles where id=?", (voice_id,))
             return cursor.rowcount > 0
 
+    def llm_profiles(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("select * from llm_profiles order by updated_at desc").fetchall()
+        return [_llm_profile_row(dict(row)) for row in rows]
+
+    def llm_profile(self, profile_id: str) -> dict[str, Any] | None:
+        if not profile_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute("select * from llm_profiles where id=?", (profile_id,)).fetchone()
+        return _llm_profile_row(dict(row)) if row else None
+
+    def upsert_llm_profile(self, profile: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert or replace into llm_profiles
+                (id, name, provider, base_url, model, api_key, max_tokens, timeout_seconds,
+                 voice_no_think, wait_fillers_enabled, max_wait_seconds, fallback_enabled,
+                 web_search_enabled, notes, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile["id"],
+                    profile["name"],
+                    profile["provider"],
+                    profile["base_url"],
+                    profile["model"],
+                    profile.get("api_key", ""),
+                    int(profile.get("max_tokens", 220)),
+                    float(profile.get("timeout_seconds", 45.0)),
+                    1 if profile.get("voice_no_think", True) else 0,
+                    1 if profile.get("wait_fillers_enabled", False) else 0,
+                    float(profile.get("max_wait_seconds", 60.0)),
+                    1 if profile.get("fallback_enabled", True) else 0,
+                    1 if profile.get("web_search_enabled", False) else 0,
+                    str(profile.get("notes", ""))[:500],
+                    time.time(),
+                ),
+            )
+
+    def delete_llm_profile(self, profile_id: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute("delete from llm_profiles where id=?", (profile_id,))
+            return cursor.rowcount > 0
+
+    def settings_for_llm_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        provider = str(profile.get("provider") or "hermes_agent")
+        base_url = str(profile.get("base_url") or "")
+        model = str(profile.get("model") or "")
+        api_key = str(profile.get("api_key") or "")
+        max_tokens = int(profile.get("max_tokens") or 220)
+        timeout = float(profile.get("timeout_seconds") or 45.0)
+        max_wait = float(profile.get("max_wait_seconds") or 60.0)
+        wait_fillers = bool(profile.get("wait_fillers_enabled"))
+        fallback = bool(profile.get("fallback_enabled", True))
+        web_search = bool(profile.get("web_search_enabled"))
+        values = {
+            "active_llm_profile_id": profile["id"],
+            "llm_provider": provider,
+            "hermes_voice_no_think": bool(profile.get("voice_no_think", True)),
+            "hermes_max_fillers": 1 if wait_fillers else 0,
+            "hermes_agent_max_wait_seconds": max_wait,
+            "hermes_allow_fallback": fallback,
+            "llm_fallback_enabled": fallback,
+            "web_search_enabled": web_search,
+        }
+        if provider == "hermes_agent":
+            values.update(
+                {
+                    "hermes_base_url": base_url,
+                    "hermes_model": model,
+                    "hermes_api_key": api_key,
+                    "hermes_max_tokens": max_tokens,
+                    "hermes_timeout_seconds": timeout,
+                    "hermes_read_timeout_seconds": timeout,
+                    "llm_base_url": base_url,
+                    "llm_model": model,
+                    "llm_api_key": api_key,
+                    "llm_max_tokens": max_tokens,
+                    "llm_timeout_seconds": timeout,
+                }
+            )
+        else:
+            values.update(
+                {
+                    "llm_base_url": base_url,
+                    "llm_model": model,
+                    "llm_api_key": api_key,
+                    "llm_max_tokens": max_tokens,
+                    "llm_timeout_seconds": timeout,
+                    "hermes_base_url": base_url,
+                    "hermes_model": model,
+                    "hermes_api_key": api_key,
+                    "hermes_max_tokens": max_tokens,
+                    "hermes_timeout_seconds": timeout,
+                }
+            )
+        return values
+
     def add_metric(self, kind: str, value: dict[str, Any]) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -711,3 +906,9 @@ def _clone_has_audio_refs(profile: dict[str, Any]) -> bool:
         _path_exists(profile.get(key))
         for key in ("ref_wav", "ref_spk", "ref_rvq")
     )
+
+
+def _llm_profile_row(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("voice_no_think", "wait_fillers_enabled", "fallback_enabled", "web_search_enabled"):
+        row[key] = bool(row.get(key))
+    return row
