@@ -13,10 +13,21 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from hermes_sts.admin import _settings_for_voice_profile, _settings_payload, _validate_settings_patch
+from hermes_sts.admin import (
+    PreviewRequest,
+    _conversation_payload,
+    _diagnostics_payload,
+    _preview_voice,
+    _requires_rebuild,
+    _settings_for_voice_profile,
+    _settings_payload,
+    _validate_settings_patch,
+    _web_search_payload,
+)
 from hermes_sts.config import Settings
 from hermes_sts.config_store import ConfigStore
-from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, ToolCall
+from hermes_sts.conversation_store import ConversationStore
+from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, LLMToolCallDetected, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
 from hermes_sts.tts import QwenTtsCpp, TtsVoice, build_tts
 from hermes_sts.tools import ToolRegistry
@@ -108,6 +119,13 @@ class CoreTests(unittest.TestCase):
         self.assertIn("当前人格和表达风格", prompt)
         self.assertIn("端庄新闻播报员", prompt)
 
+    def test_llm_system_prompt_keeps_voice_description_out_of_spoken_text(self) -> None:
+        prompt = BaseOpenAIChatProvider._system_prompt("保持温柔。")
+
+        self.assertIn("不要输出 emoji", prompt)
+        self.assertIn("不要写音色", prompt)
+        self.assertIn("音色描述由 TTS 声音配置单独控制", prompt)
+
     def test_hermes_voice_no_think_prefixes_last_user_message(self) -> None:
         provider = HermesAgentProvider(Settings(hermes_voice_no_think=True))
         messages = [
@@ -175,6 +193,31 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result.forwarded)
         self.assertEqual(result.mode, "client")
         self.assertEqual(result.arguments, {"dance": "happy"})
+
+    def test_tool_registry_snapshot_groups_local_and_client_tools(self) -> None:
+        registry = ToolRegistry()
+        registry.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "dance",
+                    "description": "Queue a dance.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"dance": {"type": "string"}},
+                        "required": ["dance"],
+                    },
+                }
+            ]
+        )
+
+        snapshot = registry.snapshot()
+
+        self.assertIn("current_time", [tool["name"] for tool in snapshot["local"]])
+        self.assertEqual(snapshot["client"][0]["name"], "dance")
+        self.assertEqual(snapshot["client"][0]["parameters_count"], 1)
+        self.assertIs(snapshot["client"][0]["injected"], True)
+        self.assertIsNone(snapshot["client"][0]["last_called_at"])
 
     def test_realtime_session_extracts_text_item(self) -> None:
         item = {
@@ -317,6 +360,199 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(session.pending_tool_results, [])
         self.assertIsNone(session.pending_tool_context)
 
+    def test_mixed_local_and_client_tool_calls_keep_local_result_for_followup(self) -> None:
+        class FakeLlm:
+            async def chat(self, *args, **kwargs):
+                return LLMResponse(
+                    tool_calls=[
+                        ToolCall(id="call_local", name="current_time", arguments="{}"),
+                        ToolCall(id="call_client", name="dance", arguments='{"dance":"happy"}'),
+                    ]
+                )
+
+            async def ensure_active_conversation(self) -> str:
+                return ""
+
+        session = bare_session()
+        session.llm = FakeLlm()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "dance",
+                    "description": "Queue a Reachy Mini dance.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                }
+            ]
+        )
+        events = []
+
+        async def fake_send(self, event):
+            events.append(event)
+
+        session._send = types.MethodType(fake_send, session)
+        answer = asyncio.run(session._ask_llm_with_tools("报时并跳舞", response_id="resp_1", item_id="item_1"))
+
+        self.assertEqual(answer, "")
+        self.assertEqual(events[0]["name"], "dance")
+        self.assertIsNotNone(session.pending_tool_context)
+        tool_messages = [msg for msg in session.pending_tool_context or [] if msg.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0]["tool_call_id"], "call_local")
+
+    def test_agent_wait_does_not_synthesize_filler_when_disabled(self) -> None:
+        class SlowLlm:
+            async def chat(self, *args, **kwargs):
+                await asyncio.sleep(0.02)
+                return LLMResponse(text="最终回答")
+
+            async def ensure_active_conversation(self) -> str:
+                return ""
+
+        async def run() -> tuple[list[str], list[str]]:
+            session = bare_session()
+            session.settings = Settings(
+                hermes_max_fillers=0,
+                hermes_first_filler_delay_seconds=0.001,
+                hermes_filler_interval_seconds=0.001,
+                hermes_agent_max_wait_seconds=1.0,
+            )
+            session.llm = SlowLlm()
+            synthesized: list[str] = []
+            sent_segments: list[str] = []
+
+            async def fake_synthesize(self, text, *, metrics=None, voice=None):
+                synthesized.append(text)
+                return b"\x00\x00"
+
+            async def fake_send_audio_segment(self, text, *, response_id, item_id, metrics=None, voice=None):
+                sent_segments.append(text)
+
+            async def fake_send_pcm_segment(self, pcm16, *, response_id, item_id, metrics=None):
+                sent_segments.append("pcm")
+
+            async def fake_send(self, event):
+                pass
+
+            session._synthesize_tts = types.MethodType(fake_synthesize, session)
+            session._send_audio_segment = types.MethodType(fake_send_audio_segment, session)
+            session._send_pcm_segment = types.MethodType(fake_send_pcm_segment, session)
+            session._send = types.MethodType(fake_send, session)
+
+            await session._respond_with_agent_wait("你好")
+            return synthesized, sent_segments
+
+        synthesized, sent_segments = asyncio.run(run())
+
+        self.assertEqual(synthesized, ["最终回答"])
+        self.assertFalse(any(text.startswith("我想") or "稍等" in text for text in synthesized))
+        self.assertEqual(sent_segments, ["pcm"])
+
+    def test_send_audio_segment_uses_streaming_tts_when_available(self) -> None:
+        class StreamingTts:
+            supports_streaming = True
+
+            def __init__(self):
+                self.synthesize_calls = 0
+                self.stream_voices: list[str] = []
+
+            async def synthesize(self, text, *, voice=None):
+                self.synthesize_calls += 1
+                return b"\x00\x00"
+
+            async def stream_pcm(self, text, *, voice=None):
+                self.stream_voices.append(voice.speaker)
+                yield b"\x01\x00" * 10
+                yield b"\x02\x00" * 10
+
+        async def run() -> tuple[int, list[str], list[int]]:
+            session = bare_session()
+            session.settings = Settings(qwentts_cpp_speaker="ui_voice")
+            tts = StreamingTts()
+            session.tts = tts
+            session.active_response_id = "resp"
+            sent: list[int] = []
+
+            async def fake_send_pcm_segment(self, pcm16, *, response_id, item_id, metrics=None):
+                sent.append(len(pcm16))
+
+            session._send_pcm_segment = types.MethodType(fake_send_pcm_segment, session)
+            await session._send_audio_segment("你好", response_id="resp", item_id="item")
+            return tts.synthesize_calls, tts.stream_voices, sent
+
+        synthesize_calls, voices, sent = asyncio.run(run())
+
+        self.assertEqual(synthesize_calls, 0)
+        self.assertEqual(voices, ["ui_voice"])
+        self.assertEqual(sent, [20, 20])
+
+    def test_llm_streaming_sends_complete_sentences_to_tts(self) -> None:
+        class StreamingLlm:
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def stream_text(self, *args, **kwargs):
+                yield "第一句"
+                yield "。第二句。"
+
+        async def run() -> tuple[list[str], list[str]]:
+            session = bare_session()
+            session.settings = Settings(llm_streaming_enabled=True, qwentts_cpp_speaker="ui_voice")
+            session.llm = StreamingLlm()
+            session.active_response_id = None
+            sent_segments: list[str] = []
+            done: list[str] = []
+
+            async def fake_send_tts_segment(self, text, *, response_id, item_id, metrics=None, voice=None):
+                sent_segments.append(text)
+
+            async def fake_send_response_created(self, response_id, item_id, metrics=None):
+                self.active_response_id = response_id
+
+            async def fake_send_response_done(self, *, response_id, item_id, transcript):
+                done.append(transcript)
+
+            session._send_tts_segment = types.MethodType(fake_send_tts_segment, session)
+            session._send_response_created = types.MethodType(fake_send_response_created, session)
+            session._send_response_done = types.MethodType(fake_send_response_done, session)
+
+            handled = await session._respond_with_llm_stream("你好", voice=TtsVoice(speaker="ui_voice"))
+            return sent_segments if handled else [], done
+
+        sent_segments, done = asyncio.run(run())
+
+        self.assertEqual(sent_segments, ["第一句。", "第二句。"])
+        self.assertEqual(done, ["第一句。第二句。"])
+
+    def test_llm_streaming_tool_call_falls_back_before_speech(self) -> None:
+        class ToolStreamingLlm:
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def stream_text(self, *args, **kwargs):
+                raise LLMToolCallDetected("tool")
+                yield ""
+
+        async def run() -> bool:
+            session = bare_session()
+            session.settings = Settings(llm_streaming_enabled=True)
+            session.llm = ToolStreamingLlm()
+            return await session._respond_with_llm_stream("开灯")
+
+        self.assertFalse(asyncio.run(run()))
+
+    def test_tool_system_prompt_keeps_voice_description_out_of_spoken_text(self) -> None:
+        session = object.__new__(RealtimeSession)
+        session.settings = Settings()
+        session.instructions = ""
+        session.next_response_instructions = ""
+
+        prompt = session._tool_system_prompt(instructions="保持温柔。")
+
+        self.assertIn("不要输出 emoji", prompt)
+        self.assertIn("不要写音色", prompt)
+        self.assertIn("音色描述由 TTS 声音配置单独控制", prompt)
+
     def test_tts_text_is_split_on_punctuation(self) -> None:
         session = object.__new__(RealtimeSession)
         session.settings = Settings(tts_segment_min_chars=8, tts_segment_max_chars=14)
@@ -329,6 +565,25 @@ class CoreTests(unittest.TestCase):
         session.settings = Settings(tts_strip_bracketed_cues=True)
         self.assertEqual(session._sanitize_tts_text("你好[呲牙]，我在。"), "你好，我在。")
         self.assertEqual(session._sanitize_tts_text("查询（杭州）的天气。"), "查询（杭州）的天气。")
+        self.assertEqual(session._sanitize_tts_text("答对啦！😊✨"), "答对啦！")
+
+    def test_tts_audio_is_trimmed_when_qwen_runs_long(self) -> None:
+        session = bare_session()
+        session.settings = Settings(tts_max_audio_seconds=18.0)
+        pcm16 = b"\x00\x00" * session.settings.sample_rate * 30
+
+        trimmed = session._limit_tts_audio("短句", pcm16, voice=TtsVoice.from_settings(session.settings))
+
+        self.assertEqual(len(trimmed), session.settings.sample_rate * 8 * 2)
+
+    def test_tts_split_flushes_first_sentence_for_fast_first_audio(self) -> None:
+        session = object.__new__(RealtimeSession)
+        session.settings = Settings(tts_segment_min_chars=8, tts_segment_max_chars=48)
+
+        segments = session._split_tts_segments("哈哈，答错啦！正确答案是水喔。要不要再来一题？")
+
+        self.assertEqual(segments[0], "哈哈，答错啦！")
+        self.assertGreater(len(segments), 1)
 
     def test_build_qwentts_cpp_requires_runtime_paths(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "QWENTTS_CPP_BIN"):
@@ -377,6 +632,7 @@ class CoreTests(unittest.TestCase):
                 qwentts_cpp_customvoice_model=str(model),
                 qwentts_cpp_codec=str(codec),
                 qwentts_cpp_backend="Vulkan0",
+                qwentts_cpp_max_new_frames=384,
             )
             pcm16 = QwenTtsCpp(settings)._synthesize_sync("你好")
 
@@ -384,8 +640,60 @@ class CoreTests(unittest.TestCase):
             self.assertGreater(len(pcm16), 0)
             self.assertEqual(len(pcm16) % 2, 0)
             self.assertLess(len(pcm16), 2400 * 2)
+            self.assertIn("--max-new", QwenTtsCpp(settings)._command(tmp_path / "out.wav"))
+            self.assertIn("384", QwenTtsCpp(settings)._command(tmp_path / "out.wav"))
 
-    def test_effective_tts_voice_respects_source_and_override(self) -> None:
+    def test_qwentts_cpp_streams_stdout_wav_as_resampled_pcm16(self) -> None:
+        async def collect(provider: QwenTtsCpp) -> bytes:
+            chunks: list[bytes] = []
+            async for chunk in provider.stream_pcm("你好", voice=TtsVoice.from_settings(provider.settings)):
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_bin = tmp_path / "fake-qwen-tts"
+            fake_bin.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import struct, sys, wave",
+                        "sys.stdin.buffer.read()",
+                        "out = sys.argv[sys.argv.index('-o') + 1]",
+                        "raw = (b'\\x01\\x00') * 4800",
+                        "if out == '-':",
+                        "    w = sys.stdout.buffer",
+                        "    w.write(b'RIFF' + struct.pack('<I', 0x7fffffff) + b'WAVE')",
+                        "    w.write(b'fmt ' + struct.pack('<IHHIIHH', 16, 1, 1, 24000, 48000, 2, 16))",
+                        "    w.write(b'data' + struct.pack('<I', 0x7fffffff))",
+                        "    w.write(raw)",
+                        "    w.flush()",
+                        "else:",
+                        "    with wave.open(out, 'wb') as wf:",
+                        "        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(24000); wf.writeframes(raw)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IXUSR)
+            model = tmp_path / "talker.gguf"
+            codec = tmp_path / "codec.gguf"
+            model.touch()
+            codec.touch()
+            settings = Settings(
+                sample_rate=16000,
+                qwentts_cpp_bin=str(fake_bin),
+                qwentts_cpp_model=str(model),
+                qwentts_cpp_codec=str(codec),
+            )
+
+            pcm16 = asyncio.run(collect(QwenTtsCpp(settings)))
+
+        self.assertGreater(len(pcm16), 0)
+        self.assertEqual(len(pcm16) % 2, 0)
+        self.assertLess(len(pcm16), 4800 * 2)
+
+    def test_effective_tts_voice_uses_settings_as_single_source(self) -> None:
         session = bare_session()
         session.settings = Settings(
             tts_voice_source="settings",
@@ -402,10 +710,10 @@ class CoreTests(unittest.TestCase):
             tts_voice_source="ws",
             qwentts_cpp_speaker="ui_voice",
         )
-        self.assertEqual(session._effective_tts_voice().speaker, "ws_voice")
+        self.assertEqual(session._effective_tts_voice().speaker, "ui_voice")
         self.assertEqual(
             session._effective_tts_voice(TtsVoice(speaker="response_voice")).speaker,
-            "response_voice",
+            "ui_voice",
         )
 
     def test_realtime_persona_source_switch_selects_settings_or_ws(self) -> None:
@@ -429,15 +737,13 @@ class CoreTests(unittest.TestCase):
         session.instructions = ""
         self.assertIn("可靠", session._effective_instructions())
 
-    def test_synthesize_tts_falls_back_to_settings_voice_when_ws_voice_fails(self) -> None:
+    def test_synthesize_tts_ignores_ws_voice(self) -> None:
         class FakeTts:
             def __init__(self) -> None:
                 self.voices = []
 
             async def synthesize(self, text, *, voice=None):
                 self.voices.append(voice.speaker)
-                if voice.speaker == "bad_ws":
-                    raise RuntimeError("unknown speaker")
                 return b"\x00\x00"
 
         session = bare_session()
@@ -449,9 +755,9 @@ class CoreTests(unittest.TestCase):
 
         pcm16 = asyncio.run(session._synthesize_tts("你好", voice=TtsVoice(speaker="bad_ws")))
         self.assertEqual(pcm16, b"\x00\x00")
-        self.assertEqual(session.tts.voices, ["bad_ws", "ui_voice"])
+        self.assertEqual(session.tts.voices, ["ui_voice"])
 
-    def test_realtime_turn_voice_is_reused_for_waiting_and_answer_audio(self) -> None:
+    def test_realtime_turn_voice_stays_on_settings_voice(self) -> None:
         class FakeTts:
             def __init__(self) -> None:
                 self.voices = []
@@ -471,7 +777,7 @@ class CoreTests(unittest.TestCase):
         session.session_voice = TtsVoice(speaker="changed_ws_voice")
         asyncio.run(session._synthesize_tts("正式回答", voice=voice))
 
-        self.assertEqual(session.tts.voices, ["response_voice", "response_voice"])
+        self.assertEqual(session.tts.voices, ["ui_voice", "ui_voice"])
 
     def test_qwen3tts_command_accepts_voice_clone_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -552,6 +858,36 @@ class CoreTests(unittest.TestCase):
         seed_index = cmd.index("--seed") + 1
         self.assertEqual(cmd[seed_index], "123")
 
+    def test_qwen3tts_command_reads_hot_settings_without_provider_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_bin = tmp_path / "qwen-tts"
+            model = tmp_path / "talker.gguf"
+            next_model = tmp_path / "next-talker.gguf"
+            codec = tmp_path / "codec.gguf"
+            next_codec = tmp_path / "next-codec.gguf"
+            for path in (fake_bin, model, next_model, codec, next_codec):
+                path.touch()
+            settings = Settings(
+                qwentts_cpp_bin=str(fake_bin),
+                qwentts_cpp_model=str(model),
+                qwentts_cpp_codec=str(codec),
+                qwentts_cpp_seed=123,
+                qwentts_cpp_extra_args="",
+            )
+            provider = QwenTtsCpp(settings)
+            object.__setattr__(settings, "qwentts_cpp_model", str(next_model))
+            object.__setattr__(settings, "qwentts_cpp_codec", str(next_codec))
+            object.__setattr__(settings, "qwentts_cpp_seed", 999)
+
+            cmd = provider._command(tmp_path / "hot.wav")
+
+        self.assertIn(str(next_model), cmd)
+        self.assertNotIn(str(model), cmd)
+        self.assertIn(str(next_codec), cmd)
+        self.assertNotIn(str(codec), cmd)
+        self.assertEqual(cmd[cmd.index("--seed") + 1], "999")
+
     def test_config_store_sqlite_overrides_env_and_maps_qwen_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "settings.sqlite3"
@@ -580,9 +916,85 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(settings.qwentts_cpp_voice_mode, "preset")
         self.assertEqual(settings.qwentts_cpp_speaker, "vivian")
         self.assertEqual(settings.qwentts_cpp_model, str(custom_model))
+        self.assertEqual(settings.hermes_max_fillers, 0)
         self.assertEqual(raw["qwentts_cpp_model"], str(custom_model))
         self.assertEqual(raw["qwentts_cpp_speaker"], "vivian")
         self.assertEqual(raw["qwentts_cpp_instruct"], "")
+
+    def test_config_store_migrates_legacy_tts_segment_defaults_for_speed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+            store.set_settings({"tts_segment_min_chars": 24, "tts_segment_max_chars": 90})
+            store.ensure_defaults()
+
+            settings = store.load_settings()
+
+        self.assertEqual(settings.tts_segment_min_chars, 8)
+        self.assertEqual(settings.tts_segment_max_chars, 48)
+
+    def test_config_store_migrates_empty_qwentts_extra_args_for_streaming_speed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+            store.set_settings({"qwentts_cpp_extra_args": ""})
+            store.ensure_defaults()
+
+            settings = store.load_settings()
+
+        self.assertIn("--codec-chunk-dur 0.5", settings.qwentts_cpp_extra_args)
+        self.assertIn("--codec-left-dur 0.1", settings.qwentts_cpp_extra_args)
+
+    def test_config_store_llm_profiles_apply_to_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "config.sqlite3")
+            profile = {
+                "id": "test_openai",
+                "name": "Test OpenAI",
+                "provider": "openai_compatible",
+                "base_url": "http://llm.example/v1",
+                "model": "test-model",
+                "api_key": "secret",
+                "max_tokens": 123,
+                "timeout_seconds": 12.5,
+                "voice_no_think": False,
+                "wait_fillers_enabled": True,
+                "max_wait_seconds": 22,
+                "fallback_enabled": False,
+                "web_search_enabled": True,
+                "notes": "test",
+            }
+            store.upsert_llm_profile(profile)
+            saved = store.llm_profile("test_openai")
+            assert saved is not None
+
+            store.set_settings(store.settings_for_llm_profile(saved))
+            settings = store.load_settings()
+
+        self.assertEqual(settings.active_llm_profile_id, "test_openai")
+        self.assertEqual(settings.llm_provider, "openai_compatible")
+        self.assertEqual(settings.llm_base_url, "http://llm.example/v1")
+        self.assertEqual(settings.llm_model, "test-model")
+        self.assertEqual(settings.llm_max_tokens, 123)
+        self.assertEqual(settings.hermes_max_fillers, 1)
+        self.assertTrue(settings.web_search_enabled)
+
+    def test_active_llm_profile_overrides_stale_wait_filler_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "config.sqlite3")
+            profile = store.llm_profile("hermes_default")
+            assert profile is not None
+            profile["wait_fillers_enabled"] = False
+            store.upsert_llm_profile(profile)
+            store.set_settings(
+                {
+                    "active_llm_profile_id": "hermes_default",
+                    "hermes_max_fillers": 2,
+                }
+            )
+
+            settings = store.load_settings()
+
+        self.assertEqual(settings.active_llm_profile_id, "hermes_default")
+        self.assertEqual(settings.hermes_max_fillers, 0)
 
     def test_config_store_keeps_qwen_legacy_fields_in_sync_when_switching_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,6 +1034,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(default["qwentts_cpp_model"], str(base_model))
         self.assertEqual(default["qwentts_cpp_speaker"], "")
         self.assertEqual(default["qwentts_cpp_instruct"], "")
+
+    def test_qwen_voice_and_model_settings_are_hot_updated_without_restart(self) -> None:
+        hot_keys = {
+            "qwentts_cpp_voice_mode": "design",
+            "qwentts_cpp_voice_preset": "vivian",
+            "qwentts_cpp_voice_design": "warm clear voice",
+            "qwentts_cpp_clone_voice_id": "voice_1",
+            "qwentts_cpp_base_model": "/tmp/base.gguf",
+            "qwentts_cpp_customvoice_model": "/tmp/custom.gguf",
+            "qwentts_cpp_voicedesign_model": "/tmp/design.gguf",
+            "qwentts_cpp_codec": "/tmp/codec.gguf",
+            "qwentts_cpp_backend": "Vulkan0",
+            "qwentts_cpp_seed": 123,
+            "qwentts_cpp_max_new_frames": 512,
+            "qwentts_cpp_extra_args": "--codec-chunk-dur 0.5",
+        }
+
+        self.assertFalse(_requires_rebuild(hot_keys))
+        self.assertTrue(_requires_rebuild({"tts_provider": "sherpa_kokoro"}))
+        self.assertTrue(_requires_rebuild({"qwentts_cpp_bin": "/tmp/qwen-tts"}))
 
     def test_config_store_falls_back_to_base_when_optional_qwen_voice_model_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -765,6 +1197,35 @@ class CoreTests(unittest.TestCase):
             },
         )
 
+    def test_preview_voice_preserves_qwen_settings_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = ConfigStore(tmp_path / "config.sqlite3")
+            model = tmp_path / "design.gguf"
+            codec = tmp_path / "codec.gguf"
+            model.touch()
+            codec.touch()
+            settings = Settings(
+                qwentts_cpp_model=str(model),
+                qwentts_cpp_codec=str(codec),
+                qwentts_cpp_seed=777,
+                qwentts_cpp_lang="Chinese",
+                qwentts_cpp_format="wav16",
+                qwentts_cpp_extra_args="--temp 0.7",
+            )
+
+            voice = _preview_voice(
+                PreviewRequest(text="你好", voice_mode="design", design_prompt="warm clear voice"),
+                settings,
+                store,
+            )
+
+        self.assertEqual(voice.instruct, "warm clear voice")
+        self.assertEqual(voice.seed, 777)
+        self.assertEqual(voice.model, str(model))
+        self.assertEqual(voice.codec, str(codec))
+        self.assertEqual(voice.extra_args, "--temp 0.7")
+
     def test_config_store_deleted_persona_stays_deleted_after_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(Path(tmp) / "settings.sqlite3")
@@ -816,6 +1277,40 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(metrics[0]["kind"], "turn")
         self.assertEqual(metrics[0]["value"]["turn_id"], "turn_test")
         self.assertEqual(metrics[0]["value"]["first_audio_ms"], 44)
+
+    def test_admin_state_summary_payloads_expose_cockpit_shape(self) -> None:
+        class FakeWebSearch:
+            def description(self) -> str:
+                return "chain:tavily,duckduckgo"
+
+            def state(self) -> dict[str, object]:
+                return {
+                    "provider": "chain:tavily,duckduckgo",
+                    "providers": ["tavily", "duckduckgo"],
+                    "recent_success": "duckduckgo",
+                    "cooldowns": {},
+                    "last_error": "",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conv_store = ConversationStore(str(Path(tmp) / "conversations.sqlite3"))
+            conv_id = conv_store.create_conversation()
+            conv_store.append_message(conv_id, "user", "你好")
+
+            registry = ToolRegistry()
+            settings = Settings(web_search_enabled=True, web_search_providers="tavily,duckduckgo")
+            conversation = _conversation_payload(conv_store)
+            web_search = _web_search_payload(settings, FakeWebSearch())
+            diagnostics = _diagnostics_payload(settings, [], tools=registry, web_search=FakeWebSearch())
+
+        self.assertTrue(conversation["enabled"])
+        self.assertEqual(conversation["active"]["message_count"], 1)
+        self.assertTrue(conversation["reset_available"])
+        self.assertEqual(web_search["configured_providers"], ["tavily", "duckduckgo"])
+        self.assertEqual(web_search["recent_success"], "duckduckgo")
+        self.assertIn("llm", diagnostics)
+        self.assertIn("recent", diagnostics)
+        self.assertIn("系统", diagnostics["tools"]["message"])
 
 
 if __name__ == "__main__":

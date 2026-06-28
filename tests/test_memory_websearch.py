@@ -14,7 +14,7 @@ from hermes_sts.memory import (
     _probe_openviking,
     build_memory,
 )
-from hermes_sts.websearch import NoopWebSearchProvider, TavilySearchProvider
+from hermes_sts.websearch import ChainedWebSearchProvider, NoopWebSearchProvider, SearchHit, TavilySearchProvider
 
 
 def _run(coro):
@@ -210,6 +210,38 @@ class NoopWebSearchProviderTests(unittest.TestCase):
         provider = NoopWebSearchProvider()
         self.assertEqual(_run(provider.search("anything")), [])
         self.assertEqual(provider.description(), "noop")
+
+
+class FakeSearchProvider:
+    def __init__(self, name: str, hits: list[SearchHit] | None = None):
+        self.name = name
+        self.hits = hits or []
+        self.calls = 0
+
+    async def search(self, query: str, *, max_results: int = 3) -> list[SearchHit]:
+        self.calls += 1
+        return self.hits[:max_results]
+
+    def description(self) -> str:
+        return self.name
+
+
+class ChainedWebSearchProviderTests(unittest.TestCase):
+    def test_falls_back_and_prefers_recent_success(self) -> None:
+        empty = FakeSearchProvider("empty")
+        good = FakeSearchProvider("good", [SearchHit(title="ok", url="https://example.test", content="hit")])
+        provider = ChainedWebSearchProvider([empty, good], cooldown_seconds=30.0)
+
+        first = _run(provider.search("anything"))
+        second = _run(provider.search("anything else"))
+        state = provider.state()
+
+        self.assertEqual(first[0].title, "ok")
+        self.assertEqual(second[0].title, "ok")
+        self.assertEqual(empty.calls, 1)
+        self.assertEqual(good.calls, 2)
+        self.assertEqual(state["recent_success"], "good")
+        self.assertEqual(state["providers"], ["empty", "good"])
 
 
 class _FakeResponse:
