@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol, TYPE_CHECKING
+from typing import Any, AsyncIterator, Protocol, TYPE_CHECKING
 
 import httpx
 
@@ -34,6 +35,10 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
+class LLMToolCallDetected(RuntimeError):
+    """Raised when a streaming chat response switches to tool-call mode."""
+
+
 class LLMProvider(Protocol):
     async def chat(
         self,
@@ -48,6 +53,8 @@ class LLMProvider(Protocol):
 
 
 class BaseOpenAIChatProvider:
+    supports_text_streaming = True
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.history: list[Message] = []
@@ -77,6 +84,73 @@ class BaseOpenAIChatProvider:
                 tools=tools,
                 conversation_id=conversation_id,
             )
+
+    async def stream_text(
+        self,
+        transcript: str,
+        *,
+        instructions: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[str]:
+        queued_at = time.monotonic()
+        async with self._request_gate:
+            queue_ms = int((time.monotonic() - queued_at) * 1000)
+            if queue_ms > 250:
+                logger.info("LLM stream waited %sms for local concurrency gate", queue_ms)
+            async for chunk in self._stream_text_once(
+                transcript=transcript,
+                instructions=instructions,
+                tools=tools,
+                conversation_id=conversation_id,
+            ):
+                yield chunk
+
+    async def _stream_text_once(
+        self,
+        *,
+        transcript: str,
+        instructions: str | None,
+        tools: list[dict[str, Any]] | None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[str]:
+        now = time.monotonic()
+        self._reset_history_if_idle(now)
+        self.last_llm_call_started_at = now
+        prompt_messages = self._prepare_messages(self._messages_for_transcript(transcript, instructions))
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": prompt_messages,
+            "stream": True,
+            "max_tokens": self.max_tokens,
+        }
+        if self.conversation_id is not None:
+            body["user"] = self.conversation_id
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        text_parts: list[str] = []
+        try:
+            async for chunk in self._post_chat_completions_stream(body):
+                text_parts.append(chunk)
+                yield chunk
+        except LLMToolCallDetected:
+            raise
+        except Exception:
+            raise
+
+        text = "".join(text_parts).strip()
+        if text:
+            self.history.append({"role": "user", "content": transcript})
+            self.history.append({"role": "assistant", "content": text})
+            if self.conversation_store is not None and self.conversation_id is not None:
+                self.conversation_store.append_message(
+                    self.conversation_id, "user", transcript, set_title_if_first=True
+                )
+                self.conversation_store.append_message(
+                    self.conversation_id, "assistant", text
+                )
 
     async def _chat_once(
         self,
@@ -146,6 +220,36 @@ class BaseOpenAIChatProvider:
             )
             resp.raise_for_status()
             return resp.json()
+
+    async def _post_chat_completions_stream(self, body: dict[str, Any]) -> AsyncIterator[str]:
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                json=body,
+                headers=headers,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        break
+                    data = json.loads(payload)
+                    for choice in data.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        finish_reason = choice.get("finish_reason")
+                        if delta.get("tool_calls") or delta.get("function_call") or finish_reason in {"tool_calls", "function_call"}:
+                            raise LLMToolCallDetected("streaming response requested tool calls")
+                        content = delta.get("content")
+                        if content:
+                            yield str(content)
 
     async def _fallback_or_raise(self, exc: Exception, messages: list[Message]) -> LLMResponse:
         if self.settings.llm_fallback_enabled:
@@ -257,6 +361,8 @@ class BaseOpenAIChatProvider:
             "不要解释内部系统、模型、接口、内存、服务状态或运行限制。"
             "如果需要 Reachy Mini 做动作、看相机、跟踪或调用外部能力，请使用可用工具。"
             "不要把工具名、JSON 参数、动作枚举或表情标签写进要播报的文字里。"
+            "只输出要被朗读的自然语言；不要输出 emoji、颜文字、舞台提示、括号里的情绪动作，"
+            "也不要写音色、嗓音、语速、语调或口音描述。音色描述由 TTS 声音配置单独控制。"
         )
         if instructions:
             return f"{system}\n\n当前人格和表达风格：\n{instructions[:2500]}"

@@ -92,6 +92,12 @@ class ToolRegistry:
         tools.update(self._client_tools)
         return [tool.as_openai_tool() for tool in tools.values()]
 
+    def snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "local": [self._snapshot_tool(tool) for tool in self._local_tools.values()],
+            "client": [self._snapshot_tool(tool) for tool in self._client_tools.values()],
+        }
+
     def client_tool_names(self) -> list[str]:
         return sorted(self._client_tools)
 
@@ -175,6 +181,27 @@ class ToolRegistry:
     @staticmethod
     def _is_valid_tool_name(name: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", name))
+
+    @staticmethod
+    def _snapshot_tool(tool: ToolSpec) -> dict[str, Any]:
+        properties = tool.parameters.get("properties") if isinstance(tool.parameters, dict) else {}
+        required = tool.parameters.get("required") if isinstance(tool.parameters, dict) else []
+        if not isinstance(properties, dict):
+            properties = {}
+        if not isinstance(required, list):
+            required = []
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "mode": tool.mode,
+            "kind": tool.kind,
+            "parameters_count": len(properties),
+            "required": [str(item) for item in required],
+            "parameters": sorted(str(key) for key in properties),
+            "injected": True,
+            "last_called_at": None,
+            "last_result": None,
+        }
 
 
 def register_default_local_tools(
