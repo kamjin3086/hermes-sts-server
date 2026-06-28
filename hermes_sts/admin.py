@@ -738,7 +738,6 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "hermes_filler_interval_seconds",
             "hermes_max_fillers",
             "suppress_input_while_speaking",
-            "post_speak_cooldown_ms",
             "tts_segment_min_chars",
             "tts_segment_max_chars",
         ],

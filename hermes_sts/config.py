@@ -183,7 +183,6 @@ class Settings:
     vad_threshold: float = _float_env("VAD_THRESHOLD", 0.35)
     max_audio_chunk_bytes: int = _int_env("HERMES_STS_MAX_AUDIO_CHUNK_BYTES", 32000)
     suppress_input_while_speaking: bool = _bool_env("STS_SUPPRESS_INPUT_WHILE_SPEAKING", True)
-    post_speak_cooldown_ms: int = _int_env("STS_POST_SPEAK_COOLDOWN_MS", 500)
     response_audio_chunk_ms: int = _int_env("STS_RESPONSE_AUDIO_CHUNK_MS", 80)
     tts_segment_min_chars: int = _int_env("STS_TTS_SEGMENT_MIN_CHARS", 24)
     tts_segment_max_chars: int = _int_env("STS_TTS_SEGMENT_MAX_CHARS", 90)

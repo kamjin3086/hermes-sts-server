@@ -238,6 +238,9 @@ class CoreTests(unittest.TestCase):
                     tool_calls=[ToolCall(id="call_1", name="dance", arguments='{"dance":"happy"}')]
                 )
 
+            async def ensure_active_conversation(self) -> str:
+                return ""
+
         session = bare_session()
         session.llm = FakeLlm()
         session.tools.set_client_tools(
@@ -275,6 +278,9 @@ class CoreTests(unittest.TestCase):
             async def chat(self, *args, **kwargs):
                 self.messages = kwargs["messages"]
                 return LLMResponse(text="好了，已经开始跳舞。")
+
+            async def ensure_active_conversation(self) -> str:
+                return ""
 
         session = bare_session()
         llm = FakeLlm()
@@ -379,7 +385,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(pcm16) % 2, 0)
             self.assertLess(len(pcm16), 2400 * 2)
 
-    def test_realtime_voice_always_uses_configured_settings_voice(self) -> None:
+    def test_effective_tts_voice_respects_source_and_override(self) -> None:
         session = bare_session()
         session.settings = Settings(
             tts_voice_source="settings",
@@ -387,15 +393,19 @@ class CoreTests(unittest.TestCase):
         )
         session.session_voice = TtsVoice(speaker="ws_voice")
         self.assertEqual(session._effective_tts_voice().speaker, "ui_voice")
+        self.assertEqual(
+            session._effective_tts_voice(TtsVoice(speaker="response_voice")).speaker,
+            "ui_voice",
+        )
 
         session.settings = Settings(
             tts_voice_source="ws",
             qwentts_cpp_speaker="ui_voice",
         )
-        self.assertEqual(session._effective_tts_voice().speaker, "ui_voice")
+        self.assertEqual(session._effective_tts_voice().speaker, "ws_voice")
         self.assertEqual(
             session._effective_tts_voice(TtsVoice(speaker="response_voice")).speaker,
-            "ui_voice",
+            "response_voice",
         )
 
     def test_realtime_persona_source_switch_selects_settings_or_ws(self) -> None:
@@ -419,7 +429,7 @@ class CoreTests(unittest.TestCase):
         session.instructions = ""
         self.assertIn("可靠", session._effective_instructions())
 
-    def test_synthesize_tts_keeps_selected_voice_when_ws_voice_fails(self) -> None:
+    def test_synthesize_tts_falls_back_to_settings_voice_when_ws_voice_fails(self) -> None:
         class FakeTts:
             def __init__(self) -> None:
                 self.voices = []
@@ -437,9 +447,9 @@ class CoreTests(unittest.TestCase):
         )
         session.tts = FakeTts()
 
-        with self.assertRaises(RuntimeError):
-            asyncio.run(session._synthesize_tts("你好", voice=TtsVoice(speaker="bad_ws")))
-        self.assertEqual(session.tts.voices, ["bad_ws"])
+        pcm16 = asyncio.run(session._synthesize_tts("你好", voice=TtsVoice(speaker="bad_ws")))
+        self.assertEqual(pcm16, b"\x00\x00")
+        self.assertEqual(session.tts.voices, ["bad_ws", "ui_voice"])
 
     def test_realtime_turn_voice_is_reused_for_waiting_and_answer_audio(self) -> None:
         class FakeTts:
@@ -461,7 +471,7 @@ class CoreTests(unittest.TestCase):
         session.session_voice = TtsVoice(speaker="changed_ws_voice")
         asyncio.run(session._synthesize_tts("正式回答", voice=voice))
 
-        self.assertEqual(session.tts.voices, ["ui_voice", "ui_voice"])
+        self.assertEqual(session.tts.voices, ["response_voice", "response_voice"])
 
     def test_qwen3tts_command_accepts_voice_clone_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
