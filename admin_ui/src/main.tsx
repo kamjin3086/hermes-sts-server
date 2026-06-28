@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { motion } from "framer-motion";
 import {
@@ -16,6 +16,7 @@ import {
   KeyRound,
   LoaderCircle,
   Maximize2,
+  MessageSquare,
   Mic2,
   Minimize2,
   Play,
@@ -72,6 +73,7 @@ const navItems = [
   { id: "setup", label: "首次设置", icon: Wand2 },
   { id: "advanced", label: "高级", icon: SlidersHorizontal },
   { id: "memory", label: "记忆", icon: Brain },
+  { id: "conversation", label: "对话", icon: MessageSquare },
 ] as const;
 
 const modeLabels: Record<string, { title: string; text: string }> = {
@@ -193,6 +195,7 @@ function App() {
           {tab === "setup" && <Setup state={state} patch={patch} reload={load} setBusy={setBusy} setNotice={setNotice} />}
           {tab === "advanced" && <Advanced state={state} patch={patch} busy={busy} reload={load} setNotice={setNotice} />}
           {tab === "memory" && <MemoryPanel state={state} patch={patch} reload={load} setNotice={setNotice} />}
+          {tab === "conversation" && <ConversationCard />}
         </div>
       </main>
     </div>
@@ -1601,6 +1604,7 @@ function headlineFor(tab: string) {
   if (tab === "setup") return "首次设置向导";
   if (tab === "advanced") return "低频但可控的底层设置";
   if (tab === "memory") return "记忆管理与检索";
+  if (tab === "conversation") return "对话记录管理";
   return "语音助手状态大屏";
 }
 
@@ -1609,6 +1613,120 @@ function base64ToBlob(base64: string, mime: string) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
   return new Blob([bytes], { type: mime });
+}
+
+function timeAgo(ts: number): string {
+  const seconds = Math.floor((Date.now() - ts) / 1000);
+  if (seconds < 60) return `${seconds}秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}小时前`;
+  return `${Math.floor(hours / 24)}天前`;
+}
+
+function ConversationCard() {
+  const [active, setActive] = useState<{ id: string; title?: string; message_count?: number; created_at?: number; updated_at?: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [ending, setEnding] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const fetchActive = useCallback(async () => {
+    try {
+      const data = await api<{ id: string; title?: string; message_count?: number; created_at?: number; updated_at?: number }>("/api/conversations/active");
+      setActive(data && data.id ? data : null);
+    } catch {
+      setActive(null);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchActive();
+    const id = window.setInterval(fetchActive, 15000);
+    return () => window.clearInterval(id);
+  }, [fetchActive]);
+
+  const handleEnd = async () => {
+    setEnding(true);
+    try {
+      await api("/api/conversations/end", { method: "POST" });
+      await fetchActive();
+      setMsg("已结束旧对话，开启新对话");
+      window.setTimeout(() => setMsg(""), 2000);
+    } catch {
+      setMsg("操作失败");
+      window.setTimeout(() => setMsg(""), 2000);
+    }
+    setEnding(false);
+  };
+
+  if (loading) return <div className="p-4">加载中...</div>;
+
+  if (!active) {
+    return (
+      <div className="p-4 space-y-3">
+        {msg && <p className="text-sm text-green-600">{msg}</p>}
+        <p className="text-gray-500">尚未开始对话</p>
+        <button disabled className="px-4 py-2 bg-gray-300 text-gray-500 rounded cursor-not-allowed">End & Start New</button>
+        <RecentConversations />
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 space-y-3">
+      {msg && <p className="text-sm text-green-600">{msg}</p>}
+      <div className="bg-white rounded-lg shadow-sm border p-4 space-y-2">
+        <h3 className="font-medium truncate">{active.title || "无标题"}</h3>
+        <div className="text-sm text-gray-500 space-y-1">
+          <p>消息数: {active.message_count ?? 0}</p>
+          <p>开始: {active.created_at ? new Date(active.created_at * 1000).toLocaleString() : "-"}</p>
+          <p>活动: {active.updated_at ? timeAgo(active.updated_at * 1000) : "-"}</p>
+        </div>
+        <button onClick={handleEnd} disabled={ending}
+          className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50">
+          {ending ? "处理中..." : "End & Start New"}
+        </button>
+      </div>
+      <RecentConversations />
+    </div>
+  );
+}
+
+function RecentConversations() {
+  const [open, setOpen] = useState(false);
+  const [list, setList] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!open) return;
+    api<{ conversations: any[] }>("/api/conversations?limit=10")
+      .then((data) => setList(data.conversations || []))
+      .catch(() => setList([]));
+  }, [open]);
+
+  return (
+    <div className="space-y-2">
+      <button onClick={() => setOpen(!open)} className="text-sm text-blue-600 hover:underline">
+        {open ? "收起" : "展开"} 近期对话 ({list.length || "..."})
+      </button>
+      {open && (
+        <div className="space-y-1 text-sm">
+          {list.length === 0 && <p className="text-gray-400">暂无历史对话</p>}
+          {list.map((c: any) => (
+            <div key={c.id} className="p-2 bg-gray-50 rounded border text-gray-700 cursor-default"
+                 title={c.ended_reason ? `结束原因: ${c.ended_reason}` : undefined}>
+              <span className="font-medium">{c.title || "(无标题)"}</span>
+              <span className="text-gray-400 ml-2">
+                {c.message_count}条 | {c.created_at ? new Date(c.created_at * 1000).toLocaleDateString() : ""}
+                {c.ended_at ? " | 结束" : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function MemoryPanel({
