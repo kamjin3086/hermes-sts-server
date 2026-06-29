@@ -31,7 +31,7 @@ from hermes_sts.conversation_store import ConversationStore
 from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, LLMToolCallDetected, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
 from hermes_sts.tts import OmniVoiceEngine, QwenTtsCpp, TtsVoice, _stdin_text, build_tts
-from hermes_sts.tools import ToolRegistry
+from hermes_sts.tools import ToolRegistry, ToolSpec
 from hermes_sts.vad import EnergyVad, build_vad
 
 
@@ -938,6 +938,103 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(sent, ["工具已执行。"])
         self.assertEqual(llm.chat_calls, 2)
         self.assertEqual(llm.tool_result, "noop completed")
+
+    def test_explicit_weather_request_uses_web_search_before_llm(self) -> None:
+        class FakeLlm:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self.last_messages: list[dict[str, object]] = []
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def chat(self, *args, **kwargs):
+                self.calls.append({"args": args, "kwargs": kwargs})
+                messages = kwargs["messages"]
+                self.last_messages = messages
+                return LLMResponse(text="杭州今天多云，出门带伞更稳妥。")
+
+        session = bare_session()
+        llm = FakeLlm()
+        session.llm = llm
+        session.tools.register_local(
+            ToolSpec(
+                name="web_search",
+                description="Search the web.",
+                kind="slow",
+                mode="local",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+                handler=lambda args: f"杭州天气搜索结果：{args['query']}",
+            )
+        )
+
+        answer = asyncio.run(session._ask_llm_with_tools("查一下杭州的天气", response_id="resp_1", item_id="item_1"))
+
+        self.assertEqual(answer, "杭州今天多云，出门带伞更稳妥。")
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.last_messages[-1]["role"], "tool")
+        self.assertIn("杭州天气", llm.last_messages[-1]["content"])
+
+    def test_plain_today_phrase_does_not_force_web_search(self) -> None:
+        class FakeLlm:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def chat(self, *args, **kwargs):
+                self.calls.append({"args": args, "kwargs": kwargs})
+                return LLMResponse(text="听起来今天有点累，我在。")
+
+        session = bare_session()
+        llm = FakeLlm()
+        session.llm = llm
+        session.tools.register_local(
+            ToolSpec(
+                name="web_search",
+                description="Search the web.",
+                kind="slow",
+                mode="local",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+                handler=lambda _args: "should not run",
+            )
+        )
+
+        answer = asyncio.run(session._ask_llm_with_tools("今天心情不太好", response_id="resp_1", item_id="item_1"))
+
+        self.assertEqual(answer, "听起来今天有点累，我在。")
+        self.assertEqual(llm.calls[0]["args"], ("今天心情不太好",))
+
+    def test_local_tool_loop_can_run_multiple_steps(self) -> None:
+        class FakeLlm:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.messages_by_call: list[list[dict[str, object]]] = []
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def chat(self, *args, **kwargs):
+                self.calls += 1
+                if "messages" in kwargs:
+                    self.messages_by_call.append(list(kwargs["messages"]))
+                if self.calls == 1:
+                    return LLMResponse(tool_calls=[ToolCall(id="call_1", name="noop", arguments="{}")])
+                if self.calls == 2:
+                    return LLMResponse(tool_calls=[ToolCall(id="call_2", name="current_time", arguments="{}")])
+                return LLMResponse(text="已经查完。")
+
+        session = bare_session()
+        llm = FakeLlm()
+        session.llm = llm
+
+        answer = asyncio.run(session._ask_llm_with_tools("先测试再报时", response_id="resp_1", item_id="item_1"))
+
+        self.assertEqual(answer, "已经查完。")
+        self.assertEqual(llm.calls, 3)
+        self.assertEqual(llm.messages_by_call[0][-1]["content"], "noop completed")
+        self.assertEqual(llm.messages_by_call[1][-1]["name"], "current_time")
 
     def test_tool_system_prompt_keeps_voice_description_out_of_spoken_text(self) -> None:
         session = object.__new__(RealtimeSession)

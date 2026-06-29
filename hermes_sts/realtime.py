@@ -973,72 +973,99 @@ class RealtimeSession:
             instructions = self._effective_instructions()
         instructions = await self._inject_memory(transcript, instructions)
         await self.llm.ensure_active_conversation()
-        started = time.perf_counter()
-        response = await self.llm.chat(
-            transcript,
-            instructions=instructions,
-            tools=self.tools.openai_tools(),
-        )
-        if metrics:
-            metrics.llm_ms = (time.perf_counter() - started) * 1000
-        logger.info(
-            "LLM completed session_id=%s turn_id=%s llm_ms=%.0f tool_calls=%d text_chars=%d",
-            self.session_id,
-            metrics.turn_id if metrics else "-",
-            (time.perf_counter() - started) * 1000,
-            len(response.tool_calls),
-            len(response.text),
-        )
+        tools = self.tools.openai_tools()
+        direct_tool_call = self._direct_local_tool_call(transcript)
+        if direct_tool_call is not None:
+            response = LLMResponse(tool_calls=[direct_tool_call])
+            if metrics:
+                metrics.llm_ms = 0.0
+            logger.info(
+                "Using direct local tool route session_id=%s transcript=%r tool=%s",
+                self.session_id,
+                transcript[:80],
+                direct_tool_call.name,
+            )
+        else:
+            started = time.perf_counter()
+            response = await self.llm.chat(
+                transcript,
+                instructions=instructions,
+                tools=tools,
+            )
+            if metrics:
+                metrics.llm_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                "LLM completed session_id=%s turn_id=%s llm_ms=%.0f tool_calls=%d text_chars=%d",
+                self.session_id,
+                metrics.turn_id if metrics else "-",
+                (time.perf_counter() - started) * 1000,
+                len(response.tool_calls),
+                len(response.text),
+            )
         if not response.tool_calls:
             final_text = response.text
             self._fire_record_turn(transcript, final_text)
             return final_text
 
         messages = self._tool_followup_messages(transcript, response, instructions=instructions)
-        waiting_for_client_tool = False
-        needs_client_followup = False
         created_for_tools = False
-        for tool_call in response.tool_calls:
-            execution = await self.tools.execute(tool_call.name, tool_call.arguments)
-            if execution.forwarded:
-                if not created_for_tools:
-                    await self._send_response_created(response_id, item_id, metrics=metrics)
-                    created_for_tools = True
-                if execution.needs_response:
-                    self.pending_tool_context = messages
-                await self._send_tool_call_event(
-                    tool_call=tool_call,
-                    execution=execution,
-                    response_id=response_id,
-                    item_id=item_id,
+        for iteration in range(1, 4):
+            waiting_for_client_tool = False
+            needs_client_followup = False
+            for tool_call in response.tool_calls:
+                execution = await self.tools.execute(tool_call.name, tool_call.arguments)
+                if execution.forwarded:
+                    if not created_for_tools:
+                        await self._send_response_created(response_id, item_id, metrics=metrics)
+                        created_for_tools = True
+                    if execution.needs_response:
+                        self.pending_tool_context = messages
+                    await self._send_tool_call_event(
+                        tool_call=tool_call,
+                        execution=execution,
+                        response_id=response_id,
+                        item_id=item_id,
+                    )
+                    waiting_for_client_tool = True
+                    needs_client_followup = needs_client_followup or execution.needs_response
+                    continue
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": execution.result,
+                    }
                 )
-                waiting_for_client_tool = True
-                needs_client_followup = needs_client_followup or execution.needs_response
-                continue
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": tool_call.name,
-                    "content": execution.result,
-                }
-            )
-        if waiting_for_client_tool:
-            await self._send_response_done(response_id=response_id, item_id=item_id, transcript="")
-            if not needs_client_followup:
-                self.pending_tool_context = None
+            if waiting_for_client_tool:
+                await self._send_response_done(response_id=response_id, item_id=item_id, transcript="")
+                if not needs_client_followup:
+                    self.pending_tool_context = None
+                logger.info(
+                    "Forwarded client tool batch session_id=%s needs_followup=%s pending_context_messages=%d",
+                    self.session_id,
+                    needs_client_followup,
+                    len(messages) if needs_client_followup else 0,
+                )
+                return None
+
+            final_started = time.perf_counter()
+            response = await self.llm.chat(messages=messages, instructions=instructions, tools=tools)
+            if metrics:
+                metrics.llm_ms += (time.perf_counter() - final_started) * 1000
+            if not response.tool_calls:
+                final_text = response.text or self._fallback_text_for(transcript)
+                self._fire_record_turn(transcript, final_text)
+                return final_text
             logger.info(
-                "Forwarded client tool batch session_id=%s needs_followup=%s pending_context_messages=%d",
+                "Continuing local tool loop session_id=%s iteration=%d tool_calls=%d",
                 self.session_id,
-                needs_client_followup,
-                len(messages) if needs_client_followup else 0,
+                iteration,
+                len(response.tool_calls),
             )
-            return None
-        final_started = time.perf_counter()
-        final = await self.llm.chat(messages=messages, instructions=instructions)
-        if metrics:
-            metrics.llm_ms += (time.perf_counter() - final_started) * 1000
-        final_text = (final.text or self._fallback_text_for(transcript))
+            self._append_assistant_tool_calls(messages, response)
+
+        final_text = self._fallback_text_for(transcript)
         self._fire_record_turn(transcript, final_text)
         return final_text
 
@@ -1097,12 +1124,73 @@ class RealtimeSession:
         ]
 
     @staticmethod
+    def _append_assistant_tool_calls(messages: list[Message], response: LLMResponse) -> None:
+        assistant_message: Message = {"role": "assistant", "content": response.text or ""}
+        assistant_message["tool_calls"] = [
+            RealtimeSession._tool_call_message(tool_call) for tool_call in response.tool_calls
+        ]
+        messages.append(assistant_message)
+
+    @staticmethod
     def _tool_call_message(tool_call: ToolCall) -> dict[str, Any]:
         return {
             "id": tool_call.id,
             "type": "function",
             "function": {"name": tool_call.name, "arguments": tool_call.arguments or "{}"},
         }
+
+    def _direct_local_tool_call(self, transcript: str) -> ToolCall | None:
+        if self.tools.get("web_search") is None:
+            return None
+        if not self._should_search_before_llm(transcript):
+            return None
+        return ToolCall(
+            id=f"call_{uuid.uuid4().hex}",
+            name="web_search",
+            arguments=json.dumps({"query": transcript.strip()}, ensure_ascii=False),
+        )
+
+    @staticmethod
+    def _should_search_before_llm(transcript: str) -> bool:
+        text = transcript.strip().lower()
+        if not text:
+            return False
+        explicit_search_markers = (
+            "查一下",
+            "查询",
+            "查查",
+            "搜索",
+            "搜一下",
+            "搜搜",
+            "search",
+            "lookup",
+            "google",
+            "百度",
+        )
+        current_info_markers = (
+            "天气",
+            "气温",
+            "下雨",
+            "降雨",
+            "下雪",
+            "台风",
+            "空气质量",
+            "aqi",
+            "新闻",
+            "最新",
+            "实时",
+            "价格",
+            "股价",
+            "汇率",
+            "航班",
+            "路况",
+            "weather",
+            "latest",
+            "news",
+            "price",
+        )
+        return any(marker in text for marker in explicit_search_markers + current_info_markers)
+
 
     async def _send_response(
         self,
