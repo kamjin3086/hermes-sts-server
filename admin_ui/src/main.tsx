@@ -612,7 +612,7 @@ function Studio({
             <div key={persona.id} className={personaId === persona.id ? "persona selected" : "persona"}>
               <button className="persona-main" onClick={() => selectPersona(persona)}>
                 <strong>{persona.name}</strong>
-                <span>{persona.voice_mode === "default" ? "默认音色" : modeLabels[persona.voice_mode]?.title}</span>
+                <span style={{ color: "#3c3939" }}>{persona.voice_mode === "default" ? "默认音色" : modeLabels[persona.voice_mode]?.title}</span>
               </button>
               <button className="persona-delete" onClick={() => deletePersona(persona)} title="删除人格">
                 <Trash2 size={15} />
