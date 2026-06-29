@@ -1571,6 +1571,56 @@ button:disabled {
   justify-self: start;
 }
 
+.tool-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tool-inventory-group {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-height: 98px;
+  padding: 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.tool-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tool-chip {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid rgba(123, 231, 216, 0.16);
+  background: rgba(123, 231, 216, 0.06);
+}
+
+.tool-chip code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #dff8ee;
+}
+
+.tool-chip em {
+  flex: 0 0 auto;
+  color: #9aa8a1;
+  font-style: normal;
+  font-size: var(--t-xs);
+}
+
 .persona-actions,
 .random-actions {
   display: flex;
@@ -2569,7 +2619,8 @@ select:focus:not(:focus-visible) {
   }
 
   .profile-picker,
-  .llm-profile-list {
+  .llm-profile-list,
+  .tool-inventory-grid {
     grid-template-columns: 1fr;
   }
 

@@ -33,6 +33,7 @@ import {
   Trash2,
   Upload,
   Wand2,
+  Wrench,
 } from "lucide-react";
 import {
   Area,
@@ -1517,6 +1518,7 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
           </button>
         )}
       </section>
+      <ToolInventory tools={state.tools} />
       <section className="panel span-12">
         <details className="soft-details setup-scripts">
           <summary><CheckCircle2 size={15} /> 新机器部署脚本</summary>
@@ -1743,6 +1745,46 @@ function RuntimeConversationPreview({ onReset }: { onReset: () => Promise<void> 
         <RefreshCw size={15} />开启新上下文
       </button>
     </section>
+  );
+}
+
+function ToolInventory({ tools }: { tools?: { local: ToolSnapshot[]; client: ToolSnapshot[] } }) {
+  const local = tools?.local || [];
+  const client = tools?.client || [];
+  return (
+    <section className="panel span-12 tool-inventory">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow"><Wrench size={15} /> Tools</span>
+          <h2>当前可调用工具</h2>
+        </div>
+        <span className="subtle">{local.length} 系统 / {client.length} 客户端</span>
+      </div>
+      <div className="tool-inventory-grid">
+        <ToolInventoryGroup title="系统注入" tools={local} empty="系统工具未启用" />
+        <ToolInventoryGroup title="客户端注入" tools={client} empty="等待客户端注入 tools" />
+      </div>
+    </section>
+  );
+}
+
+function ToolInventoryGroup({ title, tools, empty }: { title: string; tools: ToolSnapshot[]; empty: string }) {
+  return (
+    <div className="tool-inventory-group">
+      <strong>{title}</strong>
+      {tools.length === 0 ? (
+        <span className="muted">{empty}</span>
+      ) : (
+        <div className="tool-chip-list">
+          {tools.map((tool) => (
+            <span className="tool-chip" key={`${tool.mode}-${tool.name}`} title={tool.description || tool.name}>
+              <code>{tool.name}</code>
+              <em>{tool.parameters_count} 参数</em>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
