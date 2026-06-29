@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -20,6 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 Message = dict[str, Any]
+
+INLINE_TOOL_TAG_RE = re.compile(
+    r"<\s*(?:tool[_-]?call|function)(?:\s|=|>|$)",
+    re.IGNORECASE,
+)
+INLINE_TOOL_BLOCK_RE = re.compile(
+    r"<\s*tool[_-]?call\b[^>]*>.*?<\s*/\s*tool[_-]?call\s*>"
+    r"|<\s*function(?:\s*=\s*[^>\s]+|\b[^>]*)>.*?<\s*/\s*function\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+INLINE_TOOL_PREFIXES = ("<tool_call", "<tool-call", "<toolcall", "<function", "<function=")
 
 
 @dataclass(frozen=True)
@@ -117,7 +129,9 @@ class BaseOpenAIChatProvider:
         now = time.monotonic()
         self._reset_history_if_idle(now)
         self.last_llm_call_started_at = now
-        prompt_messages = self._prepare_messages(self._messages_for_transcript(transcript, instructions))
+        prompt_messages = self._prepare_messages(
+            self._sanitize_prompt_messages(self._messages_for_transcript(transcript, instructions))
+        )
         body: dict[str, Any] = {
             "model": self.model,
             "messages": prompt_messages,
@@ -132,16 +146,32 @@ class BaseOpenAIChatProvider:
             body["tool_choice"] = "auto"
 
         text_parts: list[str] = []
+        guard_buffer = ""
         try:
             async for chunk in self._post_chat_completions_stream(body):
+                if guard_buffer or chunk.lstrip().startswith("<"):
+                    guard_buffer += chunk
+                    if self._looks_like_inline_tool_markup(guard_buffer):
+                        raise LLMToolCallDetected("streaming response emitted inline tool-call markup")
+                    if self._could_be_inline_tool_markup_prefix(guard_buffer):
+                        continue
+                    chunk = guard_buffer
+                    guard_buffer = ""
+                elif self._looks_like_inline_tool_markup(chunk):
+                    raise LLMToolCallDetected("streaming response emitted inline tool-call markup")
                 text_parts.append(chunk)
                 yield chunk
         except LLMToolCallDetected:
             raise
         except Exception:
             raise
+        if guard_buffer:
+            text_parts.append(guard_buffer)
+            yield guard_buffer
 
-        text = "".join(text_parts).strip()
+        text, stripped_inline_tool = self._strip_inline_tool_markup("".join(text_parts).strip())
+        if stripped_inline_tool:
+            logger.warning("Dropped inline tool-call markup from streamed assistant text before saving history")
         if text:
             self.history.append({"role": "user", "content": transcript})
             self.history.append({"role": "assistant", "content": text})
@@ -166,7 +196,9 @@ class BaseOpenAIChatProvider:
         self._reset_history_if_idle(now)
         self.last_llm_call_started_at = now
 
-        prompt_messages = self._prepare_messages(messages or self._messages_for_transcript(transcript or "", instructions))
+        prompt_messages = self._prepare_messages(
+            self._sanitize_prompt_messages(messages or self._messages_for_transcript(transcript or "", instructions))
+        )
         body: dict[str, Any] = {
             "model": self.model,
             "messages": prompt_messages,
@@ -196,7 +228,9 @@ class BaseOpenAIChatProvider:
 
         message = choice.get("message") or {}
         tool_calls = self._parse_message_tool_calls(message)
-        text = (message.get("content") or "").strip()
+        text, stripped_inline_tool = self._strip_inline_tool_markup((message.get("content") or "").strip())
+        if stripped_inline_tool and not tool_calls:
+            logger.warning("Dropped inline tool-call markup from assistant content; backend did not return structured tool_calls")
         if transcript and text and not tool_calls:
             self.history.append({"role": "user", "content": transcript})
             self.history.append({"role": "assistant", "content": text})
@@ -251,7 +285,10 @@ class BaseOpenAIChatProvider:
                             raise LLMToolCallDetected("streaming response requested tool calls")
                         content = delta.get("content")
                         if content:
-                            yield str(content)
+                            text = str(content)
+                            if self._looks_like_inline_tool_markup(text):
+                                raise LLMToolCallDetected("streaming response emitted inline tool-call markup")
+                            yield text
 
     async def _fallback_or_raise(self, exc: Exception, messages: list[Message]) -> LLMResponse:
         if self.settings.llm_fallback_enabled:
@@ -318,6 +355,53 @@ class BaseOpenAIChatProvider:
     def _prepare_messages(self, messages: list[Message]) -> list[Message]:
         return messages
 
+    @classmethod
+    def _sanitize_prompt_messages(cls, messages: list[Message]) -> list[Message]:
+        sanitized: list[Message] = []
+        for message in messages:
+            if message.get("role") != "assistant":
+                sanitized.append(message)
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                sanitized.append(message)
+                continue
+            clean, stripped = cls._strip_inline_tool_markup(content)
+            if not stripped:
+                sanitized.append(message)
+                continue
+            updated = dict(message)
+            updated["content"] = clean
+            sanitized.append(updated)
+        return sanitized
+
+    @staticmethod
+    def _looks_like_inline_tool_markup(text: str) -> bool:
+        if INLINE_TOOL_TAG_RE.search(text):
+            return True
+        stripped = text.lstrip().lower()
+        if not stripped.startswith("<"):
+            return False
+        return any(stripped.startswith(prefix) for prefix in INLINE_TOOL_PREFIXES)
+
+    @staticmethod
+    def _could_be_inline_tool_markup_prefix(text: str) -> bool:
+        stripped = text.lstrip().lower()
+        if not stripped.startswith("<"):
+            return False
+        return any(prefix.startswith(stripped) for prefix in INLINE_TOOL_PREFIXES)
+
+    @staticmethod
+    def _strip_inline_tool_markup(text: str) -> tuple[str, bool]:
+        if not text or not INLINE_TOOL_TAG_RE.search(text):
+            return text, False
+        stripped = INLINE_TOOL_BLOCK_RE.sub("", text)
+        if stripped != text:
+            return stripped.strip(), True
+        if text.lstrip().lower().startswith(INLINE_TOOL_PREFIXES):
+            return "", True
+        return text, True
+
     def _apply_prompt_cache_options(self, body: dict[str, Any]) -> None:
         if self.settings.llm_cache_prompt:
             body["cache_prompt"] = True
@@ -368,6 +452,8 @@ class BaseOpenAIChatProvider:
             "除非用户明确要求详细说明，否则不要长篇自我介绍、不要列清单、不要使用 Markdown 表格。"
             "不要解释内部系统、模型、接口、内存、服务状态或运行限制。"
             "如果需要 Reachy Mini 做动作、看相机、跟踪或调用外部能力，请使用可用工具。"
+            "工具调用必须通过 API 的 tool_calls/function_call 结构化字段完成，"
+            "不要在正文输出 <tool_call>、<function>、JSON 工具调用或任何工具标签。"
             "不要把工具名、JSON 参数、动作枚举或表情标签写进要播报的文字里。"
             "只输出要被朗读的自然语言；不要输出 emoji、颜文字、舞台提示、括号里的情绪动作，"
             "也不要写音色、嗓音、语速、语调或口音描述。音色描述由 TTS 声音配置单独控制。"
@@ -447,7 +533,7 @@ class BaseOpenAIChatProvider:
             if total > max_chars and kept_reversed:
                 break
             kept_reversed.append(message)
-        return list(reversed(kept_reversed))
+        return self._sanitize_prompt_messages(list(reversed(kept_reversed)))
 
     @property
     def base_url(self) -> str:

@@ -130,6 +130,76 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(calls[0].name, "current_time")
         self.assertEqual(calls[0].arguments, "{}")
 
+    def test_strip_inline_tool_markup_from_assistant_text(self) -> None:
+        text = (
+            "好的。\n"
+            "<tool_call>play_emotion>\n"
+            "<parameter=emotion>\n"
+            "attentive\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+
+        clean, stripped = BaseOpenAIChatProvider._strip_inline_tool_markup(text)
+
+        self.assertTrue(stripped)
+        self.assertEqual(clean, "好的。")
+
+    def test_sanitize_prompt_messages_removes_assistant_tool_tag_history(self) -> None:
+        messages = [
+            {"role": "user", "content": "<tool_call>这只是用户原文</tool_call>"},
+            {
+                "role": "assistant",
+                "content": "<tool_call>play_emotion>\n<parameter=emotion>\nattentive\n</parameter>\n</function>\n</tool_call>",
+            },
+        ]
+
+        clean = BaseOpenAIChatProvider._sanitize_prompt_messages(messages)
+
+        self.assertEqual(clean[0]["content"], "<tool_call>这只是用户原文</tool_call>")
+        self.assertEqual(clean[1]["content"], "")
+
+    def test_chat_does_not_save_inline_tool_markup_as_text(self) -> None:
+        class InlineToolProvider(DummyChatProvider):
+            async def _post_chat_completions(self, body):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "<function=play_emotion>\n<parameter=emotion>\nattentive\n</parameter>\n</function>"
+                            }
+                        }
+                    ]
+                }
+
+        provider = InlineToolProvider(Settings())
+        response = asyncio.run(provider.chat("聊天", tools=[{"type": "function", "function": {"name": "play_emotion"}}]))
+
+        self.assertEqual(response.text, "")
+        self.assertEqual(response.tool_calls, [])
+        self.assertEqual(provider.history, [])
+
+    def test_streaming_inline_tool_markup_falls_back_before_speech(self) -> None:
+        class InlineToolStreamingProvider(DummyChatProvider):
+            async def _post_chat_completions_stream(self, body):
+                yield "<"
+                yield "tool_call>play"
+                yield "_emotion>"
+
+        async def run() -> list[str]:
+            provider = InlineToolStreamingProvider(Settings())
+            chunks: list[str] = []
+            async for chunk in provider.stream_text(
+                "聊天",
+                tools=[{"type": "function", "function": {"name": "play_emotion"}}],
+            ):
+                chunks.append(chunk)
+            return chunks
+
+        with self.assertRaises(LLMToolCallDetected):
+            asyncio.run(run())
+
     def test_llm_system_prompt_uses_persona_label(self) -> None:
         prompt = BaseOpenAIChatProvider._system_prompt("你是端庄新闻播报员。")
         self.assertIn("当前人格和表达风格", prompt)
