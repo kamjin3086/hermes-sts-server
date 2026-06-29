@@ -114,6 +114,22 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].name, "current_time")
 
+    def test_parse_legacy_function_call(self) -> None:
+        calls = BaseOpenAIChatProvider._parse_message_tool_calls(
+            {
+                "content": None,
+                "function_call": {
+                    "name": "current_time",
+                    "arguments": "{}",
+                },
+            }
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].id, "call_0")
+        self.assertEqual(calls[0].name, "current_time")
+        self.assertEqual(calls[0].arguments, "{}")
+
     def test_llm_system_prompt_uses_persona_label(self) -> None:
         prompt = BaseOpenAIChatProvider._system_prompt("你是端庄新闻播报员。")
         self.assertIn("当前人格和表达风格", prompt)
@@ -602,6 +618,55 @@ class CoreTests(unittest.TestCase):
             return await session._respond_with_llm_stream("开灯")
 
         self.assertFalse(asyncio.run(run()))
+
+    def test_streaming_tool_call_fallback_executes_tools(self) -> None:
+        class ToolFallbackLlm:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.tool_result = ""
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def stream_text(self, *args, **kwargs):
+                raise LLMToolCallDetected("tool")
+                yield ""
+
+            async def chat(self, *args, **kwargs):
+                self.chat_calls += 1
+                if self.chat_calls == 1:
+                    return LLMResponse(tool_calls=[ToolCall(id="call_1", name="noop", arguments="{}")])
+                messages = kwargs["messages"]
+                self.tool_result = messages[-1]["content"]
+                return LLMResponse(text="工具已执行。")
+
+        async def run() -> tuple[list[str], ToolFallbackLlm]:
+            session = bare_session()
+            llm = ToolFallbackLlm()
+            session.settings = Settings(llm_streaming_enabled=True, hermes_first_filler_delay_seconds=0.05)
+            session.llm = llm
+            sent: list[str] = []
+
+            async def fake_send_text_segments(self, text, *, response_id, item_id, metrics=None, voice=None):
+                sent.append(text)
+
+            async def fake_send_response_created(self, response_id, item_id, metrics=None):
+                self.active_response_id = response_id
+
+            async def fake_send_response_done(self, *, response_id, item_id, transcript):
+                pass
+
+            session._send_text_segments = types.MethodType(fake_send_text_segments, session)
+            session._send_response_created = types.MethodType(fake_send_response_created, session)
+            session._send_response_done = types.MethodType(fake_send_response_done, session)
+            await session._respond_with_agent_wait("测试工具")
+            return sent, llm
+
+        sent, llm = asyncio.run(run())
+
+        self.assertEqual(sent, ["工具已执行。"])
+        self.assertEqual(llm.chat_calls, 2)
+        self.assertEqual(llm.tool_result, "noop completed")
 
     def test_tool_system_prompt_keeps_voice_description_out_of_spoken_text(self) -> None:
         session = object.__new__(RealtimeSession)
@@ -1118,6 +1183,25 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(settings.active_llm_profile_id, "hermes_default")
         self.assertEqual(settings.hermes_max_fillers, 0)
+
+    def test_web_search_toggle_syncs_active_llm_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "config.sqlite3")
+
+            store.set_settings({"web_search_enabled": True})
+            enabled = store.load_settings()
+            profile_enabled = store.llm_profile(enabled.active_llm_profile_id)
+            assert profile_enabled is not None
+
+            store.set_settings({"web_search_enabled": False})
+            disabled = store.load_settings()
+            profile_disabled = store.llm_profile(disabled.active_llm_profile_id)
+            assert profile_disabled is not None
+
+        self.assertTrue(enabled.web_search_enabled)
+        self.assertTrue(profile_enabled["web_search_enabled"])
+        self.assertFalse(disabled.web_search_enabled)
+        self.assertFalse(profile_disabled["web_search_enabled"])
 
     def test_config_store_keeps_qwen_legacy_fields_in_sync_when_switching_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

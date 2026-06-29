@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import time
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -113,9 +114,13 @@ class DuckDuckGoSearchProvider:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout, connect=2.0),
                 follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 HermesSTS/0.1"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HermesSTS/0.1",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                },
             ) as client:
-                resp = await client.get("https://duckduckgo.com/html/", params={"q": query})
+                resp = await client.get("https://html.duckduckgo.com/html/", params={"q": query})
                 resp.raise_for_status()
         except Exception as exc:
             logger.warning("DuckDuckGo search failed: %s", exc)
@@ -267,17 +272,32 @@ class _DuckDuckGoHtmlParser(HTMLParser):
         super().close()
 
     def _flush(self) -> None:
-        if self._current_title and self._current_url:
+        url = _decode_duckduckgo_url(self._current_url)
+        if self._current_title and url:
             self.hits.append(
                 SearchHit(
                     title=self._current_title,
-                    url=self._current_url,
+                    url=url,
                     content=self._current_snippet[:400],
                 )
             )
         self._current_title = ""
         self._current_url = ""
         self._current_snippet = ""
+
+
+def _decode_duckduckgo_url(raw_url: str) -> str:
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = f"https:{url}"
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        uddg = parse_qs(parsed.query).get("uddg", [""])[0]
+        if uddg:
+            return unquote(uddg)
+    return url
 
 
 def build_websearch(settings: Settings) -> WebSearchProvider:

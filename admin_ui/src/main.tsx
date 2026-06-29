@@ -2714,14 +2714,16 @@ function MemoryPanel({
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Gauge size={15} /> Web 搜索</span>
-            <h2>Tavily 配置</h2>
+            <h2>搜索配置</h2>
           </div>
         </div>
         <div className="switch-line">
           <span>启用 Web 搜索</span>
           <SwitchControl checked={webSearchEnabled} onChange={(checked) => patch({ web_search_enabled: checked })} onLabel="开启" offLabel="关闭" />
         </div>
+        <EditableField label="Provider 顺序" value={values.web_search_providers || "tavily,duckduckgo,searxng"} onSave={(v) => patch({ web_search_providers: v })} />
         <EditableField label="Tavily API Key" value={values.tavily_api_key} secret onSave={(v) => patch({ tavily_api_key: v })} />
+        <EditableField label="Tavily Base URL" value={values.tavily_base_url || "https://api.tavily.com"} onSave={(v) => patch({ tavily_base_url: v })} />
         <label className="field">
           <span>搜索深度</span>
           <div className="select-wrap">
@@ -2734,6 +2736,9 @@ function MemoryPanel({
           </div>
         </label>
         <EditableField label="超时（秒，最大 3.0）" value={values.tavily_timeout_seconds ?? 2.0} onSave={(v) => patch({ tavily_timeout_seconds: Math.min(3.0, Number(v) || 2.0) })} />
+        <EditableField label="DuckDuckGo 超时（秒）" value={values.duckduckgo_timeout_seconds ?? 2.5} onSave={(v) => patch({ duckduckgo_timeout_seconds: Math.max(0.2, Number(v) || 2.5) })} />
+        <EditableField label="SearXNG Base URL" value={values.searxng_base_url || ""} onSave={(v) => patch({ searxng_base_url: v })} />
+        <EditableField label="SearXNG 超时（秒）" value={values.searxng_timeout_seconds ?? 2.5} onSave={(v) => patch({ searxng_timeout_seconds: Math.max(0.2, Number(v) || 2.5) })} />
       </section>
 
       <section className="panel span-8">

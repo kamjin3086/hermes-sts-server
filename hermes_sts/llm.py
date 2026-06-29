@@ -195,7 +195,7 @@ class BaseOpenAIChatProvider:
             return await self._fallback_or_raise(RuntimeError(text), prompt_messages)
 
         message = choice.get("message") or {}
-        tool_calls = self._parse_tool_calls(message.get("tool_calls") or [])
+        tool_calls = self._parse_message_tool_calls(message)
         text = (message.get("content") or "").strip()
         if transcript and text and not tool_calls:
             self.history.append({"role": "user", "content": transcript})
@@ -392,6 +392,23 @@ class BaseOpenAIChatProvider:
                 )
             )
         return tool_calls
+
+    @classmethod
+    def _parse_message_tool_calls(cls, message: dict[str, Any]) -> list[ToolCall]:
+        tool_calls = cls._parse_tool_calls(message.get("tool_calls") or [])
+        if tool_calls:
+            return tool_calls
+        function = message.get("function_call") or {}
+        name = function.get("name") if isinstance(function, dict) else ""
+        if not name:
+            return []
+        return [
+            ToolCall(
+                id="call_0",
+                name=str(name),
+                arguments=function.get("arguments"),
+            )
+        ]
 
     def _static_fallback_text(self, messages: list[Message]) -> str:
         configured = [

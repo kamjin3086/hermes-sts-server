@@ -648,6 +648,7 @@ class ConfigStore:
                 attr = ENV_TO_ATTR.get(key, key)
                 normalized[attr] = value
             normalized = self._with_voice_derivatives(conn, normalized)
+            self._sync_active_llm_profile_flags(conn, normalized)
             for attr, value in normalized.items():
                 conn.execute(
                     "insert or replace into settings values (?, ?, ?)",
@@ -662,6 +663,19 @@ class ConfigStore:
             normalized.get("tts_voice_source", "<N/A>"),
         )
         return normalized
+
+    def _sync_active_llm_profile_flags(self, conn: sqlite3.Connection, normalized: dict[str, Any]) -> None:
+        if "web_search_enabled" not in normalized:
+            return
+        rows = conn.execute("select key, value_json from settings").fetchall()
+        current = {row["key"]: json.loads(row["value_json"]) for row in rows}
+        profile_id = str(normalized.get("active_llm_profile_id") or current.get("active_llm_profile_id") or "")
+        if not profile_id:
+            return
+        conn.execute(
+            "update llm_profiles set web_search_enabled=?, updated_at=? where id=?",
+            (1 if bool(normalized["web_search_enabled"]) else 0, time.time(), profile_id),
+        )
 
     def _with_voice_derivatives(self, conn: sqlite3.Connection, normalized: dict[str, Any]) -> dict[str, Any]:
         normalized = self._with_qwen_voice_derivatives(conn, normalized)

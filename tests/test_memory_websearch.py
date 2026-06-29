@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from hermes_sts.config import Settings
 from hermes_sts.memory import (
     NoopMemoryProvider,
@@ -14,7 +16,15 @@ from hermes_sts.memory import (
     _probe_openviking,
     build_memory,
 )
-from hermes_sts.websearch import ChainedWebSearchProvider, NoopWebSearchProvider, SearchHit, TavilySearchProvider
+from hermes_sts.websearch import (
+    ChainedWebSearchProvider,
+    DuckDuckGoSearchProvider,
+    NoopWebSearchProvider,
+    SearchHit,
+    TavilySearchProvider,
+    _DuckDuckGoHtmlParser,
+    _decode_duckduckgo_url,
+)
 
 
 def _run(coro):
@@ -210,6 +220,55 @@ class NoopWebSearchProviderTests(unittest.TestCase):
         provider = NoopWebSearchProvider()
         self.assertEqual(_run(provider.search("anything")), [])
         self.assertEqual(provider.description(), "noop")
+
+
+class DuckDuckGoSearchProviderTests(unittest.TestCase):
+    HTML = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%3Fx%3D1&rut=abc">Example Result</a>
+        <a class="result__snippet">A compact snippet from DuckDuckGo.</a>
+      </div>
+      <div class="result">
+        <a class="result-link" href="https://example.org/direct">Direct Result</a>
+        <div class="result__snippet">Second snippet.</div>
+      </div>
+    </body></html>
+    """
+
+    def test_parser_decodes_duckduckgo_redirect_urls(self) -> None:
+        parser = _DuckDuckGoHtmlParser()
+        parser.feed(self.HTML)
+        parser.close()
+
+        self.assertEqual(len(parser.hits), 2)
+        self.assertEqual(parser.hits[0].title, "Example Result")
+        self.assertEqual(parser.hits[0].url, "https://example.com/a?x=1")
+        self.assertIn("compact snippet", parser.hits[0].content)
+        self.assertEqual(parser.hits[1].url, "https://example.org/direct")
+
+    def test_decode_duckduckgo_url_leaves_direct_urls_alone(self) -> None:
+        self.assertEqual(_decode_duckduckgo_url("https://example.org/x"), "https://example.org/x")
+
+    def test_provider_parses_mocked_html_results(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.host, "html.duckduckgo.com")
+            self.assertEqual(request.url.params.get("q"), "hermes sts")
+            return httpx.Response(200, text=self.HTML)
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+
+        def client_factory(*args, **kwargs):
+            kwargs["transport"] = transport
+            return real_async_client(*args, **kwargs)
+
+        provider = DuckDuckGoSearchProvider(Settings(web_search_enabled=True, duckduckgo_timeout_seconds=1.0))
+        with patch("hermes_sts.websearch.httpx.AsyncClient", side_effect=client_factory):
+            hits = _run(provider.search("hermes sts", max_results=1))
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].url, "https://example.com/a?x=1")
 
 
 class FakeSearchProvider:
