@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import math
 import os
 import stat
@@ -504,6 +505,96 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[0]["name"], "dance")
         self.assertEqual(events[0]["call_id"], "call_1")
         self.assertEqual(events[0]["arguments"], '{"dance": "happy"}')
+
+    def test_direct_dance_command_routes_to_client_tool_without_llm(self) -> None:
+        class FakeLlm:
+            history: list[dict[str, str]] = []
+
+            async def chat(self, *args, **kwargs):
+                raise AssertionError("direct action should not call LLM")
+
+        session = bare_session()
+        session.llm = FakeLlm()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "dance",
+                    "description": "Play a named or random dance move once (or repeat).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"move": {"type": "string"}, "repeat": {"type": "integer"}},
+                    },
+                }
+            ]
+        )
+        events = []
+
+        async def fake_send(self, event):
+            events.append(event)
+
+        session._send = types.MethodType(fake_send, session)
+        routed = asyncio.run(session._route_direct_client_action("那你给我跳个舞", instructions=""))
+
+        self.assertTrue(routed)
+        tool_event = next(event for event in events if event["type"] == "response.function_call_arguments.done")
+        self.assertEqual(tool_event["name"], "dance")
+        self.assertEqual(json.loads(tool_event["arguments"]), {"move": "random", "repeat": 1})
+        self.assertIsNotNone(session.pending_tool_context)
+
+    def test_direct_contextual_start_routes_to_dance_only_after_dance_context(self) -> None:
+        class FakeLlm:
+            history = [{"role": "user", "content": "三个舞。"}]
+
+        session = bare_session()
+        session.llm = FakeLlm()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "dance",
+                    "description": "Play a dance.",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ]
+        )
+        events = []
+
+        async def fake_send(self, event):
+            events.append(event)
+
+        session._send = types.MethodType(fake_send, session)
+        self.assertTrue(asyncio.run(session._route_direct_client_action("开始", instructions="")))
+
+        session.llm.history = []
+        self.assertIsNone(session._direct_client_action_tool_call("开始"))
+
+    def test_direct_head_and_emotion_commands_route_to_client_tools(self) -> None:
+        session = bare_session()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "move_head",
+                    "description": "Move head.",
+                    "parameters": {"type": "object", "properties": {"direction": {"type": "string"}}},
+                },
+                {
+                    "type": "function",
+                    "name": "play_emotion",
+                    "description": "Play emotion.",
+                    "parameters": {"type": "object", "properties": {"emotion": {"type": "string"}}},
+                },
+            ]
+        )
+
+        head = session._direct_client_action_tool_call("摇头")
+        emotion = session._direct_client_action_tool_call("做一个开心的动作")
+
+        self.assertEqual(head.name if head else None, "move_head")
+        self.assertEqual(json.loads(head.arguments)["direction"], "front")
+        self.assertEqual(emotion.name if emotion else None, "play_emotion")
+        self.assertEqual(json.loads(emotion.arguments)["emotion"], "happy")
 
     def test_tool_result_turn_uses_returned_tool_output(self) -> None:
         class FakeLlm:

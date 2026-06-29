@@ -8,6 +8,7 @@ import json
 import logging
 import random
 import re
+import string
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -632,6 +633,8 @@ class RealtimeSession:
             "DBG respond_with_agent_wait session_id=%s transcript_chars=%d instructions_chars=%d",
             self.session_id, len(transcript), len(instructions),
         )
+        if await self._route_direct_client_action(transcript, instructions=instructions, metrics=metrics):
+            return
         if self.settings.llm_streaming_enabled and callable(getattr(self.llm, "stream_text", None)):
             try:
                 if await self._respond_with_llm_stream(
@@ -737,6 +740,131 @@ class RealtimeSession:
                 first_filler_pcm_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await first_filler_pcm_task
+
+    async def _route_direct_client_action(
+        self,
+        transcript: str,
+        *,
+        instructions: str,
+        metrics: TurnMetrics | None = None,
+    ) -> bool:
+        tool_call = self._direct_client_action_tool_call(transcript)
+        if tool_call is None:
+            return False
+        response_id = f"resp_{uuid.uuid4().hex}"
+        item_id = f"item_{uuid.uuid4().hex}"
+        execution = await self.tools.execute(tool_call.name, tool_call.arguments)
+        if not execution.forwarded:
+            return False
+        self.pending_tool_context = [
+            {"role": "system", "content": self._tool_system_prompt(instructions=instructions)},
+            {"role": "user", "content": transcript},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [self._tool_call_message(tool_call)],
+            },
+        ]
+        await self._send_response_created(response_id, item_id, metrics=metrics)
+        await self._send_tool_call_event(
+            tool_call=tool_call,
+            execution=execution,
+            response_id=response_id,
+            item_id=item_id,
+        )
+        await self._send_response_done(response_id=response_id, item_id=item_id, transcript="")
+        logger.info(
+            "Routed direct client action session_id=%s transcript=%r tool=%s",
+            self.session_id,
+            transcript[:80],
+            tool_call.name,
+        )
+        return True
+
+    def _direct_client_action_tool_call(self, transcript: str) -> ToolCall | None:
+        text = self._normalize_action_text(transcript)
+        if not text or len(text) > 40:
+            return None
+        client_tools = set(self.tools.client_tool_names())
+
+        def call(name: str, arguments: dict[str, Any]) -> ToolCall | None:
+            if name not in client_tools:
+                return None
+            return ToolCall(id=f"call_{uuid.uuid4().hex}", name=name, arguments=json.dumps(arguments, ensure_ascii=False))
+
+        if "stop_dance" in client_tools and any(token in text for token in ("别跳", "不跳", "停止跳舞", "停下跳舞", "stopdance", "stopdancing")):
+            return call("stop_dance", {"dummy": True})
+        if "dance" in client_tools and self._is_dance_command(text, recent_dance_context=self._has_recent_dance_context()):
+            return call("dance", {"move": "random", "repeat": self._dance_repeat_for(text)})
+        if "move_head" in client_tools and self._is_head_command(text):
+            return call("move_head", {"direction": self._head_direction_for(text)})
+        if "play_emotion" in client_tools and self._is_emotion_command(text):
+            return call("play_emotion", {"emotion": self._emotion_for(text)})
+        return None
+
+    @staticmethod
+    def _normalize_action_text(text: str) -> str:
+        table = str.maketrans("", "", string.whitespace + string.punctuation + "，。！？；：、“”‘’（）()【】[]《》<>…")
+        return text.strip().lower().translate(table)
+
+    def _has_recent_dance_context(self) -> bool:
+        history = getattr(getattr(self, "llm", None), "history", [])
+        if not isinstance(history, list):
+            return False
+        recent = "".join(str(message.get("content", "")) for message in history[-6:] if isinstance(message, dict))
+        normalized = self._normalize_action_text(recent)
+        return "跳舞" in normalized or "舞蹈" in normalized or "三个舞" in normalized or "dance" in normalized
+
+    @staticmethod
+    def _is_dance_command(text: str, *, recent_dance_context: bool = False) -> bool:
+        return (
+            "跳舞" in text
+            or "舞蹈" in text
+            or "跳个舞" in text
+            or "来个舞" in text
+            or text in {"跳一下", "三个舞", "dance"}
+            or (recent_dance_context and text in {"开始", "再来一个", "再来", "继续"})
+        )
+
+    @staticmethod
+    def _dance_repeat_for(text: str) -> int:
+        if any(token in text for token in ("三", "3", "three")):
+            return 3
+        if any(token in text for token in ("两", "二", "2", "two")):
+            return 2
+        return 1
+
+    @staticmethod
+    def _is_head_command(text: str) -> bool:
+        return any(token in text for token in ("摇头", "点头", "抬头", "低头", "左看", "右看", "看左", "看右", "回正"))
+
+    @staticmethod
+    def _head_direction_for(text: str) -> str:
+        if any(token in text for token in ("左看", "看左")):
+            return "left"
+        if any(token in text for token in ("右看", "看右")):
+            return "right"
+        if any(token in text for token in ("抬头", "点头")):
+            return "up"
+        if "低头" in text:
+            return "down"
+        return "front"
+
+    @staticmethod
+    def _is_emotion_command(text: str) -> bool:
+        return any(token in text for token in ("开心", "高兴", "难过", "伤心", "惊讶", "害羞", "生气", "动作", "表情"))
+
+    @staticmethod
+    def _emotion_for(text: str) -> str:
+        if any(token in text for token in ("难过", "伤心")):
+            return "sad"
+        if "惊讶" in text:
+            return "surprised"
+        if "害羞" in text:
+            return "shy"
+        if "生气" in text:
+            return "angry"
+        return "happy"
 
     async def _respond_with_llm_stream(
         self,
