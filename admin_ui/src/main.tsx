@@ -33,7 +33,6 @@ import {
   Trash2,
   Upload,
   Wand2,
-  Wrench,
 } from "lucide-react";
 import {
   Area,
@@ -1581,74 +1580,169 @@ function Advanced({
   };
   const showReset = (key: string) => key in raw ? resetField(key) : undefined;
   return (
-    <div className="grid">
-      <section className="panel span-6">
-        <span className="eyebrow"><Bot size={15} /> LLM 上下文</span>
-        <h2>短期对话历史</h2>
-        <div className="context-meter">
-          <div>
-            <strong>{state.llm_context?.messages ?? 0}</strong>
-            <span>本地上下文消息</span>
+    <div className="advanced-layout">
+      <div className="advanced-primary">
+        <section className="panel advanced-context-panel">
+          <div className="panel-head">
+            <div>
+              <span className="eyebrow"><Bot size={15} /> LLM 上下文</span>
+              <h2>短期对话历史</h2>
+            </div>
+            <button className="secondary" onClick={resetContext} disabled={!state.llm_context?.reset_available}>
+              <RefreshCw size={16} />清空
+            </button>
           </div>
-          <div>
-            <strong>{state.llm_context?.chars ?? 0}</strong>
-            <span>约字符数</span>
+          <div className="context-meter">
+            <div>
+              <strong>{state.llm_context?.messages ?? 0}</strong>
+              <span>本地上下文消息</span>
+            </div>
+            <div>
+              <strong>{state.llm_context?.chars ?? 0}</strong>
+              <span>约字符数</span>
+            </div>
           </div>
-        </div>
-        <button className="secondary" onClick={resetContext} disabled={!state.llm_context?.reset_available}>
-          <RefreshCw size={16} />立即清空短期上下文
-        </button>
-        <EditableField label={<TooltipLabel label="保留消息数" tip="STS 每次请求 LLM 时携带的本地短期历史条数；不影响人格提示词或长期记忆。" />} value={values.hermes_history_max_messages ?? 300} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} onReset={showReset("hermes_history_max_messages")} />
-        <EditableField label={<TooltipLabel label="保留字符数" tip="短期历史的字符上限，越大越能保持上下文，但请求更重。" />} value={values.hermes_history_max_chars ?? 65536} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} onReset={showReset("hermes_history_max_chars")} />
-        <EditableField label={<TooltipLabel label="空闲清空（秒）" tip="超过这个时间没有调用 LLM，就自动开启新的短期上下文。" />} value={values.hermes_history_idle_reset_seconds ?? 14400} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} onReset={showReset("hermes_history_idle_reset_seconds")} />
-      </section>
-      <ConversationCard />
-      <section className="panel span-6">
-        <span className="eyebrow"><Mic2 size={15} /> 听音与打断</span>
-        <h2>一句话何时结束</h2>
-        <EditableField label={<TooltipLabel label="VAD 阈值" tip="判断用户是否正在说话的灵敏度。数值越高越不容易误触发，也越可能漏掉轻声。" />} value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} onReset={showReset("vad_threshold")} />
-        <EditableField label={<TooltipLabel label="最短静音（秒）" tip="用户停顿超过这个时间后，系统认为一句话结束并开始处理。" />} value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} onReset={showReset("vad_min_silence_seconds")} />
-        <p className="muted">{busy === "saving" ? "正在保存..." : "高级项保存后会按需重建 STT/TTS/LLM 组件。"}</p>
-      </section>
-      <ToolsPanel tools={state.tools} />
-      <WebSearchDiagnostics state={state} />
-      <section className="panel span-6">
-        <span className="eyebrow"><Gauge size={15} /> 等待与播报</span>
-        <h2>回答慢时怎么处理</h2>
-        <label className="field">
-          <TooltipLabel label="Hermes 快答" tip="给 Hermes Agent 请求加 /no_think，让语音回答更快更短。只影响 Hermes Agent 路径。" />
-          <SwitchControl
-            checked={values.hermes_voice_no_think !== false}
-            onChange={(checked) => patch({ hermes_voice_no_think: checked })}
-            onLabel="开启"
-            offLabel="关闭"
-          />
-        </label>
-        <label className="field">
-          <TooltipLabel label="LLM 流式首句" tip="LLM 生成出完整第一句后立即交给 TTS 播报；如果模型转为工具调用，会回退到完整工具链。" />
-          <SwitchControl
-            checked={values.llm_streaming_enabled !== false}
-            onChange={(checked) => patch({ llm_streaming_enabled: checked })}
-            onLabel="开启"
-            offLabel="关闭"
-          />
-        </label>
-        <EditableField label={<TooltipLabel label="最大等待（秒）" tip="超过这个时间还没有 LLM 结果时，系统会使用兜底回答结束本轮。" />} value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} onReset={showReset("hermes_agent_max_wait_seconds")} />
-        <EditableField label={<TooltipLabel label="等待提示延迟（秒）" tip="开启等待语音提示时，LLM 超过这个时间未返回才会播第一句等待提示。" />} value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} onReset={showReset("hermes_first_filler_delay_seconds")} />
-        <EditableField label={<TooltipLabel label="等待提示次数" tip="0 表示不播等待提示；1 表示最多播一句。默认关闭以减少打扰。" />} value={values.hermes_max_fillers ?? 0} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} onReset={showReset("hermes_max_fillers")} />
-        <EditableField label={<TooltipLabel label="首段最少字符" tip="第一句达到这个长度就会先合成，数值越小越快出声。" />} value={values.tts_segment_min_chars ?? 8} onSave={(v) => patch({ tts_segment_min_chars: Number(v) })} onReset={showReset("tts_segment_min_chars")} />
-        <EditableField label={<TooltipLabel label="每段最多字符" tip="TTS 分段长度。越短越快出声，越长越接近完整语气。" />} value={values.tts_segment_max_chars ?? 48} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} onReset={showReset("tts_segment_max_chars")} />
-        <EditableField label={<TooltipLabel label="音频上限（秒）" tip="防止 Qwen3TTS 偶发生成超长异常音频；超过会裁剪并写入日志。" />} value={values.tts_max_audio_seconds ?? 18} onSave={(v) => patch({ tts_max_audio_seconds: Number(v) })} onReset={showReset("tts_max_audio_seconds")} />
-        <EditableField label={<TooltipLabel label="发包间隔（毫秒）" tip="服务器发送音频包之间的等待。0 表示尽快交给客户端缓冲播放。" />} value={values.response_audio_chunk_send_delay_ms ?? 0} onSave={(v) => patch({ response_audio_chunk_send_delay_ms: Number(v) })} onReset={showReset("response_audio_chunk_send_delay_ms")} />
-      </section>
-      <section className="panel span-6">
-        <span className="eyebrow"><Settings2 size={15} /> TTS 底层</span>
-        <h2>Qwen 运行选项</h2>
-        <EditableField label={<TooltipLabel label="推理后端" tip="qwentts.cpp 使用的运行后端，例如 Vulkan0 或 CPU。改动通常需要重建 TTS 组件。" />} value={values.qwentts_cpp_backend} onSave={(v) => patch({ qwentts_cpp_backend: v })} onReset={showReset("qwentts_cpp_backend")} />
-        <EditableField label={<TooltipLabel label="默认 seed" tip="默认音色模式下的固定随机种子；改变它会改变默认声线的细微气质。" />} value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} onReset={showReset("qwentts_cpp_seed")} />
-        <EditableField label={<TooltipLabel label="最大音频帧" tip="传给 qwentts.cpp 的 --max-new。数值越小越不容易生成超长异常音频，也更快；太小会截短长回复。" />} value={values.qwentts_cpp_max_new_frames ?? 512} onSave={(v) => patch({ qwentts_cpp_max_new_frames: Number(v) })} onReset={showReset("qwentts_cpp_max_new_frames")} />
-      </section>
+          <div className="advanced-fields">
+            <EditableField label={<TooltipLabel label="保留消息数" tip="STS 每次请求 LLM 时携带的本地短期历史条数；不影响人格提示词或长期记忆。" />} value={values.hermes_history_max_messages ?? 300} onSave={(v) => patch({ hermes_history_max_messages: Number(v) })} onReset={showReset("hermes_history_max_messages")} />
+            <EditableField label={<TooltipLabel label="保留字符数" tip="短期历史的字符上限，越大越能保持上下文，但请求更重。" />} value={values.hermes_history_max_chars ?? 65536} onSave={(v) => patch({ hermes_history_max_chars: Number(v) })} onReset={showReset("hermes_history_max_chars")} />
+            <EditableField label={<TooltipLabel label="空闲清空（秒）" tip="超过这个时间没有调用 LLM，就自动开启新的短期上下文。" />} value={values.hermes_history_idle_reset_seconds ?? 14400} onSave={(v) => patch({ hermes_history_idle_reset_seconds: Number(v) })} onReset={showReset("hermes_history_idle_reset_seconds")} />
+          </div>
+          <p className="muted">只影响语音短期上下文；长期记忆和角色设定不会被清空。</p>
+        </section>
+
+        <RuntimeConversationPreview onReset={resetContext} />
+      </div>
+
+      <div className="advanced-secondary">
+        <section className="panel">
+          <span className="eyebrow"><Mic2 size={15} /> 听音与打断</span>
+          <h2>一句话何时结束</h2>
+          <div className="advanced-fields">
+            <EditableField label={<TooltipLabel label="VAD 阈值" tip="判断用户是否正在说话的灵敏度。数值越高越不容易误触发，也越可能漏掉轻声。" />} value={values.vad_threshold} onSave={(v) => patch({ vad_threshold: Number(v) })} onReset={showReset("vad_threshold")} />
+            <EditableField label={<TooltipLabel label="最短静音（秒）" tip="用户停顿超过这个时间后，系统认为一句话结束并开始处理。" />} value={values.vad_min_silence_seconds} onSave={(v) => patch({ vad_min_silence_seconds: Number(v) })} onReset={showReset("vad_min_silence_seconds")} />
+          </div>
+          <p className="muted">{busy === "saving" ? "正在保存..." : "这组参数决定麦克风输入何时被提交给 STT/LLM。"}</p>
+        </section>
+
+        <section className="panel">
+          <span className="eyebrow"><Gauge size={15} /> 等待与播报</span>
+          <h2>回答慢时怎么处理</h2>
+          <div className="switch-grid">
+            <label className="field">
+              <TooltipLabel label="Hermes 快答" tip="给 Hermes Agent 请求加 /no_think，让语音回答更快更短。只影响 Hermes Agent 路径。" />
+              <SwitchControl
+                checked={values.hermes_voice_no_think !== false}
+                onChange={(checked) => patch({ hermes_voice_no_think: checked })}
+                onLabel="开启"
+                offLabel="关闭"
+              />
+            </label>
+            <label className="field">
+              <TooltipLabel label="LLM 流式首句" tip="LLM 生成出完整第一句后立即交给 TTS 播报；如果模型转为工具调用，会回退到完整工具链。" />
+              <SwitchControl
+                checked={values.llm_streaming_enabled !== false}
+                onChange={(checked) => patch({ llm_streaming_enabled: checked })}
+                onLabel="开启"
+                offLabel="关闭"
+              />
+            </label>
+          </div>
+          <div className="advanced-fields">
+            <EditableField label={<TooltipLabel label="最大等待（秒）" tip="超过这个时间还没有 LLM 结果时，系统会使用兜底回答结束本轮。" />} value={values.hermes_agent_max_wait_seconds ?? 60} onSave={(v) => patch({ hermes_agent_max_wait_seconds: Number(v) })} onReset={showReset("hermes_agent_max_wait_seconds")} />
+            <EditableField label={<TooltipLabel label="等待提示延迟（秒）" tip="开启等待语音提示时，LLM 超过这个时间未返回才会播第一句等待提示。" />} value={values.hermes_first_filler_delay_seconds} onSave={(v) => patch({ hermes_first_filler_delay_seconds: Number(v) })} onReset={showReset("hermes_first_filler_delay_seconds")} />
+            <EditableField label={<TooltipLabel label="等待提示次数" tip="0 表示不播等待提示；1 表示最多播一句。默认关闭以减少打扰。" />} value={values.hermes_max_fillers ?? 0} onSave={(v) => patch({ hermes_max_fillers: Number(v) })} onReset={showReset("hermes_max_fillers")} />
+            <EditableField label={<TooltipLabel label="首段最少字符" tip="第一句达到这个长度就会先合成，数值越小越快出声。" />} value={values.tts_segment_min_chars ?? 8} onSave={(v) => patch({ tts_segment_min_chars: Number(v) })} onReset={showReset("tts_segment_min_chars")} />
+            <EditableField label={<TooltipLabel label="每段最多字符" tip="TTS 分段长度。越短越快出声，越长越接近完整语气。" />} value={values.tts_segment_max_chars ?? 48} onSave={(v) => patch({ tts_segment_max_chars: Number(v) })} onReset={showReset("tts_segment_max_chars")} />
+            <EditableField label={<TooltipLabel label="音频上限（秒）" tip="防止 Qwen3TTS 偶发生成超长异常音频；超过会裁剪并写入日志。" />} value={values.tts_max_audio_seconds ?? 18} onSave={(v) => patch({ tts_max_audio_seconds: Number(v) })} onReset={showReset("tts_max_audio_seconds")} />
+            <EditableField label={<TooltipLabel label="发包间隔（毫秒）" tip="服务器发送音频包之间的等待。0 表示尽快交给客户端缓冲播放。" />} value={values.response_audio_chunk_send_delay_ms ?? 0} onSave={(v) => patch({ response_audio_chunk_send_delay_ms: Number(v) })} onReset={showReset("response_audio_chunk_send_delay_ms")} />
+          </div>
+        </section>
+
+        <section className="panel">
+          <span className="eyebrow"><Settings2 size={15} /> TTS 底层</span>
+          <h2>Qwen 运行选项</h2>
+          <div className="advanced-fields">
+            <EditableField label={<TooltipLabel label="推理后端" tip="qwentts.cpp 使用的运行后端，例如 Vulkan0 或 CPU。改动通常需要重建 TTS 组件。" />} value={values.qwentts_cpp_backend} onSave={(v) => patch({ qwentts_cpp_backend: v })} onReset={showReset("qwentts_cpp_backend")} />
+            <EditableField label={<TooltipLabel label="默认 seed" tip="默认音色模式下的固定随机种子；改变它会改变默认声线的细微气质。" />} value={values.qwentts_cpp_seed ?? 42} onSave={(v) => patch({ qwentts_cpp_seed: Number(v) })} onReset={showReset("qwentts_cpp_seed")} />
+            <EditableField label={<TooltipLabel label="最大音频帧" tip="传给 qwentts.cpp 的 --max-new。数值越小越不容易生成超长异常音频，也更快；太小会截短长回复。" />} value={values.qwentts_cpp_max_new_frames ?? 512} onSave={(v) => patch({ qwentts_cpp_max_new_frames: Number(v) })} onReset={showReset("qwentts_cpp_max_new_frames")} />
+          </div>
+        </section>
+      </div>
     </div>
+  );
+}
+
+function RuntimeConversationPreview({ onReset }: { onReset: () => Promise<void> }) {
+  const [active, setActive] = useState<ConversationSummary | null>(null);
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [resetting, setResetting] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const activeData = await api<ConversationSummary>("/api/conversations/active");
+      const nextActive = activeData && activeData.id ? activeData : null;
+      setActive(nextActive);
+      if (nextActive?.id) {
+        const data = await api<{ messages: ConversationMessage[] }>(`/api/conversations/${encodeURIComponent(nextActive.id)}/messages?limit=8`);
+        setMessages(data.messages || []);
+      } else {
+        setMessages([]);
+      }
+    } catch {
+      setActive(null);
+      setMessages([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      await onReset();
+      await load();
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <section className="panel runtime-preview">
+      <div className="panel-head">
+        <div>
+          <span className="eyebrow"><MessageSquare size={15} /> 当前语音上下文</span>
+          <h2>{active?.title || "最近对话预览"}</h2>
+        </div>
+        <button className="icon-btn" onClick={load} title="刷新"><RefreshCw size={16} /></button>
+      </div>
+      <div className="runtime-preview-meta">
+        <span>{active ? `${active.message_count ?? messages.length} 条消息` : "尚未开始"}</span>
+        <span>{active?.updated_at ? timeAgo(active.updated_at) : "无活动"}</span>
+      </div>
+      {loading ? (
+        <p className="muted">正在读取当前上下文...</p>
+      ) : messages.length === 0 ? (
+        <p className="muted">第一次语音问答后，这里会显示最近几条上下文。</p>
+      ) : (
+        <div className="runtime-message-list">
+          {messages.slice(-6).map((message, index) => (
+            <div key={message.id ?? `${message.role}-${index}`} className={`runtime-message role-${message.role}`}>
+              <strong>{roleLabel(message.role)}</strong>
+              <p>{shortText(message.content, 120)}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      <button className="secondary runtime-reset" onClick={handleReset} disabled={resetting || !active}>
+        <RefreshCw size={15} />开启新上下文
+      </button>
+    </section>
   );
 }
 
@@ -1848,82 +1942,6 @@ function LlmProfiles({
         {diagnostic && <span className="diagnostic-note">{diagnostic}</span>}
       </div>
     </div>
-  );
-}
-
-function ToolsPanel({ tools }: { tools?: { local: ToolSnapshot[]; client: ToolSnapshot[] } }) {
-  const local = tools?.local || [];
-  const client = tools?.client || [];
-  return (
-    <section className="panel span-12">
-      <div className="panel-head">
-        <div>
-          <span className="eyebrow"><Wrench size={15} /> Tools</span>
-          <h2>当前可调用工具</h2>
-        </div>
-        <span className="subtle">{local.length} 系统 / {client.length} 客户端</span>
-      </div>
-      <div className="tools-grid">
-        <ToolGroup title="系统工具" tools={local} empty="系统工具未启用" />
-        <ToolGroup title="客户端工具" tools={client} empty="等待 Reachy App 注入 tools" />
-      </div>
-    </section>
-  );
-}
-
-function ToolGroup({ title, tools, empty }: { title: string; tools: ToolSnapshot[]; empty: string }) {
-  return (
-    <div className="tool-group">
-      <strong>{title}</strong>
-      {tools.length === 0 ? (
-        <span className="muted">{empty}</span>
-      ) : (
-        tools.map((tool) => (
-          <div className="tool-row" key={`${tool.mode}-${tool.name}`}>
-            <div>
-              <strong>{tool.name}</strong>
-              <span>{tool.description || "无描述"}</span>
-            </div>
-            <em>{tool.parameters_count} 参数</em>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-function WebSearchDiagnostics({ state }: { state: AdminState }) {
-  const [result, setResult] = useState("");
-  const [busy, setBusy] = useState(false);
-  const web = state.web_search || {};
-  const runTest = async () => {
-    setBusy(true);
-    try {
-      const data = await api<{ ok: boolean; ms?: number; error?: string; hits?: any[]; state?: any }>("/api/diagnostics/web-search", { method: "POST" });
-      setResult(data.ok ? `搜索可用 · ${data.ms ?? 0}ms · ${data.hits?.length ?? 0} 条` : `搜索不可用：${data.error || "无结果"}`);
-    } catch (err) {
-      setResult(`搜索不可用：${errorMessage(err)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <section className="panel span-6">
-      <div className="panel-head">
-        <div>
-          <span className="eyebrow"><Wrench size={15} /> Web Search</span>
-          <h2>联网搜索诊断</h2>
-        </div>
-        <button className="secondary" onClick={runTest} disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Activity size={15} />}{busy ? "测试中" : "测试"}</button>
-      </div>
-      <div className="diag-list">
-        <div><strong>当前链路</strong><span>{web.provider || "noop"}</span></div>
-        <div><strong>配置顺序</strong><span>{(web.configured_providers || []).join(" → ") || "未配置"}</span></div>
-        <div><strong>最近成功</strong><span>{web.recent_success || "暂无"}</span></div>
-        <div><strong>最近错误</strong><span>{web.last_error || "无"}</span></div>
-      </div>
-      {result && <span className="diagnostic-note">{result}</span>}
-    </section>
   );
 }
 
@@ -2298,159 +2316,8 @@ function shortText(text: string, max = 96): string {
   return `${compact.slice(0, max).trim()}...`;
 }
 
-function ConversationCard() {
-  const [active, setActive] = useState<ConversationSummary | null>(null);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [selectedId, setSelectedId] = useState("");
-  const [messages, setMessages] = useState<ConversationMessage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [ending, setEnding] = useState(false);
-  const [msg, setMsg] = useState("");
-
-  const fetchState = useCallback(async () => {
-    try {
-      const [activeData, list] = await Promise.all([
-        api<ConversationSummary>("/api/conversations/active"),
-        api<ConversationSummary[]>("/api/conversations?limit=20"),
-      ]);
-      const nextActive = activeData && activeData.id ? activeData : null;
-      setActive(nextActive);
-      setConversations(Array.isArray(list) ? list : []);
-      setSelectedId((current) => current || nextActive?.id || list?.[0]?.id || "");
-    } catch {
-      setActive(null);
-      setConversations([]);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchState();
-    const id = window.setInterval(fetchState, 15000);
-    return () => window.clearInterval(id);
-  }, [fetchState]);
-
-  useEffect(() => {
-    if (!selectedId) {
-      setMessages([]);
-      return;
-    }
-    api<{ messages: ConversationMessage[] }>(`/api/conversations/${encodeURIComponent(selectedId)}/messages?limit=80`)
-      .then((data) => setMessages(data.messages || []))
-      .catch(() => setMessages([]));
-  }, [selectedId]);
-
-  const handleEnd = async () => {
-    setEnding(true);
-    try {
-      const ended = await api<{ id?: string }>("/api/conversations/end", { method: "POST" });
-      await fetchState();
-      setSelectedId(ended.id || "");
-      setMsg("已开启新的语音上下文");
-      window.setTimeout(() => setMsg(""), 2000);
-    } catch {
-      setMsg("操作失败");
-      window.setTimeout(() => setMsg(""), 2000);
-    }
-    setEnding(false);
-  };
-
-  const selected = conversations.find((item) => item.id === selectedId) || active;
-
-  if (loading) {
-    return (
-      <div className="grid conversation-page span-12">
-        <section className="panel span-12"><p className="muted">正在读取会话上下文...</p></section>
-      </div>
-    );
-  }
-
-  return (
-    <div className="grid conversation-page span-12">
-      <section className="panel span-12 conversation-hero">
-        <div>
-          <span className="eyebrow"><MessageSquare size={15} /> Context</span>
-          <h2>语音上下文，而不是聊天收件箱</h2>
-          <p className="muted">这个页面只处理一件事：当助手被旧对话影响时，查看当前短期上下文，并一键开启新上下文。</p>
-        </div>
-        <div className="conversation-actions">
-          {msg && <span className="notice inline">{msg}</span>}
-          <button className="primary" onClick={handleEnd} disabled={ending || !active}>
-            <RefreshCw size={16} />{ending ? "处理中" : "开启新上下文"}
-          </button>
-        </div>
-      </section>
-
-      <section className="stat-strip span-12 conversation-stats">
-        <Kpi label="当前消息" value={String(active?.message_count ?? 0)} hint={active ? "本地短期上下文" : "尚未开始"} />
-        <Kpi label="最近活动" value={active?.updated_at ? timeAgo(active.updated_at) : "--"} hint={active?.title || "无活动会话"} />
-        <Kpi label="历史会话" value={String(conversations.length)} hint="最近 20 条" />
-        <Kpi label="选中状态" value={selected?.status === "active" ? "活动中" : selected ? "已归档" : "--"} hint={selected?.ended_reason ? reasonLabel(selected.ended_reason) : "当前查看对象"} />
-      </section>
-
-      <section className="panel span-5 conversation-list-panel">
-        <div className="panel-head">
-          <div>
-            <span className="eyebrow"><Clock3 size={15} /> Recent</span>
-            <h2>最近上下文</h2>
-          </div>
-          <button className="icon-btn" onClick={fetchState} title="刷新"><RefreshCw size={16} /></button>
-        </div>
-        <div className="conversation-list">
-          {conversations.length === 0 && <p className="muted">暂无会话。第一次语音问答后会自动出现。</p>}
-          {conversations.map((conversation) => (
-            <button
-              key={conversation.id}
-              className={conversation.id === selectedId ? "conversation-row selected" : "conversation-row"}
-              onClick={() => setSelectedId(conversation.id)}
-            >
-              <div>
-                <strong>{conversation.title || "无标题上下文"}</strong>
-                <span>{conversation.message_count ?? 0} 条 · {conversation.updated_at ? timeAgo(conversation.updated_at) : "未知时间"}</span>
-              </div>
-              <em>{conversation.status === "active" ? "当前" : reasonLabel(conversation.ended_reason)}</em>
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel span-7 conversation-detail-panel">
-        <div className="panel-head">
-          <div>
-            <span className="eyebrow"><Bot size={15} /> Preview</span>
-            <h2>{selected?.title || "选择一个上下文"}</h2>
-          </div>
-          {selected && <span className="subtle">{selected.message_count ?? messages.length} 条消息</span>}
-        </div>
-        {!selected ? (
-          <p className="muted">左侧选择一个上下文查看摘要。</p>
-        ) : messages.length === 0 ? (
-          <p className="muted">这个上下文还没有可显示的消息。</p>
-        ) : (
-          <div className="conversation-messages">
-            {messages.map((message, index) => (
-              <div key={message.id ?? `${message.role}-${index}`} className={`conversation-message role-${message.role}`}>
-                <strong>{roleLabel(message.role)}</strong>
-                <p>{message.content}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
 function roleLabel(role: string) {
   return ({ system: "系统", user: "用户", assistant: "助手", tool: "工具" } as Record<string, string>)[role] || role;
-}
-
-function reasonLabel(reason?: string) {
-  if (!reason) return "归档";
-  if (reason === "admin_end" || reason === "admin_reset") return "手动";
-  if (reason === "superseded") return "新会话";
-  if (reason.startsWith("idle_")) return "空闲";
-  return reason;
 }
 
 function MemoryPanel({
