@@ -264,14 +264,19 @@ function Dashboard({
   const latest = state.metrics.find((item) => item.kind === "tts_preview")?.value;
   const turns = useMemo(() => turnStats(state.metrics), [state.metrics]);
   const currentPersona = state.personas.find((p) => p.id === state.settings.values.sts_persona_preset);
-  const qwenReady = Object.values(state.qwen.models).filter((m) => m.installed).length;
   const [fullscreen, setFullscreen] = useState(false);
-  const previewEvents = state.metrics.filter((item) => item.kind === "tts_preview").length;
   const rawWaveStyle = state.settings.values.dashboard_wave_style || "scanner";
   const waveStyle = waveStyles.some((item) => item.id === rawWaveStyle) ? rawWaveStyle : "scanner";
   const waveIndex = Math.max(0, waveStyles.findIndex((item) => item.id === waveStyle));
-  const personaSummary = shortText(state.health.persona_prompt || "", 42);
+  const personaSummary = shortText(state.health.persona_prompt || "", 68);
   const healthKeys = ["llm", "stt", "tts", "tools", "memory", "web_search"];
+  const healthItems = healthKeys.map((key) => ({ key, label: diagnosticLabel(key), item: state.diagnostics?.[key] }));
+  const healthProblems = healthItems.filter(({ item }) => item?.status && item.status !== "ok");
+  const healthReady = healthProblems.length === 0;
+  const activeConversation = state.conversation?.active;
+  const contextLabel = activeConversation
+    ? `${activeConversation.message_count ?? 0} 条消息 · ${activeConversation.updated_at ? timeAgo(activeConversation.updated_at) : "刚刚"}`
+    : "尚未开始";
   const selectWave = (id: string) => patch({ dashboard_wave_style: id });
   const resetContext = async () => {
     await api("/api/llm/context/reset", { method: "POST" });
@@ -281,13 +286,13 @@ function Dashboard({
     <div className={fullscreen ? "cockpit fullscreen" : "cockpit"}>
       <motion.section className="cockpit-hero panel" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
         <div className="cockpit-status">
-          <span className="eyebrow"><Bot size={15} /> 当前助手</span>
+          <span className="eyebrow"><Bot size={15} /> 今日助手</span>
           <h2>{currentPersona?.name ?? "自定义角色"}</h2>
           <p title={state.health.persona_prompt}>{personaSummary || "保持当前人格、声线和连接状态。"}</p>
           <div className="cockpit-now">
             <Chip icon={<Mic2 size={14} />} label={voiceLabel(state)} />
             <Chip icon={<Cpu size={14} />} label={state.health.tts_provider === "qwen3tts" ? `Qwen3TTS · ${state.health.qwen_backend || "CPU"}` : "Kokoro 回退"} />
-            <Chip icon={<Gauge size={14} />} label={latest?.rtf ? `RTF ${Number(latest.rtf).toFixed(2)}` : "等待试听数据"} />
+            <Chip icon={<Gauge size={14} />} label={healthReady ? "系统就绪" : `${healthProblems.length} 项需注意`} />
           </div>
         </div>
         <div className="cockpit-wave">
@@ -307,25 +312,20 @@ function Dashboard({
             ))}
           </div>
         </div>
-        <div className="cockpit-health-dock">
-          <div>
-            <span className="eyebrow"><CheckCircle2 size={15} /> 链路状态</span>
-            <p>判断语音助手现在是否能听、想、说和调用能力。</p>
+        <div className="cockpit-daily-line">
+          <div className={healthReady ? "daily-state ok" : "daily-state warn"}>
+            <CheckCircle2 size={17} />
+            <strong>{healthReady ? "语音链路正常" : "需要看一眼配置"}</strong>
+            <span>{healthReady ? "全部核心状态可用" : healthProblems.map(({ label }) => label).join("、")}</span>
           </div>
-          <button className="secondary icon-compact" onClick={goAdvanced} title="排障"><SlidersHorizontal size={16} /></button>
-          <div className="health-grid">
-          {healthKeys.map((key) => (
-            <HealthTile key={key} label={diagnosticLabel(key)} item={state.diagnostics?.[key]} />
-          ))}
-          </div>
+          <button className="secondary icon-compact" onClick={goAdvanced} title="查看运行参数"><SlidersHorizontal size={16} /></button>
         </div>
       </motion.section>
 
-      <section className="stat-strip">
-        <Kpi label="已运行" value={formatDuration(state.runtime?.uptime_seconds ?? 0)} hint="本次服务启动后" />
-        <Kpi label="对话回合" value={String(turns.total)} hint={`${turns.completed} 完成 / ${turns.cancelled} 取消`} />
+      <section className="daily-strip">
         <Kpi label="首声均值" value={turns.avgFirstAudio ? `${turns.avgFirstAudio}ms` : "--"} hint="真实 turn 到首个音频包" />
-        <Kpi label="Qwen 模型" value={`${qwenReady}/4`} hint={`${state.health.sample_rate / 1000} kHz 实时输出`} />
+        <Kpi label="对话回合" value={String(turns.total)} hint={`${turns.completed} 完成 / ${turns.cancelled} 取消`} />
+        <Kpi label="当前上下文" value={activeConversation ? `${activeConversation.message_count ?? 0}` : "--"} hint={contextLabel} />
       </section>
 
       <section className="panel signal-board">
@@ -353,27 +353,17 @@ function Dashboard({
         </ResponsiveContainer>
       </section>
 
-      <section className="quick-actions cockpit-ops">
+      <section className="daily-actions">
         <div className="action-card context-card">
           <MessageSquare size={21} />
           <strong>当前上下文</strong>
-          <span>{state.conversation?.active ? `${state.conversation.active.message_count ?? 0} 条 · ${state.conversation.active.updated_at ? timeAgo(state.conversation.active.updated_at) : "未知时间"}` : "尚未开始语音上下文"}</span>
+          <span>{contextLabel}</span>
           <button className="secondary" onClick={resetContext} disabled={!state.conversation?.reset_available}><RefreshCw size={15} />开启新上下文</button>
         </div>
-        <button className="action-card muted-action" onClick={goAdvanced}>
-          <Gauge size={21} />
-          <strong>最近异常/慢点</strong>
-          <span>{state.diagnostics?.recent?.message || "暂无语音回合数据"}</span>
-        </button>
         <button className="action-card" onClick={goStudio}>
           <AudioLines size={21} />
           <strong>调角色声线</strong>
           <span>音色工坊、A/B seed、完整角色</span>
-        </button>
-        <button className="action-card muted-action" onClick={() => setFullscreen(true)}>
-          <Clock3 size={21} />
-          <strong>近期节奏</strong>
-          <span>首声、取消、试听事件 {previewEvents}</span>
         </button>
       </section>
     </div>
@@ -2063,18 +2053,6 @@ function SwitchControl({
 
 function Kpi({ label, value, hint }: { label: string; value: string; hint: string }) {
   return <div className="kpi"><span>{label}</span><strong>{value}</strong><em>{hint}</em></div>;
-}
-
-function HealthTile({ label, item }: { label: string; item?: DiagnosticItem }) {
-  const status = item?.status || "warn";
-  return (
-    <div className={`health-tile status-${status}`}>
-      <StatusDot ok={status === "ok"} />
-      <strong>{label}</strong>
-      <span>{item?.message || "暂无状态"}</span>
-      {item?.last_error && <em>{item.last_error}</em>}
-    </div>
-  );
 }
 
 function diagnosticLabel(key: string) {
