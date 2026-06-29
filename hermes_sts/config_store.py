@@ -113,6 +113,25 @@ ENV_TO_ATTR: dict[str, str] = {
     "QWENTTS_CPP_SEED": "qwentts_cpp_seed",
     "QWENTTS_CPP_MAX_NEW_FRAMES": "qwentts_cpp_max_new_frames",
     "QWENTTS_CPP_TIMEOUT_SECONDS": "qwentts_cpp_timeout_seconds",
+    "OMNIVOICE_BIN": "omnivoice_bin",
+    "OMNIVOICE_CODEC_BIN": "omnivoice_codec_bin",
+    "OMNIVOICE_MODEL": "omnivoice_model",
+    "OMNIVOICE_CODEC": "omnivoice_codec",
+    "OMNIVOICE_VOICE_MODE": "omnivoice_voice_mode",
+    "OMNIVOICE_VOICE_DESIGN": "omnivoice_voice_design",
+    "OMNIVOICE_CLONE_VOICE_ID": "omnivoice_clone_voice_id",
+    "OMNIVOICE_BACKEND": "omnivoice_backend",
+    "OMNIVOICE_LANG": "omnivoice_lang",
+    "OMNIVOICE_REF_WAV": "omnivoice_ref_wav",
+    "OMNIVOICE_REF_TEXT": "omnivoice_ref_text",
+    "OMNIVOICE_REF_RVQ": "omnivoice_ref_rvq",
+    "OMNIVOICE_FORMAT": "omnivoice_format",
+    "OMNIVOICE_EXTRA_ARGS": "omnivoice_extra_args",
+    "OMNIVOICE_SEED": "omnivoice_seed",
+    "OMNIVOICE_DURATION_SECONDS": "omnivoice_duration_seconds",
+    "OMNIVOICE_CHUNK_DURATION_SECONDS": "omnivoice_chunk_duration_seconds",
+    "OMNIVOICE_CHUNK_THRESHOLD_SECONDS": "omnivoice_chunk_threshold_seconds",
+    "OMNIVOICE_TIMEOUT_SECONDS": "omnivoice_timeout_seconds",
     "STS_VAD_PROVIDER": "vad_provider",
     "VAD_ENERGY_THRESHOLD": "vad_energy_threshold",
     "VAD_START_MS": "vad_start_ms",
@@ -284,6 +303,7 @@ class ConfigStore:
                     ref_text text not null default '',
                     ref_spk text not null default '',
                     ref_rvq text not null default '',
+                    omnivoice_ref_rvq text not null default '',
                     updated_at real not null
                 );
                 create table if not exists llm_profiles (
@@ -322,6 +342,8 @@ class ConfigStore:
                 conn.execute("alter table voice_profiles add column tags text not null default ''")
             if "note" not in columns:
                 conn.execute("alter table voice_profiles add column note text not null default ''")
+            if "omnivoice_ref_rvq" not in columns:
+                conn.execute("alter table voice_profiles add column omnivoice_ref_rvq text not null default ''")
         self.ensure_defaults()
 
     def ensure_defaults(self) -> None:
@@ -384,6 +406,11 @@ class ConfigStore:
                 "qwentts_cpp_seed": 42,
                 "qwentts_cpp_max_new_frames": 512,
                 "qwentts_cpp_extra_args": FAST_QWENTTS_EXTRA_ARGS,
+                "omnivoice_voice_mode": "auto",
+                "omnivoice_seed": 42,
+                "omnivoice_duration_seconds": 0.0,
+                "omnivoice_chunk_duration_seconds": 15.0,
+                "omnivoice_chunk_threshold_seconds": 30.0,
                 "dashboard_wave_style": "scanner",
                 "hermes_max_fillers": 0,
             }.items():
@@ -576,6 +603,27 @@ class ConfigStore:
             kwargs["qwentts_cpp_ref_text"] = ""
             kwargs["qwentts_cpp_ref_spk"] = ""
             kwargs["qwentts_cpp_ref_rvq"] = ""
+        omni_mode = str(kwargs.get("omnivoice_voice_mode", base.omnivoice_voice_mode) or "auto").strip().lower()
+        kwargs["omnivoice_voice_mode"] = omni_mode
+        if omni_mode == "design":
+            kwargs["omnivoice_ref_wav"] = ""
+            kwargs["omnivoice_ref_text"] = ""
+            kwargs["omnivoice_ref_rvq"] = ""
+        elif omni_mode == "clone":
+            clone = self.voice_profile(str(kwargs.get("omnivoice_clone_voice_id", "")))
+            if clone and _clone_has_audio_refs(clone):
+                kwargs["omnivoice_ref_wav"] = clone.get("ref_wav", "")
+                kwargs["omnivoice_ref_text"] = clone.get("ref_text", "")
+                kwargs["omnivoice_ref_rvq"] = clone.get("omnivoice_ref_rvq", "") or ""
+            else:
+                kwargs["omnivoice_ref_wav"] = ""
+                kwargs["omnivoice_ref_text"] = ""
+                kwargs["omnivoice_ref_rvq"] = ""
+        else:
+            kwargs["omnivoice_voice_mode"] = "auto"
+            kwargs["omnivoice_ref_wav"] = ""
+            kwargs["omnivoice_ref_text"] = ""
+            kwargs["omnivoice_ref_rvq"] = ""
         return Settings(**kwargs)
 
     def settings_dict(self) -> dict[str, Any]:
@@ -599,7 +647,7 @@ class ConfigStore:
             for key, value in values.items():
                 attr = ENV_TO_ATTR.get(key, key)
                 normalized[attr] = value
-            normalized = self._with_qwen_voice_derivatives(conn, normalized)
+            normalized = self._with_voice_derivatives(conn, normalized)
             for attr, value in normalized.items():
                 conn.execute(
                     "insert or replace into settings values (?, ?, ?)",
@@ -614,6 +662,10 @@ class ConfigStore:
             normalized.get("tts_voice_source", "<N/A>"),
         )
         return normalized
+
+    def _with_voice_derivatives(self, conn: sqlite3.Connection, normalized: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._with_qwen_voice_derivatives(conn, normalized)
+        return self._with_omnivoice_voice_derivatives(conn, normalized)
 
     def _with_qwen_voice_derivatives(self, conn: sqlite3.Connection, normalized: dict[str, Any]) -> dict[str, Any]:
         qwen_keys = {
@@ -663,6 +715,38 @@ class ConfigStore:
         else:
             derived["qwentts_cpp_voice_mode"] = "default"
             derived["qwentts_cpp_model"] = base_model
+        return {**normalized, **derived}
+
+    def _with_omnivoice_voice_derivatives(self, conn: sqlite3.Connection, normalized: dict[str, Any]) -> dict[str, Any]:
+        omni_keys = {
+            "omnivoice_voice_mode",
+            "omnivoice_voice_design",
+            "omnivoice_clone_voice_id",
+        }
+        if not (set(normalized) & omni_keys):
+            return normalized
+
+        rows = conn.execute("select key, value_json from settings").fetchall()
+        current = {row["key"]: json.loads(row["value_json"]) for row in rows}
+        merged = {**current, **normalized}
+        mode = str(merged.get("omnivoice_voice_mode") or "auto").strip().lower()
+        derived = {
+            "omnivoice_ref_wav": "",
+            "omnivoice_ref_text": "",
+            "omnivoice_ref_rvq": "",
+        }
+        if mode == "clone":
+            clone_id = str(merged.get("omnivoice_clone_voice_id") or "")
+            clone = conn.execute("select * from voice_profiles where id=?", (clone_id,)).fetchone()
+            if clone:
+                clone_dict = dict(clone)
+                derived["omnivoice_ref_wav"] = clone_dict.get("ref_wav", "") or ""
+                derived["omnivoice_ref_text"] = clone_dict.get("ref_text", "") or ""
+                derived["omnivoice_ref_rvq"] = clone_dict.get("omnivoice_ref_rvq", "") or ""
+        elif mode == "design":
+            derived["omnivoice_voice_design"] = str(merged.get("omnivoice_voice_design") or "")
+        else:
+            derived["omnivoice_voice_mode"] = "auto"
         return {**normalized, **derived}
 
     def persona_profiles(self) -> list[dict[str, Any]]:
@@ -725,8 +809,8 @@ class ConfigStore:
             conn.execute(
                 """
                 insert or replace into voice_profiles
-                (id, name, provider, mode, seed, tags, note, speaker, design_prompt, ref_wav, ref_text, ref_spk, ref_rvq, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, provider, mode, seed, tags, note, speaker, design_prompt, ref_wav, ref_text, ref_spk, ref_rvq, omnivoice_ref_rvq, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile["id"],
@@ -742,6 +826,7 @@ class ConfigStore:
                     profile.get("ref_text", ""),
                     profile.get("ref_spk", ""),
                     profile.get("ref_rvq", ""),
+                    profile.get("omnivoice_ref_rvq", ""),
                     time.time(),
                 ),
             )

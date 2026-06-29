@@ -29,7 +29,7 @@ from hermes_sts.config_store import ConfigStore
 from hermes_sts.conversation_store import ConversationStore
 from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, LLMToolCallDetected, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
-from hermes_sts.tts import QwenTtsCpp, TtsVoice, _stdin_text, build_tts
+from hermes_sts.tts import OmniVoiceEngine, QwenTtsCpp, TtsVoice, _stdin_text, build_tts
 from hermes_sts.tools import ToolRegistry
 from hermes_sts.vad import EnergyVad, build_vad
 
@@ -895,6 +895,57 @@ class CoreTests(unittest.TestCase):
         self.assertIn("--ref-wav", ref_wav_cmd)
         self.assertIn("/tmp/ref.wav", ref_wav_cmd)
 
+    def test_omnivoice_command_supports_auto_design_and_encoded_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_bin = tmp_path / "omnivoice-tts"
+            model = tmp_path / "omnivoice-base-Q8_0.gguf"
+            codec = tmp_path / "omnivoice-tokenizer-F32.gguf"
+            for path in (fake_bin, model, codec):
+                path.touch()
+            settings = Settings(
+                tts_provider="omnivoice",
+                omnivoice_bin=str(fake_bin),
+                omnivoice_model=str(model),
+                omnivoice_codec=str(codec),
+                omnivoice_lang="Chinese",
+                omnivoice_seed=77,
+                omnivoice_chunk_duration_seconds=12.5,
+                omnivoice_chunk_threshold_seconds=25.0,
+            )
+            provider = OmniVoiceEngine(settings)
+
+            auto_cmd = provider._command(tmp_path / "auto.wav", voice=TtsVoice.from_settings(settings))
+            design_cmd = provider._command(
+                tmp_path / "design.wav",
+                voice=TtsVoice(engine="omnivoice", mode="design", instruct="warm clear voice"),
+            )
+            clone_cmd = provider._command(
+                tmp_path / "clone.wav",
+                voice=TtsVoice(
+                    engine="omnivoice",
+                    mode="clone",
+                    ref_wav="/tmp/ref.wav",
+                    ref_text="/tmp/ref.txt",
+                    omnivoice_ref_rvq="/tmp/ref.rvq",
+                ),
+            )
+
+        self.assertIn("--lang", auto_cmd)
+        self.assertIn("Chinese", auto_cmd)
+        self.assertIn("--seed", auto_cmd)
+        self.assertIn("77", auto_cmd)
+        self.assertIn("--chunk-duration", auto_cmd)
+        self.assertIn("12.5", auto_cmd)
+        self.assertIn("--instruct", design_cmd)
+        self.assertIn("warm clear voice", design_cmd)
+        self.assertIn("--ref-rvq", clone_cmd)
+        self.assertIn("/tmp/ref.rvq", clone_cmd)
+        self.assertIn("--ref-text", clone_cmd)
+        self.assertIn("/tmp/ref.txt", clone_cmd)
+        self.assertNotIn("--ref-wav", clone_cmd)
+        self.assertNotIn("/tmp/ref.wav", clone_cmd)
+
     def test_qwen3tts_stdin_text_is_newline_terminated(self) -> None:
         self.assertEqual(_stdin_text("你好"), "你好\n".encode("utf-8"))
         self.assertEqual(_stdin_text("你好\n"), "你好\n".encode("utf-8"))
@@ -1124,8 +1175,10 @@ class CoreTests(unittest.TestCase):
         }
 
         self.assertFalse(_requires_rebuild(hot_keys))
+        self.assertFalse(_requires_rebuild({"omnivoice_voice_mode": "design", "omnivoice_seed": 99}))
         self.assertTrue(_requires_rebuild({"tts_provider": "sherpa_kokoro"}))
         self.assertTrue(_requires_rebuild({"qwentts_cpp_bin": "/tmp/qwen-tts"}))
+        self.assertTrue(_requires_rebuild({"omnivoice_bin": "/tmp/omnivoice-tts"}))
 
     def test_config_store_falls_back_to_base_when_optional_qwen_voice_model_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1179,6 +1232,48 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(settings.qwentts_cpp_ref_wav, "")
         self.assertEqual(settings.qwentts_cpp_ref_spk, "")
 
+    def test_config_store_maps_omnivoice_modes_without_touching_qwen_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "settings.sqlite3"
+            ref_wav = Path(tmp) / "reference.wav"
+            ref_txt = Path(tmp) / "reference.txt"
+            ref_rvq = Path(tmp) / "reference.rvq"
+            for path in (ref_wav, ref_txt, ref_rvq):
+                path.touch()
+            store = ConfigStore(db)
+            store.upsert_voice(
+                {
+                    "id": "voice_omni",
+                    "name": "Omni Clone",
+                    "provider": "qwen3tts",
+                    "mode": "clone",
+                    "ref_wav": str(ref_wav),
+                    "ref_text": str(ref_txt),
+                    "ref_rvq": "/tmp/qwen.rvq",
+                    "omnivoice_ref_rvq": str(ref_rvq),
+                }
+            )
+            store.set_settings(
+                {
+                    "tts_provider": "omnivoice",
+                    "qwentts_cpp_voice_mode": "preset",
+                    "qwentts_cpp_voice_preset": "vivian",
+                    "omnivoice_voice_mode": "clone",
+                    "omnivoice_clone_voice_id": "voice_omni",
+                }
+            )
+
+            settings = store.load_settings()
+            raw = store.settings_dict()
+
+        self.assertEqual(settings.tts_provider, "omnivoice")
+        self.assertEqual(settings.omnivoice_voice_mode, "clone")
+        self.assertEqual(settings.omnivoice_ref_wav, str(ref_wav))
+        self.assertEqual(settings.omnivoice_ref_text, str(ref_txt))
+        self.assertEqual(settings.omnivoice_ref_rvq, str(ref_rvq))
+        self.assertEqual(settings.qwentts_cpp_voice_mode, "preset")
+        self.assertEqual(raw["omnivoice_ref_rvq"], str(ref_rvq))
+
     def test_admin_state_exposes_ui_required_values_and_validates_qwen_speaker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_db = os.environ.get("HERMES_STS_CONFIG_DB")
@@ -1188,6 +1283,8 @@ class CoreTests(unittest.TestCase):
                 payload = _settings_payload(store.load_settings(), store)
                 with self.assertRaises(HTTPException) as bad_speaker:
                     _validate_settings_patch({"qwentts_cpp_voice_preset": "not_a_real_speaker"})
+                with self.assertRaises(HTTPException) as bad_omni_mode:
+                    _validate_settings_patch({"omnivoice_voice_mode": "preset"})
             finally:
                 if old_db is None:
                     os.environ.pop("HERMES_STS_CONFIG_DB", None)
@@ -1201,6 +1298,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("tts_voice_source", values)
         self.assertIn("tts_segment_max_chars", values)
         self.assertIn("qwentts_cpp_seed", values)
+        self.assertIn("omnivoice_voice_mode", values)
+        self.assertIn("omnivoice_model", values)
         self.assertIn("hermes_history_max_messages", values)
         self.assertIn("hermes_history_max_chars", values)
         self.assertIn("hermes_history_idle_reset_seconds", values)
@@ -1208,6 +1307,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("hermes_filler_interval_seconds", values)
         self.assertIn("hermes_max_fillers", values)
         self.assertEqual(bad_speaker.exception.status_code, 422)
+        self.assertEqual(bad_omni_mode.exception.status_code, 422)
+        _validate_settings_patch({"tts_provider": "omnivoice", "omnivoice_voice_mode": "auto"})
 
     def test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

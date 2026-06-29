@@ -178,6 +178,37 @@ class Settings:
     qwentts_cpp_seed: int = _int_env("QWENTTS_CPP_SEED", 42)
     qwentts_cpp_max_new_frames: int = _int_env("QWENTTS_CPP_MAX_NEW_FRAMES", 512)
     qwentts_cpp_timeout_seconds: float = _float_env("QWENTTS_CPP_TIMEOUT_SECONDS", 120.0)
+    omnivoice_bin: str = _path_env(
+        "OMNIVOICE_BIN",
+        "../hermes-omnivoice-lab/src/omnivoice.cpp/build/omnivoice-tts",
+    )
+    omnivoice_codec_bin: str = _path_env(
+        "OMNIVOICE_CODEC_BIN",
+        "../hermes-omnivoice-lab/src/omnivoice.cpp/build/omnivoice-codec",
+    )
+    omnivoice_model: str = _path_env(
+        "OMNIVOICE_MODEL",
+        "../hermes-omnivoice-lab/models/omnivoice-base-Q8_0.gguf",
+    )
+    omnivoice_codec: str = _path_env(
+        "OMNIVOICE_CODEC",
+        "../hermes-omnivoice-lab/models/omnivoice-tokenizer-F32.gguf",
+    )
+    omnivoice_voice_mode: str = os.getenv("OMNIVOICE_VOICE_MODE", "auto")
+    omnivoice_voice_design: str = os.getenv("OMNIVOICE_VOICE_DESIGN", "")
+    omnivoice_clone_voice_id: str = os.getenv("OMNIVOICE_CLONE_VOICE_ID", "")
+    omnivoice_backend: str = os.getenv("OMNIVOICE_BACKEND", "Vulkan0")
+    omnivoice_lang: str = os.getenv("OMNIVOICE_LANG", "Chinese")
+    omnivoice_ref_wav: str = _path_env("OMNIVOICE_REF_WAV")
+    omnivoice_ref_text: str = _path_env("OMNIVOICE_REF_TEXT")
+    omnivoice_ref_rvq: str = _path_env("OMNIVOICE_REF_RVQ")
+    omnivoice_format: str = os.getenv("OMNIVOICE_FORMAT", "wav16")
+    omnivoice_extra_args: str = os.getenv("OMNIVOICE_EXTRA_ARGS", "")
+    omnivoice_seed: int = _int_env("OMNIVOICE_SEED", 42)
+    omnivoice_duration_seconds: float = _float_env("OMNIVOICE_DURATION_SECONDS", 0.0)
+    omnivoice_chunk_duration_seconds: float = _float_env("OMNIVOICE_CHUNK_DURATION_SECONDS", 15.0)
+    omnivoice_chunk_threshold_seconds: float = _float_env("OMNIVOICE_CHUNK_THRESHOLD_SECONDS", 30.0)
+    omnivoice_timeout_seconds: float = _float_env("OMNIVOICE_TIMEOUT_SECONDS", 120.0)
 
     vad_provider: str = os.getenv("STS_VAD_PROVIDER", "energy")
     vad_energy_threshold: float = _float_env("VAD_ENERGY_THRESHOLD", 0.004)

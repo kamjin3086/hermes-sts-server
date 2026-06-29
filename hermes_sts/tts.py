@@ -9,31 +9,68 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Literal, Protocol
 
 from hermes_sts.audio import tone_pcm16
 from hermes_sts.config import Settings
 
+TtsEngineId = Literal["qwen3tts", "omnivoice", "sherpa_kokoro", "sherpa_onnx", "sapi", "tone"]
+TtsMode = Literal["default", "preset", "design", "clone", "auto"]
+
+
+@dataclass(frozen=True)
+class TtsEngineConfig:
+    engine: TtsEngineId
+    bin_path: str = ""
+    codec_bin_path: str = ""
+    model_path: str = ""
+    codec_path: str = ""
+    backend: str = ""
+    lang: str = ""
+    audio_format: str = ""
+    extra_args: str = ""
+    seed: int | None = None
+    timeout_seconds: float = 120.0
+    max_new_frames: int = 0
+    duration_seconds: float = 0.0
+    chunk_duration_seconds: float = 15.0
+    chunk_threshold_seconds: float = 30.0
+
 
 @dataclass(frozen=True)
 class TtsVoice:
+    engine: TtsEngineId | str = "qwen3tts"
+    mode: TtsMode | str = "default"
     speaker: str = ""
     instruct: str = ""
     ref_wav: str = ""
     ref_text: str = ""
     ref_spk: str = ""
     ref_rvq: str = ""
+    omnivoice_ref_rvq: str = ""
     model: str = ""
     codec: str = ""
     lang: str = ""
     audio_format: str = ""
     seed: int | None = None
     extra_args: str = ""
+    duration_seconds: float | None = None
+    chunk_duration_seconds: float | None = None
+    chunk_threshold_seconds: float | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "TtsVoice":
+        provider = settings.tts_provider.strip().lower()
+        if provider == "omnivoice":
+            return cls.from_omnivoice_settings(settings)
+        return cls.from_qwen_settings(settings)
+
+    @classmethod
+    def from_qwen_settings(cls, settings: Settings) -> "TtsVoice":
         mode = settings.qwentts_cpp_voice_mode.strip().lower()
         qwen_kwargs = {
+            "engine": "qwen3tts",
+            "mode": mode,
             "model": settings.qwentts_cpp_model or _qwen_model_path(settings),
             "codec": settings.qwentts_cpp_codec,
             "lang": settings.qwentts_cpp_lang,
@@ -55,6 +92,33 @@ class TtsVoice:
             **qwen_kwargs,
         )
 
+    @classmethod
+    def from_omnivoice_settings(cls, settings: Settings) -> "TtsVoice":
+        mode = settings.omnivoice_voice_mode.strip().lower()
+        omni_kwargs = {
+            "engine": "omnivoice",
+            "mode": mode,
+            "model": settings.omnivoice_model,
+            "codec": settings.omnivoice_codec,
+            "lang": settings.omnivoice_lang,
+            "audio_format": settings.omnivoice_format,
+            "seed": settings.omnivoice_seed,
+            "extra_args": settings.omnivoice_extra_args,
+            "duration_seconds": settings.omnivoice_duration_seconds,
+            "chunk_duration_seconds": settings.omnivoice_chunk_duration_seconds,
+            "chunk_threshold_seconds": settings.omnivoice_chunk_threshold_seconds,
+        }
+        if mode == "design":
+            return cls(instruct=settings.omnivoice_voice_design, **omni_kwargs)
+        if mode == "clone":
+            return cls(
+                ref_wav=settings.omnivoice_ref_wav,
+                ref_text=settings.omnivoice_ref_text,
+                omnivoice_ref_rvq=settings.omnivoice_ref_rvq,
+                **omni_kwargs,
+            )
+        return cls(**omni_kwargs)
+
     def is_empty(self) -> bool:
         return not any(
             [
@@ -64,6 +128,7 @@ class TtsVoice:
                 self.ref_text,
                 self.ref_spk,
                 self.ref_rvq,
+                self.omnivoice_ref_rvq,
             ]
         )
 
@@ -80,6 +145,7 @@ class TtsVoice:
             ref_text=str(value.get("ref_text") or value.get("reference_text") or "").strip(),
             ref_spk=str(value.get("ref_spk") or value.get("speaker_embedding") or "").strip(),
             ref_rvq=str(value.get("ref_rvq") or value.get("reference_rvq") or "").strip(),
+            omnivoice_ref_rvq=str(value.get("omnivoice_ref_rvq") or "").strip(),
         )
 
 
@@ -181,6 +247,58 @@ class CommandWavTts:
 
     def _command(self, wav_path: Path, *, voice: TtsVoice | None = None) -> list[str]:
         raise NotImplementedError
+
+    async def _stream_wav_stdout_pcm(self, text: str, *, voice: TtsVoice | None = None) -> AsyncIterator[bytes]:
+        cmd = self._command(Path("-"), voice=voice)
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._environment(),
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stderr_task = asyncio.create_task(process.stderr.read())
+        decoder = _StreamingWavPcm16Decoder(target_rate=self.settings.sample_rate, provider_name=self.provider_name)
+        try:
+            process.stdin.write(_stdin_text(text))
+            await process.stdin.drain()
+            process.stdin.close()
+            while True:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(8192),
+                    timeout=self._timeout_seconds(),
+                )
+                if not chunk:
+                    break
+                for pcm16 in decoder.feed(chunk):
+                    if pcm16:
+                        yield pcm16
+            for pcm16 in decoder.flush():
+                if pcm16:
+                    yield pcm16
+            code = await process.wait()
+            if code != 0:
+                stderr = await stderr_task
+                raise RuntimeError(
+                    f"{self.provider_name} stream failed with code {code}: "
+                    f"{stderr.decode('utf-8', errors='replace').strip()[-1200:]}"
+                )
+        except Exception:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            if not stderr_task.done():
+                stderr_task.cancel()
+            raise
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            if not stderr_task.done():
+                stderr_task.cancel()
 
     def _environment(self) -> dict[str, str] | None:
         return None
@@ -333,56 +451,8 @@ class QwenTtsCpp(CommandWavTts):
 
     async def stream_pcm(self, text: str, *, voice: TtsVoice | None = None) -> AsyncIterator[bytes]:
         voice = voice or TtsVoice.from_settings(self.settings)
-        cmd = self._command(Path("-"), voice=voice)
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._environment(),
-        )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
-        stderr_task = asyncio.create_task(process.stderr.read())
-        decoder = _StreamingWavPcm16Decoder(target_rate=self.settings.sample_rate)
-        try:
-            process.stdin.write(_stdin_text(text))
-            await process.stdin.drain()
-            process.stdin.close()
-            while True:
-                chunk = await asyncio.wait_for(
-                    process.stdout.read(8192),
-                    timeout=self._timeout_seconds(),
-                )
-                if not chunk:
-                    break
-                for pcm16 in decoder.feed(chunk):
-                    if pcm16:
-                        yield pcm16
-            for pcm16 in decoder.flush():
-                if pcm16:
-                    yield pcm16
-            code = await process.wait()
-            if code != 0:
-                stderr = await stderr_task
-                raise RuntimeError(
-                    f"{self.provider_name} stream failed with code {code}: "
-                    f"{stderr.decode('utf-8', errors='replace').strip()}"
-                )
-        except Exception:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            if not stderr_task.done():
-                stderr_task.cancel()
-            raise
-        finally:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            if not stderr_task.done():
-                stderr_task.cancel()
+        async for chunk in self._stream_wav_stdout_pcm(text, voice=voice):
+            yield chunk
 
     def _environment(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -392,6 +462,96 @@ class QwenTtsCpp(CommandWavTts):
 
     def _timeout_seconds(self) -> float:
         return self.settings.qwentts_cpp_timeout_seconds
+
+
+class QwenTtsEngine(QwenTtsCpp):
+    pass
+
+
+class OmniVoiceEngine(CommandWavTts):
+    provider_name = "omnivoice.cpp"
+    supports_streaming = True
+
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        required = {
+            "OMNIVOICE_BIN": settings.omnivoice_bin,
+            "OMNIVOICE_MODEL": settings.omnivoice_model,
+            "OMNIVOICE_CODEC": settings.omnivoice_codec,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise RuntimeError(
+                f"{', '.join(missing)} are required for STS_TTS_PROVIDER=omnivoice"
+            )
+        self.bin_path = Path(settings.omnivoice_bin)
+        if not self.bin_path.is_file():
+            raise RuntimeError(f"OMNIVOICE_BIN does not exist: {self.bin_path}")
+        for name, value in {
+            "OMNIVOICE_MODEL": settings.omnivoice_model,
+            "OMNIVOICE_CODEC": settings.omnivoice_codec,
+        }.items():
+            if not Path(value).is_file():
+                raise RuntimeError(f"{name} does not exist: {value}")
+
+    def _command(self, wav_path: Path, *, voice: TtsVoice | None = None) -> list[str]:
+        voice = voice or TtsVoice.from_settings(self.settings)
+        cmd = [
+            str(self.bin_path),
+            "--model",
+            voice.model or self.settings.omnivoice_model,
+            "--codec",
+            voice.codec or self.settings.omnivoice_codec,
+            "--format",
+            voice.audio_format or self.settings.omnivoice_format,
+        ]
+        lang = voice.lang or self.settings.omnivoice_lang
+        if lang:
+            cmd.extend(["--lang", lang])
+        if voice.instruct:
+            cmd.extend(["--instruct", voice.instruct])
+        omni_rvq = voice.omnivoice_ref_rvq or (voice.ref_rvq if voice.engine == "omnivoice" else "")
+        if omni_rvq:
+            cmd.extend(["--ref-rvq", omni_rvq])
+        elif voice.ref_wav:
+            cmd.extend(["--ref-wav", voice.ref_wav])
+        if voice.ref_text:
+            cmd.extend(["--ref-text", voice.ref_text])
+        cmd.extend(["--seed", str(voice.seed if voice.seed is not None else self.settings.omnivoice_seed)])
+        duration = voice.duration_seconds
+        if duration is None:
+            duration = self.settings.omnivoice_duration_seconds
+        if duration and duration > 0:
+            cmd.extend(["--duration", str(duration)])
+        chunk_duration = voice.chunk_duration_seconds
+        if chunk_duration is None:
+            chunk_duration = self.settings.omnivoice_chunk_duration_seconds
+        if chunk_duration is not None:
+            cmd.extend(["--chunk-duration", str(chunk_duration)])
+        chunk_threshold = voice.chunk_threshold_seconds
+        if chunk_threshold is None:
+            chunk_threshold = self.settings.omnivoice_chunk_threshold_seconds
+        if chunk_threshold is not None:
+            cmd.extend(["--chunk-threshold", str(chunk_threshold)])
+        extra_args = voice.extra_args if voice.extra_args else self.settings.omnivoice_extra_args
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
+        cmd.extend(["-o", str(wav_path)])
+        return cmd
+
+    async def stream_pcm(self, text: str, *, voice: TtsVoice | None = None) -> AsyncIterator[bytes]:
+        voice = voice or TtsVoice.from_settings(self.settings)
+        async for chunk in self._stream_wav_stdout_pcm(text, voice=voice):
+            yield chunk
+
+    def _environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if self.settings.omnivoice_backend:
+            env["GGML_BACKEND"] = self.settings.omnivoice_backend
+        return env
+
+    def _timeout_seconds(self) -> float:
+        return self.settings.omnivoice_timeout_seconds
 
 
 def _read_wav_as_pcm16_mono(path: Path, target_rate: int) -> bytes:
@@ -419,8 +579,9 @@ def _stdin_text(text: str) -> bytes:
 
 
 class _StreamingWavPcm16Decoder:
-    def __init__(self, *, target_rate: int):
+    def __init__(self, *, target_rate: int, provider_name: str = "command"):
         self.target_rate = target_rate
+        self.provider_name = provider_name
         self.buffer = bytearray()
         self.riff_seen = False
         self.in_data = False
@@ -461,7 +622,7 @@ class _StreamingWavPcm16Decoder:
             if len(self.buffer) < 12:
                 return out
             if bytes(self.buffer[:4]) != b"RIFF" or bytes(self.buffer[8:12]) != b"WAVE":
-                raise RuntimeError("qwentts.cpp stdout is not a WAV stream")
+                raise RuntimeError(f"{self.provider_name} stdout is not a WAV stream")
             del self.buffer[:12]
             self.riff_seen = True
         while len(self.buffer) >= 8:
@@ -486,14 +647,14 @@ class _StreamingWavPcm16Decoder:
 
     def _parse_fmt(self, payload: bytes) -> None:
         if len(payload) < 16:
-            raise RuntimeError("Invalid WAV fmt chunk from qwentts.cpp")
+            raise RuntimeError(f"Invalid WAV fmt chunk from {self.provider_name}")
         audio_format = int.from_bytes(payload[0:2], "little")
         self.channels = int.from_bytes(payload[2:4], "little")
         self.sample_rate = int.from_bytes(payload[4:8], "little")
         self.bits_per_sample = int.from_bytes(payload[14:16], "little")
         if audio_format != 1 or self.bits_per_sample != 16 or self.channels <= 0:
             raise RuntimeError(
-                f"Unsupported qwentts.cpp WAV format format={audio_format} "
+                f"Unsupported {self.provider_name} WAV format format={audio_format} "
                 f"bits={self.bits_per_sample} channels={self.channels}"
             )
 
@@ -607,5 +768,7 @@ def build_tts(settings: Settings) -> TtsProvider:
     if provider == "sherpa_kokoro":
         return SherpaKokoroTts(settings)
     if provider in {"qwen3tts", "qwentts_cpp", "qwen_tts_cpp"}:
-        return QwenTtsCpp(settings)
+        return QwenTtsEngine(settings)
+    if provider in {"omnivoice", "omnivoice_cpp"}:
+        return OmniVoiceEngine(settings)
     raise RuntimeError(f"Unsupported STS_TTS_PROVIDER={settings.tts_provider!r}")

@@ -48,6 +48,11 @@ QWEN_MODEL_FILES = {
     "codec": "qwen-tokenizer-12hz-Q8_0.gguf",
 }
 QWEN_MODEL_REPO = "https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main"
+OMNIVOICE_MODEL_FILES = {
+    "base": "omnivoice-base-Q8_0.gguf",
+    "codec": "omnivoice-tokenizer-F32.gguf",
+}
+OMNIVOICE_MODEL_REPO = "https://huggingface.co/Serveurperso/OmniVoice-GGUF/resolve/main"
 SERVER_STARTED_AT = time.time()
 SERVICE_NAME = os.getenv("HERMES_STS_SYSTEMD_SERVICE_NAME", "hermes-sts-server.service")
 
@@ -66,6 +71,7 @@ class PersonaPatch(BaseModel):
 
 
 class ModelInstallRequest(BaseModel):
+    provider: str = "qwen3tts"
     kinds: list[str] = Field(default_factory=list)
 
 
@@ -221,6 +227,24 @@ def create_admin_router(
                 "speakers": QWEN_SPEAKERS,
                 "models": _qwen_model_status(current),
                 "modes": ["default", "preset", "design", "clone"],
+            },
+            "omnivoice": {
+                "models": _omnivoice_model_status(current),
+                "modes": ["auto", "design", "clone"],
+            },
+            "tts_engines": {
+                "qwen3tts": {
+                    "label": "Qwen3TTS",
+                    "models": _qwen_model_status(current),
+                    "modes": ["default", "preset", "design", "clone"],
+                    "active": current.tts_provider == "qwen3tts",
+                },
+                "omnivoice": {
+                    "label": "OmniVoice",
+                    "models": _omnivoice_model_status(current),
+                    "modes": ["auto", "design", "clone"],
+                    "active": current.tts_provider == "omnivoice",
+                },
             },
             "kokoro_voices": _kokoro_voice_options(),
             "metrics": metrics,
@@ -451,6 +475,43 @@ def create_admin_router(
         restart_scheduled = _restart_if_required(changed, "active persona deleted")
         return {"ok": True, "restart_scheduled": restart_scheduled, "state": await admin_state()}
 
+    @router.post("/api/tts/models/install")
+    async def install_tts_models(payload: ModelInstallRequest | None = None) -> dict[str, Any]:
+        provider = (payload.provider if payload else "qwen3tts").strip().lower()
+        if provider in {"qwen3tts", "qwentts_cpp", "qwen_tts_cpp"}:
+            return await install_qwen_models(payload)
+        if provider not in {"omnivoice", "omnivoice_cpp"}:
+            raise HTTPException(status_code=422, detail=f"unsupported tts model provider: {provider}")
+        current = refresh_settings()
+        models_dir = Path(current.omnivoice_model).parent
+        models_dir.mkdir(parents=True, exist_ok=True)
+        kinds = payload.kinds if payload and payload.kinds else list(OMNIVOICE_MODEL_FILES)
+        unsupported = sorted(set(kinds) - set(OMNIVOICE_MODEL_FILES))
+        if unsupported:
+            raise HTTPException(status_code=422, detail=f"unsupported omnivoice model kind: {', '.join(unsupported)}")
+        for kind in kinds:
+            filename = OMNIVOICE_MODEL_FILES[kind]
+            target = models_dir / filename
+            if target.exists():
+                continue
+            url = f"{OMNIVOICE_MODEL_REPO}/{filename}"
+            logger.info("Downloading OmniVoice model %s", url)
+            await asyncio.to_thread(urlretrieve, url, target)
+        changed = store.set_settings(
+            {
+                "omnivoice_model": str(models_dir / OMNIVOICE_MODEL_FILES["base"]),
+                "omnivoice_codec": str(models_dir / OMNIVOICE_MODEL_FILES["codec"]),
+            }
+        )
+        refresh_settings()
+        restart_scheduled = _restart_if_required(changed, "omnivoice models installed")
+        return {
+            "ok": True,
+            "models": _omnivoice_model_status(settings),
+            "restart_scheduled": restart_scheduled,
+            "state": await admin_state(),
+        }
+
     @router.post("/api/qwen/models/install")
     async def install_qwen_models(payload: ModelInstallRequest | None = None) -> dict[str, Any]:
         current = refresh_settings()
@@ -485,6 +546,7 @@ def create_admin_router(
             "state": await admin_state(),
         }
 
+    @router.post("/api/tts/clone/upload")
     @router.post("/api/qwen/clone/upload")
     async def upload_clone(
         name: str = Form(...),
@@ -545,6 +607,46 @@ def create_admin_router(
         rvq = ref_wav.with_suffix(".rvq")
         profile = dict(voice)
         profile.update({"ref_spk": str(spk), "ref_rvq": str(rvq)})
+        store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(payload.voice_id), "state": await admin_state()}
+
+    @router.post("/api/tts/clone/encode")
+    async def encode_tts_clone(payload: CloneEncodeRequest, provider: str = Query("qwen3tts")) -> dict[str, Any]:
+        provider = provider.strip().lower()
+        if provider in {"qwen3tts", "qwentts_cpp", "qwen_tts_cpp"}:
+            return await encode_clone(payload)
+        if provider not in {"omnivoice", "omnivoice_cpp"}:
+            raise HTTPException(status_code=422, detail=f"unsupported clone encoder provider: {provider}")
+        current = refresh_settings()
+        voice = store.voice_profile(payload.voice_id)
+        if not voice:
+            raise HTTPException(status_code=404, detail="voice not found")
+        ref_wav = Path(voice["ref_wav"])
+        if not ref_wav.exists():
+            raise HTTPException(status_code=422, detail="reference wav missing")
+        codec_bin = Path(current.omnivoice_codec_bin)
+        if not codec_bin.exists():
+            raise HTTPException(status_code=422, detail=f"omnivoice-codec not found: {codec_bin}")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                str(codec_bin),
+                "--model",
+                current.omnivoice_codec,
+                "-i",
+                str(ref_wav),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(ref_wav.parent),
+            env={**os.environ, "GGML_BACKEND": current.omnivoice_backend},
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=result.stderr[-1200:])
+        rvq = ref_wav.with_suffix(".rvq")
+        profile = dict(voice)
+        profile.update({"omnivoice_ref_rvq": str(rvq)})
         store.upsert_voice(profile)
         return {"ok": True, "voice": store.voice_profile(payload.voice_id), "state": await admin_state()}
 
@@ -660,7 +762,12 @@ def create_admin_router(
     @router.post("/api/tts/preview")
     async def tts_preview(payload: PreviewRequest) -> dict[str, Any]:
         current = refresh_settings()
-        preview_settings = replace(current, qwentts_cpp_seed=payload.seed) if payload.seed is not None else current
+        if payload.seed is not None and current.tts_provider == "omnivoice":
+            preview_settings = replace(current, omnivoice_seed=payload.seed)
+        elif payload.seed is not None:
+            preview_settings = replace(current, qwentts_cpp_seed=payload.seed)
+        else:
+            preview_settings = current
         voice = _preview_voice(payload, preview_settings, store)
         started = time.perf_counter()
         pcm = await build_tts(preview_settings).synthesize(payload.text, voice=voice)
@@ -673,14 +780,14 @@ def create_admin_router(
                 "elapsed_ms": elapsed_ms,
                 "audio_seconds": audio_seconds,
                 "rtf": elapsed_ms / 1000 / max(audio_seconds, 0.001),
-                "seed": preview_settings.qwentts_cpp_seed,
+                "seed": preview_settings.omnivoice_seed if preview_settings.tts_provider == "omnivoice" else preview_settings.qwentts_cpp_seed,
             },
         )
         return {
             "ok": True,
             "elapsed_ms": elapsed_ms,
             "audio_seconds": audio_seconds,
-            "seed": preview_settings.qwentts_cpp_seed,
+            "seed": preview_settings.omnivoice_seed if preview_settings.tts_provider == "omnivoice" else preview_settings.qwentts_cpp_seed,
             "audio_wav_base64": base64.b64encode(wav).decode("ascii"),
         }
 
@@ -875,6 +982,11 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "qwentts_cpp_clone_voice_id",
             "qwentts_cpp_backend",
             "qwentts_cpp_seed",
+            "omnivoice_voice_mode",
+            "omnivoice_voice_design",
+            "omnivoice_clone_voice_id",
+            "omnivoice_backend",
+            "omnivoice_seed",
             "dashboard_wave_style",
             "sherpa_kokoro_voice",
         ],
@@ -901,6 +1013,18 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "qwentts_cpp_extra_args",
             "qwentts_cpp_seed",
             "qwentts_cpp_max_new_frames",
+            "omnivoice_bin",
+            "omnivoice_codec_bin",
+            "omnivoice_model",
+            "omnivoice_codec",
+            "omnivoice_lang",
+            "omnivoice_format",
+            "omnivoice_extra_args",
+            "omnivoice_seed",
+            "omnivoice_duration_seconds",
+            "omnivoice_chunk_duration_seconds",
+            "omnivoice_chunk_threshold_seconds",
+            "omnivoice_timeout_seconds",
         ],
         "memory": [
             "memory_enabled",
@@ -1038,7 +1162,7 @@ def _diagnostics_payload(
     return {
         "llm": _diag_item("ok", f"{settings.llm_provider} · {settings.hermes_model if settings.llm_provider == 'hermes_agent' else settings.llm_model}"),
         "stt": _diag_item("ok", settings.stt_provider),
-        "tts": _diag_item("ok", f"{settings.tts_provider} · {settings.qwentts_cpp_backend if settings.tts_provider == 'qwen3tts' else settings.sherpa_kokoro_voice}"),
+        "tts": _diag_item("ok", f"{settings.tts_provider} · {_tts_backend_label(settings)}"),
         "tools": _diag_item("ok" if local_tools or client_tools else "warn", f"{len(local_tools)} 系统 / {len(client_tools)} 客户端"),
         "memory": _diag_item("ok" if settings.memory_enabled else "warn", f"{settings.memory_provider} · {memory_stats.get('count', 0)} 条" if settings.memory_enabled else "未开启"),
         "web_search": _diag_item("ok" if settings.web_search_enabled and web_state.get("provider") != "noop" else "warn", web_state.get("provider") or "未开启"),
@@ -1082,7 +1206,20 @@ def _health(settings: Settings) -> dict[str, Any]:
         "qwen_speaker": settings.qwentts_cpp_voice_preset or settings.qwentts_cpp_speaker,
         "qwen_backend": settings.qwentts_cpp_backend,
         "qwen_clone": bool(settings.qwentts_cpp_ref_wav or settings.qwentts_cpp_ref_spk or settings.qwentts_cpp_ref_rvq),
+        "omnivoice_voice_mode": settings.omnivoice_voice_mode,
+        "omnivoice_backend": settings.omnivoice_backend,
+        "omnivoice_clone": bool(settings.omnivoice_ref_wav or settings.omnivoice_ref_rvq),
     }
+
+
+def _tts_backend_label(settings: Settings) -> str:
+    if settings.tts_provider == "qwen3tts":
+        return settings.qwentts_cpp_backend
+    if settings.tts_provider == "omnivoice":
+        return settings.omnivoice_backend
+    if settings.tts_provider == "sherpa_kokoro":
+        return str(settings.sherpa_kokoro_voice)
+    return settings.tts_provider
 
 
 def _qwen_model_status(settings: Settings) -> dict[str, Any]:
@@ -1091,6 +1228,17 @@ def _qwen_model_status(settings: Settings) -> dict[str, Any]:
         "customvoice": settings.qwentts_cpp_customvoice_model,
         "voicedesign": settings.qwentts_cpp_voicedesign_model,
         "codec": settings.qwentts_cpp_codec,
+    }
+    return {
+        key: {"path": value, "installed": bool(value and Path(value).exists())}
+        for key, value in paths.items()
+    }
+
+
+def _omnivoice_model_status(settings: Settings) -> dict[str, Any]:
+    paths = {
+        "base": settings.omnivoice_model,
+        "codec": settings.omnivoice_codec,
     }
     return {
         key: {"path": value, "installed": bool(value and Path(value).exists())}
@@ -1132,6 +1280,8 @@ def _requires_rebuild(changed: dict[str, Any]) -> bool:
         "llm_provider",
         "active_llm_profile_id",
         "qwentts_cpp_bin",
+        "omnivoice_bin",
+        "omnivoice_codec_bin",
         "sherpa_kokoro_model",
         "sherpa_kokoro_voices",
         "sherpa_kokoro_tokens",
@@ -1174,8 +1324,24 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
             raise HTTPException(status_code=422, detail="qwen max-new must be an integer") from exc
         if max_new_int < 0:
             raise HTTPException(status_code=422, detail="qwen max-new must be >= 0")
+    omni_mode = values.get("omnivoice_voice_mode")
+    if omni_mode is not None and omni_mode not in {"auto", "design", "clone"}:
+        raise HTTPException(status_code=422, detail=f"unsupported omnivoice voice mode: {omni_mode}")
+    omni_seed = values.get("omnivoice_seed")
+    if omni_seed is not None:
+        try:
+            int(omni_seed)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="omnivoice seed must be an integer") from exc
+    for key in ("omnivoice_duration_seconds", "omnivoice_chunk_duration_seconds", "omnivoice_chunk_threshold_seconds", "omnivoice_timeout_seconds"):
+        if key in values:
+            try:
+                if float(values[key]) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"{key} must be a non-negative number")
     provider = values.get("tts_provider")
-    if provider is not None and provider not in {"qwen3tts", "sherpa_kokoro", "tone", "sapi", "sherpa_onnx"}:
+    if provider is not None and provider not in {"qwen3tts", "omnivoice", "sherpa_kokoro", "tone", "sapi", "sherpa_onnx"}:
         raise HTTPException(status_code=422, detail=f"unsupported tts provider: {provider}")
     llm_provider = values.get("llm_provider")
     if llm_provider is not None and llm_provider not in {"hermes_agent", "openai_compatible"}:
@@ -1370,6 +1536,36 @@ def _normalize_tags(tags: Any) -> list[str]:
 
 
 def _preview_voice(payload: PreviewRequest, settings: Settings, store: ConfigStore) -> TtsVoice:
+    if settings.tts_provider == "omnivoice":
+        mode = (payload.voice_mode or settings.omnivoice_voice_mode).strip().lower()
+        base_voice = TtsVoice.from_settings(settings)
+        if mode == "design":
+            return replace(
+                base_voice,
+                mode="design",
+                instruct=payload.design_prompt or settings.omnivoice_voice_design,
+                ref_wav="",
+                ref_text="",
+                ref_spk="",
+                ref_rvq="",
+                omnivoice_ref_rvq="",
+            )
+        if mode == "clone":
+            voice_id = payload.clone_voice_id or settings.omnivoice_clone_voice_id
+            voice = store.voice_profile(voice_id)
+            if voice:
+                return replace(
+                    base_voice,
+                    mode="clone",
+                    instruct="",
+                    ref_wav=voice.get("ref_wav", ""),
+                    ref_text=voice.get("ref_text", ""),
+                    ref_spk="",
+                    ref_rvq="",
+                    omnivoice_ref_rvq=voice.get("omnivoice_ref_rvq", "") or "",
+                )
+        return replace(base_voice, mode="auto", instruct="", ref_wav="", ref_text="", ref_spk="", ref_rvq="", omnivoice_ref_rvq="")
+
     mode = (payload.voice_mode or settings.qwentts_cpp_voice_mode).strip().lower()
     base_voice = TtsVoice.from_settings(settings)
     if mode == "preset":

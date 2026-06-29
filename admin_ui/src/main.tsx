@@ -106,6 +106,8 @@ type AdminState = {
   personas: Persona[];
   voices: VoiceProfile[];
   qwen: { speakers: string[]; models: ModelStatus; modes: string[] };
+  omnivoice?: { models: ModelStatus; modes: string[] };
+  tts_engines?: Record<string, { label: string; models: ModelStatus; modes: string[]; active: boolean }>;
   kokoro_voices: Array<{ id: number; name: string; note: string }>;
   metrics: Metric[];
   memory?: Record<string, any> | null;
@@ -120,6 +122,7 @@ const navItems = [
 ] as const;
 
 const modeLabels: Record<string, { title: string; text: string }> = {
+  auto: { title: "自动音色", text: "OmniVoice 自动生成稳定自然声线。" },
   default: { title: "默认音色", text: "Base 模型自带音色，最稳，当前已可用。" },
   preset: { title: "预设声线", text: "CustomVoice 模型的官方 9 个 speaker。" },
   design: { title: "描述造声", text: "VoiceDesign 模型按文字描述生成气质。" },
@@ -553,11 +556,11 @@ function Studio({
     setDirty(true);
   };
 
-  const switchTtsProvider = async (provider: "qwen3tts" | "sherpa_kokoro") => {
+  const switchTtsProvider = async (provider: "qwen3tts" | "omnivoice" | "sherpa_kokoro") => {
     if (values.tts_provider === provider || busy === "tts-provider") return;
     await patch({ tts_provider: provider, tts_voice_source: "settings" });
     await reload();
-    setNotice(provider === "qwen3tts" ? "已切换到 Qwen3TTS" : "已切换到 Kokoro");
+    setNotice(provider === "qwen3tts" ? "已切换到 Qwen3TTS" : provider === "omnivoice" ? "已切换到 OmniVoice" : "已切换到 Kokoro");
     window.setTimeout(() => setNotice(""), 1600);
   };
 
@@ -658,11 +661,14 @@ function Studio({
           </div>
           <div className="segmented compact">
             <button disabled={busy === "tts-provider"} className={values.tts_provider === "qwen3tts" ? "selected" : ""} onClick={() => switchTtsProvider("qwen3tts")}>Qwen3TTS</button>
+            <button disabled={busy === "tts-provider"} className={values.tts_provider === "omnivoice" ? "selected" : ""} onClick={() => switchTtsProvider("omnivoice")}>OmniVoice</button>
             <button disabled={busy === "tts-provider"} className={values.tts_provider === "sherpa_kokoro" ? "selected" : ""} onClick={() => switchTtsProvider("sherpa_kokoro")}>Kokoro</button>
           </div>
         </div>
         {values.tts_provider === "qwen3tts" ? (
           <QwenVoice state={state} values={values} patch={patch} reload={reload} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={goSetup} />
+        ) : values.tts_provider === "omnivoice" ? (
+          <OmniVoice state={state} values={values} patch={patch} reload={reload} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={goSetup} />
         ) : (
           <KokoroVoice state={state} values={values} patch={patch} />
         )}
@@ -1249,17 +1255,200 @@ function KokoroVoice({
   );
 }
 
+function OmniVoice({
+  state,
+  values,
+  patch,
+  reload,
+  busy,
+  setBusy,
+  setNotice,
+  goSetup,
+}: {
+  state: AdminState;
+  values: SettingsValues;
+  patch: (v: SettingsValues) => Promise<void>;
+  reload: () => Promise<void>;
+  busy: string;
+  setBusy: (v: string) => void;
+  setNotice: (v: string) => void;
+  goSetup: () => void;
+}) {
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [cloneName, setCloneName] = useState("OmniVoice 克隆音色");
+  const [cloneText, setCloneText] = useState("");
+  const [designDraft, setDesignDraft] = useState(String(values.omnivoice_voice_design || ""));
+  const [previewUrl, setPreviewUrl] = useState("");
+  const models = state.omnivoice?.models || {};
+  const modes = state.omnivoice?.modes || ["auto", "design", "clone"];
+  const currentMode = String(values.omnivoice_voice_mode || "auto");
+
+  useEffect(() => {
+    setDesignDraft(String(values.omnivoice_voice_design || ""));
+  }, [values.omnivoice_voice_design]);
+
+  const switchMode = async (mode: string) => {
+    const next: SettingsValues = { omnivoice_voice_mode: mode, tts_voice_source: "settings" };
+    if (mode === "design" && !values.omnivoice_voice_design) {
+      next.omnivoice_voice_design = "female, young adult, chinese accent, moderate pitch";
+    }
+    await patch(next);
+    await reload();
+  };
+
+  const previewVoice = async (payload: Record<string, any>, message = "OmniVoice 试听完成") => {
+    setBusy("voice-preview");
+    try {
+      const data = await api<{ audio_wav_base64: string; elapsed_ms: number }>("/api/tts/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          text: "你好，我是 Hermes。现在用 OmniVoice 做一次短试听。",
+          ...payload,
+        }),
+      });
+      setPreviewUrl(URL.createObjectURL(base64ToBlob(data.audio_wav_base64, "audio/wav")));
+      setNotice(`${message} ${data.elapsed_ms}ms`);
+      window.setTimeout(() => setNotice(""), 1800);
+      await reload();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const applyDesign = async () => {
+    const prompt = designDraft.trim();
+    if (!prompt) {
+      setNotice("先填写音色描述");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    await patch({ omnivoice_voice_mode: "design", omnivoice_voice_design: prompt, tts_voice_source: "settings" });
+    await reload();
+    setNotice("OmniVoice 描述造声已启用");
+    window.setTimeout(() => setNotice(""), 1800);
+  };
+
+  const uploadClone = async () => {
+    const file = fileRef.current?.files?.[0];
+    if (!file) {
+      setNotice("请先选择参考 WAV");
+      return;
+    }
+    setBusy("upload");
+    try {
+      const form = new FormData();
+      form.append("name", cloneName);
+      form.append("reference_text", cloneText);
+      form.append("file", file);
+      const uploaded = await api<{ voice: VoiceProfile }>("/api/tts/clone/upload", { method: "POST", body: form, raw: true });
+      await api("/api/tts/clone/encode?provider=omnivoice", {
+        method: "POST",
+        body: JSON.stringify({ voice_id: uploaded.voice.id }),
+      });
+      await patch({ omnivoice_voice_mode: "clone", omnivoice_clone_voice_id: uploaded.voice.id, tts_voice_source: "settings" });
+      setNotice("OmniVoice 克隆音色已预编码并启用");
+      await reload();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <div className="voice-layout">
+      <div>
+        <div className="mode-grid">
+          {modes.map((mode) => (
+            <button key={mode} className={currentMode === mode ? "mode selected" : "mode"} onClick={() => switchMode(mode)}>
+              <strong>{modeLabels[mode]?.title ?? mode}</strong>
+              <span>{modeLabels[mode]?.text}</span>
+            </button>
+          ))}
+        </div>
+        {currentMode === "auto" && (
+          <div className="random-voice">
+            <span className="eyebrow"><Shuffle size={15} /> Auto voice</span>
+            <h3>自动音色</h3>
+            <p className="muted">使用 OmniVoice base Q8_0 和 tokenizer F32，按当前 seed 生成自动声线。</p>
+            <div className="random-actions">
+              <button className="secondary" onClick={() => previewVoice({ voice_mode: "auto", seed: Number(values.omnivoice_seed || 42) })}><Play size={16} />试听</button>
+              <button className="primary" onClick={() => patch({ omnivoice_voice_mode: "auto", tts_voice_source: "settings" })}>使用自动音色</button>
+            </div>
+          </div>
+        )}
+        {currentMode === "design" && (
+          <div className="design-panel">
+            <label className="field">
+              <span>音色描述</span>
+              <textarea value={designDraft} onChange={(e) => setDesignDraft(e.target.value)} placeholder="例如：female, young adult, chinese accent, moderate pitch" />
+            </label>
+            <div className="design-actions">
+              <button className="primary" onClick={applyDesign}><Check size={16} />使用描述</button>
+              <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: designDraft }, "OmniVoice 描述试听完成")} disabled={!designDraft.trim()}>
+                <Play size={16} />试听
+              </button>
+            </div>
+          </div>
+        )}
+        {currentMode === "clone" && (
+          <div className="clone-box">
+            <div className="field-row">
+              <label className="field">
+                <span>音色名称</span>
+                <input value={cloneName} onChange={(e) => setCloneName(e.target.value)} />
+              </label>
+              <label className="field">
+                <span>参考 WAV</span>
+                <input ref={fileRef} type="file" accept=".wav,audio/wav" />
+              </label>
+            </div>
+            <label className="field">
+              <span>参考文本</span>
+              <textarea value={cloneText} onChange={(e) => setCloneText(e.target.value)} placeholder="参考音频里说的原文。" />
+            </label>
+            <button className="primary" onClick={uploadClone} disabled={busy === "upload"}><Upload size={16} />上传并预编码</button>
+            <div className="voice-pills">
+              {state.voices.filter((v) => v.mode === "clone").map((voice) => (
+                <button key={voice.id} className={values.omnivoice_clone_voice_id === voice.id ? "pill selected" : "pill"} onClick={() => patch({ omnivoice_voice_mode: "clone", omnivoice_clone_voice_id: voice.id, tts_voice_source: "settings" })}>
+                  {voice.name}{voice.omnivoice_ref_rvq ? " · ready" : " · 未预编码"}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="voice-side">
+        <div className="model-status-compact">
+          {Object.entries(models).map(([key, model]) => (
+            <span key={key} className={model.installed ? "model-tag ok" : "model-tag"}>
+              <StatusDot ok={model.installed} />
+              {modelName(key)}
+            </span>
+          ))}
+          <button className="model-setup-btn" onClick={goSetup} title="模型设置">
+            <Download size={13} />
+          </button>
+        </div>
+        <div className="locked-note">
+          <CheckCircle2 size={16} />
+          <span>OmniVoice 使用独立设置；切回 Qwen3TTS 不会覆盖 Qwen 音色。</span>
+        </div>
+        {previewUrl && <audio controls src={previewUrl} className="audio" autoPlay />}
+      </div>
+    </div>
+  );
+}
+
 function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState; patch: (v: SettingsValues) => Promise<void>; reload: () => Promise<void>; setBusy: (v: string) => void; setNotice: (v: string) => void }) {
   const values = state.settings.values;
   const [installingModel, setInstallingModel] = useState("");
-  const installModel = async (kind?: string) => {
-    const target = kind || "__all";
+  const installModel = async (provider: "qwen3tts" | "omnivoice", kind?: string) => {
+    const target = `${provider}:${kind || "__all"}`;
     setInstallingModel(target);
     setBusy("models");
     try {
-      await api("/api/qwen/models/install", {
+      await api("/api/tts/models/install", {
         method: "POST",
-        body: JSON.stringify(kind ? { kinds: [kind] } : { kinds: [] }),
+        body: JSON.stringify(kind ? { provider, kinds: [kind] } : { provider, kinds: [] }),
       });
       setNotice(kind ? `${modelName(kind)} 下载/检查完成` : "模型检查/下载完成");
       window.setTimeout(() => setNotice(""), 1800);
@@ -1269,8 +1458,11 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
       setBusy("");
     }
   };
-  const installingAll = installingModel === "__all";
+  const installingQwenAll = installingModel === "qwen3tts:__all";
+  const installingOmniAll = installingModel === "omnivoice:__all";
   const allModelsInstalled = Object.values(state.qwen.models).every((m) => m.installed);
+  const omniModels = state.omnivoice?.models || {};
+  const allOmniModelsInstalled = Object.values(omniModels).every((m) => m.installed);
   return (
     <div className="grid">
       <section className="panel span-7">
@@ -1281,7 +1473,7 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
         <h2>语音模型</h2>
         <div className="model-grid single">
           {Object.entries(state.qwen.models).map(([key, model]) => {
-            const isInstalling = installingAll || installingModel === key;
+            const isInstalling = installingQwenAll || installingModel === `qwen3tts:${key}`;
             return (
               <div className={`model-card ${isInstalling ? "is-installing" : ""}`} key={key}>
                 <StatusDot ok={model.installed} />
@@ -1290,7 +1482,7 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
                 <code>{model.path}</code>
                 {isInstalling && <div className="model-progress" aria-hidden="true" />}
                 {!model.installed && (
-                  <button className="secondary" disabled={Boolean(installingModel)} onClick={() => installModel(key)}>
+                  <button className="secondary" disabled={Boolean(installingModel)} onClick={() => installModel("qwen3tts", key)}>
                     {isInstalling ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
                     {isInstalling ? "下载中" : "下载"}
                   </button>
@@ -1300,9 +1492,39 @@ function Setup({ state, patch, reload, setBusy, setNotice }: { state: AdminState
           })}
         </div>
         {!allModelsInstalled && (
-          <button className="primary" disabled={Boolean(installingModel)} onClick={() => installModel()}>
-            {installingAll ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
-            {installingAll ? "正在下载缺失模型" : "下载缺失模型"}
+          <button className="primary" disabled={Boolean(installingModel)} onClick={() => installModel("qwen3tts")}>
+            {installingQwenAll ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
+            {installingQwenAll ? "正在下载缺失模型" : "下载缺失模型"}
+          </button>
+        )}
+      </section>
+      <section className="panel span-5">
+        <span className="eyebrow"><Cpu size={15} /> OmniVoice</span>
+        <h2>语音模型</h2>
+        <div className="model-grid single">
+          {Object.entries(omniModels).map(([key, model]) => {
+            const isInstalling = installingOmniAll || installingModel === `omnivoice:${key}`;
+            return (
+              <div className={`model-card ${isInstalling ? "is-installing" : ""}`} key={key}>
+                <StatusDot ok={model.installed} />
+                <strong>{modelName(key)}</strong>
+                <span>{model.installed ? "已安装" : isInstalling ? "下载中" : "可下载"}</span>
+                <code>{model.path}</code>
+                {isInstalling && <div className="model-progress" aria-hidden="true" />}
+                {!model.installed && (
+                  <button className="secondary" disabled={Boolean(installingModel)} onClick={() => installModel("omnivoice", key)}>
+                    {isInstalling ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+                    {isInstalling ? "下载中" : "下载"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {!allOmniModelsInstalled && (
+          <button className="primary" disabled={Boolean(installingModel)} onClick={() => installModel("omnivoice")}>
+            {installingOmniAll ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
+            {installingOmniAll ? "正在下载缺失模型" : "下载缺失模型"}
           </button>
         )}
       </section>
@@ -1958,6 +2180,20 @@ function settingsForVoiceProfile(voice: VoiceProfile): SettingsValues {
 }
 
 function previewVoicePayload(values: SettingsValues): SettingsValues {
+  if (values.tts_provider === "omnivoice") {
+    const mode = String(values.omnivoice_voice_mode || "auto");
+    const payload: SettingsValues = {
+      voice_mode: mode,
+      seed: Number(values.omnivoice_seed ?? 42),
+    };
+    if (mode === "design") {
+      payload.design_prompt = values.omnivoice_voice_design || "";
+    }
+    if (mode === "clone") {
+      payload.clone_voice_id = values.omnivoice_clone_voice_id || "";
+    }
+    return payload;
+  }
   const mode = String(values.qwentts_cpp_voice_mode || "default");
   const payload: SettingsValues = {
     voice_mode: mode,
@@ -1977,6 +2213,12 @@ function previewVoicePayload(values: SettingsValues): SettingsValues {
 
 function voiceLabel(state: AdminState) {
   const values = state.settings.values;
+  if (values.tts_provider === "omnivoice") {
+    const mode = values.omnivoice_voice_mode || "auto";
+    if (mode === "design") return "OmniVoice 描述造声";
+    if (mode === "clone") return "OmniVoice 克隆音色";
+    return "OmniVoice 自动音色";
+  }
   if (values.tts_provider === "sherpa_kokoro") {
     const voice = state.kokoro_voices.find((v) => v.id === Number(values.sherpa_kokoro_voice));
     return voice ? `Kokoro ${voice.name}` : "Kokoro";
