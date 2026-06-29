@@ -104,6 +104,51 @@ class TavilySearchProvider:
         return {"provider": self.description(), "providers": [self.description()], "recent_success": None, "cooldowns": {}, "last_error": None}
 
 
+class BraveSearchProvider:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._timeout = max(0.2, min(settings.brave_timeout_seconds, 5.0))
+
+    async def search(self, query: str, *, max_results: int = 3) -> list[SearchHit]:
+        if not self.settings.brave_api_key:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=2.0)) as client:
+                resp = await client.get(
+                    f"{self.settings.brave_base_url.rstrip('/')}/web/search",
+                    params={"q": query, "count": max(1, min(max_results, 10))},
+                    headers={
+                        "Accept": "application/json",
+                        "X-Subscription-Token": self.settings.brave_api_key,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.warning("Brave search failed: %s", exc)
+            return []
+
+        hits: list[SearchHit] = []
+        for item in data.get("web", {}).get("results", []):
+            hits.append(
+                SearchHit(
+                    title=str(item.get("title") or ""),
+                    url=str(item.get("url") or ""),
+                    content=str(item.get("description") or item.get("content") or "")[:400],
+                    score=float(item.get("score") or 0.0),
+                )
+            )
+            if len(hits) >= max_results:
+                break
+        return hits
+
+    def description(self) -> str:
+        return "brave"
+
+    def state(self) -> dict:
+        return {"provider": self.description(), "providers": [self.description()], "recent_success": None, "cooldowns": {}, "last_error": None}
+
+
 class DuckDuckGoSearchProvider:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -226,10 +271,7 @@ class ChainedWebSearchProvider:
     def _ordered_providers(self, now: float) -> list[WebSearchProvider]:
         active = [p for p in self.providers if self._failed_until.get(p.description(), 0.0) <= now]
         cooling = [p for p in self.providers if self._failed_until.get(p.description(), 0.0) > now]
-        ordered = active + cooling
-        if self._last_success:
-            ordered.sort(key=lambda p: 0 if p.description() == self._last_success else 1)
-        return ordered
+        return active + cooling
 
 
 class _DuckDuckGoHtmlParser(HTMLParser):
@@ -305,13 +347,20 @@ def build_websearch(settings: Settings) -> WebSearchProvider:
         return NoopWebSearchProvider()
     providers: list[WebSearchProvider] = []
     enabled = [item.strip().lower() for item in settings.web_search_providers.split(",") if item.strip()]
+    enabled_set = set(enabled)
+
     for name in enabled:
         if name == "tavily" and settings.tavily_api_key:
             providers.append(TavilySearchProvider(settings))
-        elif name in {"duckduckgo", "ddg"}:
-            providers.append(DuckDuckGoSearchProvider(settings))
-        elif name == "searxng" and settings.searxng_base_url:
-            providers.append(SearxngSearchProvider(settings))
+            break
+        if name in {"brave", "brava"} and settings.brave_api_key:
+            providers.append(BraveSearchProvider(settings))
+            break
+
+    if "searxng" in enabled_set and settings.searxng_base_url:
+        providers.append(SearxngSearchProvider(settings))
+    if {"duckduckgo", "ddg"} & enabled_set:
+        providers.append(DuckDuckGoSearchProvider(settings))
     if len(providers) == 1:
         return providers[0]
     if providers:

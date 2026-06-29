@@ -179,13 +179,21 @@ ENV_TO_ATTR: dict[str, str] = {
     "TAVILY_MAX_RESULTS": "tavily_max_results",
     "TAVILY_TIMEOUT_SECONDS": "tavily_timeout_seconds",
     "TAVILY_BASE_URL": "tavily_base_url",
+    "BRAVE_API_KEY": "brave_api_key",
+    "BRAVA_API_KEY": "brave_api_key",
+    "BRAVE_BASE_URL": "brave_base_url",
+    "BRAVA_BASE_URL": "brave_base_url",
+    "BRAVE_TIMEOUT_SECONDS": "brave_timeout_seconds",
+    "BRAVA_TIMEOUT_SECONDS": "brave_timeout_seconds",
     "DUCKDUCKGO_TIMEOUT_SECONDS": "duckduckgo_timeout_seconds",
     "SEARXNG_BASE_URL": "searxng_base_url",
     "SEARXNG_TIMEOUT_SECONDS": "searxng_timeout_seconds",
     "HERMES_STS_CONFIG_DB": "config_db",
 }
 
-ATTR_TO_ENV = {attr: env for env, attr in ENV_TO_ATTR.items()}
+ATTR_TO_ENV: dict[str, str] = {}
+for env, attr in ENV_TO_ATTR.items():
+    ATTR_TO_ENV.setdefault(attr, env)
 
 
 PERSONA_PROFILE_DEFAULTS = [
@@ -446,7 +454,7 @@ class ConfigStore:
                 "memory_provider": "sqlite",
                 "memory_remember_in_hermes": True,
                 "web_search_enabled": False,
-                "web_search_providers": "tavily,duckduckgo,searxng",
+                "web_search_providers": "tavily,brave,searxng,duckduckgo",
                 "memory_injection_budget": 500,
                 "memory_recall_limit": 5,
                 "memory_recall_min_score": 0.0,
@@ -455,6 +463,15 @@ class ConfigStore:
                     "insert or ignore into settings values (?, ?, ?)",
                     (key, json.dumps(value, ensure_ascii=False), now),
                 )
+            web_search_row = conn.execute("select value_json from settings where key='web_search_providers'").fetchone()
+            if web_search_row is not None:
+                with contextlib.suppress(Exception):
+                    current_providers = json.loads(web_search_row["value_json"])
+                    if current_providers in {"tavily,duckduckgo,searxng", "tavily,duckduckgo"}:
+                        conn.execute(
+                            "insert or replace into settings values (?, ?, ?)",
+                            ("web_search_providers", json.dumps("tavily,brave,searxng,duckduckgo"), now),
+                        )
             profile_id = "hermes_default"
             conn.execute(
                 """

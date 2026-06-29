@@ -1051,6 +1051,9 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "tavily_max_results",
             "tavily_timeout_seconds",
             "tavily_base_url",
+            "brave_api_key",
+            "brave_base_url",
+            "brave_timeout_seconds",
             "duckduckgo_timeout_seconds",
             "searxng_base_url",
             "searxng_timeout_seconds",
@@ -1294,6 +1297,8 @@ def _requires_rebuild(changed: dict[str, Any]) -> bool:
         "web_search_enabled",
         "web_search_providers",
         "tavily_api_key",
+        "brave_api_key",
+        "brave_base_url",
         "searxng_base_url",
         "openviking_base_url",
         "openviking_api_key",
@@ -1366,11 +1371,11 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
             raise HTTPException(status_code=422, detail="tavily_timeout_seconds must be a number")
     providers = values.get("web_search_providers")
     if providers is not None:
-        allowed = {"tavily", "duckduckgo", "ddg", "searxng"}
+        allowed = {"tavily", "brave", "brava", "duckduckgo", "ddg", "searxng"}
         unsupported = sorted({item.strip().lower() for item in str(providers).split(",") if item.strip()} - allowed)
         if unsupported:
             raise HTTPException(status_code=422, detail=f"unsupported web search provider: {', '.join(unsupported)}")
-    for key in ("duckduckgo_timeout_seconds", "searxng_timeout_seconds"):
+    for key in ("brave_timeout_seconds", "duckduckgo_timeout_seconds", "searxng_timeout_seconds"):
         if key in values:
             try:
                 if float(values[key]) <= 0:

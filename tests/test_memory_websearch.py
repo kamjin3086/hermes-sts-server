@@ -17,6 +17,7 @@ from hermes_sts.memory import (
     build_memory,
 )
 from hermes_sts.websearch import (
+    BraveSearchProvider,
     ChainedWebSearchProvider,
     DuckDuckGoSearchProvider,
     NoopWebSearchProvider,
@@ -24,6 +25,7 @@ from hermes_sts.websearch import (
     TavilySearchProvider,
     _DuckDuckGoHtmlParser,
     _decode_duckduckgo_url,
+    build_websearch,
 )
 
 
@@ -215,6 +217,47 @@ class TavilySearchProviderTests(unittest.TestCase):
         self.assertEqual(provider._timeout, 3.0)
 
 
+class BraveSearchProviderTests(unittest.TestCase):
+    def test_provider_parses_mocked_json_results(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.host, "api.search.brave.com")
+            self.assertEqual(request.url.path, "/res/v1/web/search")
+            self.assertEqual(request.url.params.get("q"), "hermes sts")
+            self.assertEqual(request.url.params.get("count"), "2")
+            self.assertEqual(request.headers.get("X-Subscription-Token"), "brave-key")
+            return httpx.Response(
+                200,
+                json={
+                    "web": {
+                        "results": [
+                            {"title": "First", "url": "https://example.com/1", "description": "Result one"},
+                            {"title": "Second", "url": "https://example.com/2", "description": "Result two"},
+                            {"title": "Third", "url": "https://example.com/3", "description": "Result three"},
+                        ]
+                    }
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+
+        def client_factory(*args, **kwargs):
+            kwargs["transport"] = transport
+            return real_async_client(*args, **kwargs)
+
+        provider = BraveSearchProvider(Settings(web_search_enabled=True, brave_api_key="brave-key"))
+        with patch("hermes_sts.websearch.httpx.AsyncClient", side_effect=client_factory):
+            hits = _run(provider.search("hermes sts", max_results=2))
+
+        self.assertEqual([hit.title for hit in hits], ["First", "Second"])
+        self.assertEqual(hits[0].url, "https://example.com/1")
+        self.assertEqual(hits[0].content, "Result one")
+
+    def test_missing_api_key_returns_empty(self) -> None:
+        provider = BraveSearchProvider(Settings(web_search_enabled=True, brave_api_key=""))
+        self.assertEqual(_run(provider.search("anything")), [])
+
+
 class NoopWebSearchProviderTests(unittest.TestCase):
     def test_search_returns_empty(self) -> None:
         provider = NoopWebSearchProvider()
@@ -286,10 +329,10 @@ class FakeSearchProvider:
 
 
 class ChainedWebSearchProviderTests(unittest.TestCase):
-    def test_falls_back_and_prefers_recent_success(self) -> None:
+    def test_falls_back_without_overriding_priority_order(self) -> None:
         empty = FakeSearchProvider("empty")
         good = FakeSearchProvider("good", [SearchHit(title="ok", url="https://example.test", content="hit")])
-        provider = ChainedWebSearchProvider([empty, good], cooldown_seconds=30.0)
+        provider = ChainedWebSearchProvider([empty, good], cooldown_seconds=0.0)
 
         first = _run(provider.search("anything"))
         second = _run(provider.search("anything else"))
@@ -297,10 +340,53 @@ class ChainedWebSearchProviderTests(unittest.TestCase):
 
         self.assertEqual(first[0].title, "ok")
         self.assertEqual(second[0].title, "ok")
-        self.assertEqual(empty.calls, 1)
+        self.assertEqual(empty.calls, 2)
         self.assertEqual(good.calls, 2)
         self.assertEqual(state["recent_success"], "good")
         self.assertEqual(state["providers"], ["empty", "good"])
+
+
+class BuildWebSearchTests(unittest.TestCase):
+    def test_prefers_one_configured_online_api_then_searxng_then_duckduckgo(self) -> None:
+        settings = Settings(
+            web_search_enabled=True,
+            web_search_providers="duckduckgo,searxng,brave,tavily",
+            tavily_api_key="tavily-key",
+            brave_api_key="brave-key",
+            searxng_base_url="http://searx.local",
+        )
+
+        provider = build_websearch(settings)
+
+        self.assertIsInstance(provider, ChainedWebSearchProvider)
+        self.assertEqual(
+            provider.state()["providers"],
+            ["brave", "searxng(http://searx.local)", "duckduckgo"],
+        )
+
+    def test_skips_unconfigured_online_and_searxng_providers(self) -> None:
+        settings = Settings(
+            web_search_enabled=True,
+            web_search_providers="tavily,brave,searxng,duckduckgo",
+            tavily_api_key="",
+            brave_api_key="",
+            searxng_base_url="",
+        )
+
+        provider = build_websearch(settings)
+
+        self.assertIsInstance(provider, DuckDuckGoSearchProvider)
+
+    def test_brava_alias_maps_to_brave_for_compatibility(self) -> None:
+        settings = Settings(
+            web_search_enabled=True,
+            web_search_providers="brava",
+            brave_api_key="brave-key",
+        )
+
+        provider = build_websearch(settings)
+
+        self.assertIsInstance(provider, BraveSearchProvider)
 
 
 class _FakeResponse:

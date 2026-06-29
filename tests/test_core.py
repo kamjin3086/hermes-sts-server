@@ -1131,6 +1131,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn("--codec-chunk-dur 0.5", settings.qwentts_cpp_extra_args)
         self.assertIn("--codec-left-dur 0.1", settings.qwentts_cpp_extra_args)
 
+    def test_config_store_migrates_legacy_web_search_provider_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+            store.set_settings({"web_search_providers": "tavily,duckduckgo,searxng"})
+            store.ensure_defaults()
+            migrated = store.load_settings()
+
+            custom_store = ConfigStore(Path(tmp) / "custom.sqlite3")
+            custom_store.set_settings({"web_search_providers": "duckduckgo,tavily"})
+            custom_store.ensure_defaults()
+            custom = custom_store.load_settings()
+
+        self.assertEqual(migrated.web_search_providers, "tavily,brave,searxng,duckduckgo")
+        self.assertEqual(custom.web_search_providers, "duckduckgo,tavily")
+
     def test_config_store_llm_profiles_apply_to_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = ConfigStore(Path(tmp) / "config.sqlite3")
@@ -1390,9 +1405,16 @@ class CoreTests(unittest.TestCase):
         self.assertIn("hermes_agent_max_wait_seconds", values)
         self.assertIn("hermes_filler_interval_seconds", values)
         self.assertIn("hermes_max_fillers", values)
+        self.assertIn("brave_api_key", values)
+        self.assertIn("brave_base_url", values)
+        self.assertIn("brave_timeout_seconds", values)
         self.assertEqual(bad_speaker.exception.status_code, 422)
         self.assertEqual(bad_omni_mode.exception.status_code, 422)
         _validate_settings_patch({"tts_provider": "omnivoice", "omnivoice_voice_mode": "auto"})
+        _validate_settings_patch({"web_search_providers": "tavily,brave,searxng,duckduckgo"})
+        _validate_settings_patch({"web_search_providers": "brava", "brave_timeout_seconds": 1.5})
+        with self.assertRaises(HTTPException):
+            _validate_settings_patch({"web_search_providers": "unknown"})
 
     def test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
