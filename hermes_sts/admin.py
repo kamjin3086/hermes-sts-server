@@ -42,10 +42,10 @@ QWEN_SPEAKERS = [
 ]
 
 QWEN_MODEL_FILES = {
-    "base": "qwen-talker-1.7b-base-Q4_K_M.gguf",
-    "customvoice": "qwen-talker-1.7b-customvoice-Q4_K_M.gguf",
-    "voicedesign": "qwen-talker-1.7b-voicedesign-Q4_K_M.gguf",
-    "codec": "qwen-tokenizer-12hz-Q4_K_M.gguf",
+    "base": "qwen-talker-1.7b-base-Q8_0.gguf",
+    "customvoice": "qwen-talker-1.7b-customvoice-Q8_0.gguf",
+    "voicedesign": "qwen-talker-1.7b-voicedesign-Q8_0.gguf",
+    "codec": "qwen-tokenizer-12hz-Q8_0.gguf",
 }
 QWEN_MODEL_REPO = "https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/main"
 SERVER_STARTED_AT = time.time()
@@ -850,6 +850,8 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "llm_max_tokens",
             "llm_timeout_seconds",
             "llm_streaming_enabled",
+            "llm_cache_prompt",
+            "llm_cache_slot",
             "hermes_voice_no_think",
             "hermes_history_max_messages",
             "hermes_history_max_chars",

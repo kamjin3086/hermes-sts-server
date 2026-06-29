@@ -164,7 +164,7 @@ class CommandWavTts:
         try:
             result = subprocess.run(
                 self._command(wav_path, voice=voice),
-                input=text.encode("utf-8"),
+                input=_stdin_text(text),
                 check=False,
                 capture_output=True,
                 timeout=self._timeout_seconds(),
@@ -314,7 +314,7 @@ class QwenTtsCpp(CommandWavTts):
             cmd.extend(["--speaker", voice.speaker])
         if voice.instruct:
             cmd.extend(["--instruct", voice.instruct])
-        if voice.ref_wav:
+        if voice.ref_wav and not (voice.ref_spk or voice.ref_rvq):
             cmd.extend(["--ref-wav", voice.ref_wav])
         if voice.ref_text:
             cmd.extend(["--ref-text", voice.ref_text])
@@ -347,7 +347,7 @@ class QwenTtsCpp(CommandWavTts):
         stderr_task = asyncio.create_task(process.stderr.read())
         decoder = _StreamingWavPcm16Decoder(target_rate=self.settings.sample_rate)
         try:
-            process.stdin.write(text.encode("utf-8"))
+            process.stdin.write(_stdin_text(text))
             await process.stdin.drain()
             process.stdin.close()
             while True:
@@ -410,6 +410,12 @@ def _read_wav_as_pcm16_mono(path: Path, target_rate: int) -> bytes:
     if rate != target_rate and audio.size:
         audio = _resample_linear(audio.astype(np.float32), rate, target_rate).astype(np.int16)
     return audio.tobytes()
+
+
+def _stdin_text(text: str) -> bytes:
+    if not text.endswith("\n"):
+        text += "\n"
+    return text.encode("utf-8")
 
 
 class _StreamingWavPcm16Decoder:

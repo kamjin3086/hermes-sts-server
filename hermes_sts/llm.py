@@ -124,6 +124,7 @@ class BaseOpenAIChatProvider:
             "stream": True,
             "max_tokens": self.max_tokens,
         }
+        self._apply_prompt_cache_options(body)
         if self.conversation_id is not None:
             body["user"] = self.conversation_id
         if tools:
@@ -172,6 +173,7 @@ class BaseOpenAIChatProvider:
             "stream": False,
             "max_tokens": self.max_tokens,
         }
+        self._apply_prompt_cache_options(body)
         if self.conversation_id is not None:
             body["user"] = self.conversation_id
         if tools:
@@ -315,6 +317,12 @@ class BaseOpenAIChatProvider:
 
     def _prepare_messages(self, messages: list[Message]) -> list[Message]:
         return messages
+
+    def _apply_prompt_cache_options(self, body: dict[str, Any]) -> None:
+        if self.settings.llm_cache_prompt:
+            body["cache_prompt"] = True
+        if self.settings.llm_cache_slot >= 0:
+            body["id_slot"] = self.settings.llm_cache_slot
 
     def archive_current_conversation(self, reason: str) -> None:
         if self.conversation_store is None or self.conversation_id is None:

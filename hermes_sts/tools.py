@@ -33,7 +33,7 @@ class ToolSpec:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters,
+                "parameters": _canonical_json_value(self.parameters),
             },
         }
 
@@ -90,7 +90,7 @@ class ToolRegistry:
         tools: dict[str, ToolSpec] = {}
         tools.update(self._local_tools)
         tools.update(self._client_tools)
-        return [tool.as_openai_tool() for tool in tools.values()]
+        return [tool.as_openai_tool() for tool in sorted(tools.values(), key=lambda tool: tool.name)]
 
     def snapshot(self) -> dict[str, list[dict[str, Any]]]:
         return {
@@ -255,3 +255,11 @@ def _make_web_search_handler(provider: WebSearchProvider) -> ToolHandler:
         return "\n\n".join(lines)[:2000]
 
     return handler
+
+
+def _canonical_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonical_json_value(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonical_json_value(item) for item in value]
+    return value

@@ -53,6 +53,8 @@ ENV_TO_ATTR: dict[str, str] = {
     "LLM_API_KEY": "llm_api_key",
     "LLM_MAX_TOKENS": "llm_max_tokens",
     "LLM_TIMEOUT_SECONDS": "llm_timeout_seconds",
+    "STS_LLM_CACHE_PROMPT": "llm_cache_prompt",
+    "STS_LLM_CACHE_SLOT": "llm_cache_slot",
     "LLM_FALLBACK_ENABLED": "llm_fallback_enabled",
     "LLM_FALLBACK_BASE_URL": "llm_fallback_base_url",
     "LLM_FALLBACK_MODEL": "llm_fallback_model",

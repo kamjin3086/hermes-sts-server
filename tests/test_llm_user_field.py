@@ -92,6 +92,51 @@ class TestUserField(unittest.TestCase):
         body = captured.get("body", {})
         self.assertNotIn("user", body)
 
+    def test_chat_enables_llama_prompt_cache_by_default(self):
+        """llama.cpp prompt cache options should be present on text requests."""
+        captured: dict = {}
+        orig_client = httpx.AsyncClient
+        try:
+            httpx.AsyncClient = self._make_fake_client(captured)  # type: ignore[misc]
+            provider = _ConcreteProvider(Settings())
+            asyncio.run(provider.chat("hello"))
+        finally:
+            httpx.AsyncClient = orig_client
+
+        body = captured.get("body", {})
+        self.assertIs(body.get("cache_prompt"), True)
+        self.assertNotIn("id_slot", body)
+
+    def test_chat_can_pin_llama_prompt_cache_slot(self):
+        """Dedicated llama.cpp deployments can pin a known-safe slot."""
+        captured: dict = {}
+        orig_client = httpx.AsyncClient
+        try:
+            httpx.AsyncClient = self._make_fake_client(captured)  # type: ignore[misc]
+            provider = _ConcreteProvider(Settings(llm_cache_slot=3))
+            asyncio.run(provider.chat("hello"))
+        finally:
+            httpx.AsyncClient = orig_client
+
+        body = captured.get("body", {})
+        self.assertIs(body.get("cache_prompt"), True)
+        self.assertEqual(body.get("id_slot"), 3)
+
+    def test_chat_can_disable_llama_prompt_cache_options(self):
+        """Non-llama OpenAI-compatible backends can opt out of extra fields."""
+        captured: dict = {}
+        orig_client = httpx.AsyncClient
+        try:
+            httpx.AsyncClient = self._make_fake_client(captured)  # type: ignore[misc]
+            provider = _ConcreteProvider(Settings(llm_cache_prompt=False, llm_cache_slot=-1))
+            asyncio.run(provider.chat("hello"))
+        finally:
+            httpx.AsyncClient = orig_client
+
+        body = captured.get("body", {})
+        self.assertNotIn("cache_prompt", body)
+        self.assertNotIn("id_slot", body)
+
 
 if __name__ == "__main__":
     unittest.main()

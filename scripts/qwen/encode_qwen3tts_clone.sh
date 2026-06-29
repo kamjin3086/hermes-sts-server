@@ -9,8 +9,8 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LAB_DIR="${QWENTTS_LAB_DIR:-/home/kamjin/projects/hermes-tts-lab}"
 CODEC_BIN="${QWENTTS_CODEC_BIN:-$LAB_DIR/src/qwentts.cpp/build/qwen-codec}"
-MODEL="${QWENTTS_CPP_CODEC:-$LAB_DIR/models/qwen-tokenizer-12hz-Q4_K_M.gguf}"
-TALKER="${QWENTTS_CPP_MODEL:-$LAB_DIR/models/qwen-talker-1.7b-base-Q4_K_M.gguf}"
+MODEL="${QWENTTS_CPP_CODEC:-$LAB_DIR/models/qwen-tokenizer-12hz-Q8_0.gguf}"
+TALKER="${QWENTTS_CPP_MODEL:-$LAB_DIR/models/qwen-talker-1.7b-base-Q8_0.gguf}"
 BACKEND="${QWENTTS_CPP_BACKEND:-Vulkan0}"
 REF_WAV="$1"
 

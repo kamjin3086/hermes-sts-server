@@ -96,7 +96,7 @@ The default `qwen3tts` provider runs `qwentts.cpp` as an isolated C++/GGML
 subprocess with `GGML_BACKEND=Vulkan0`, then converts the generated 24 kHz WAV
 to the STS server's 16 kHz PCM16 stream.
 
-Install/build the lab runtime and download the Q4 GGUF model:
+Install/build the lab runtime and download the default Q8_0 GGUF model:
 
 ```bash
 # Optional: let the script install Fedora Vulkan build packages with sudo.
@@ -104,6 +104,14 @@ QWENTTS_INSTALL_SYSTEM_DEPS=1 ./scripts/qwen/setup_qwentts_lab.sh
 
 # Re-run later without sudo once dependencies are present.
 ./scripts/qwen/setup_qwentts_lab.sh
+```
+
+Q8_0 is the preferred default for Qwen3TTS voice quality. Q4_K_M uses much less
+VRAM and disk, but it is more likely to introduce rough, hoarse, or unstable
+voice texture. On constrained GPUs, download the smaller model with:
+
+```bash
+QWENTTS_QUANT=Q4_K_M ./scripts/qwen/setup_qwentts_lab.sh
 ```
 
 Benchmark Qwen3TTS against the checked-in prompt set:
@@ -182,6 +190,17 @@ Deployment boundary:
 - Console stage: Hermes/LLM URL and API key, TTS engine, Qwen voice mode,
   persona prompts, saved voices, model paths, VAD, and low-frequency runtime
   tuning.
+
+LLM prompt cache:
+
+- Text requests send llama.cpp-compatible `cache_prompt: true` by default.
+- By default requests do not pin `id_slot`, so this service will not overwrite a
+  slot another agent is explicitly using.
+- For a dedicated llama.cpp server, set `STS_LLM_CACHE_SLOT` to a known-safe slot
+  number so serial voice turns reuse the same KV cache. Keep
+  `STS_LLM_MAX_CONCURRENT_REQUESTS=1` when using this mode.
+- For non-llama.cpp OpenAI-compatible backends, disable extra fields with
+  `STS_LLM_CACHE_PROMPT=false` and `STS_LLM_CACHE_SLOT=-1`.
 
 Stop the service:
 

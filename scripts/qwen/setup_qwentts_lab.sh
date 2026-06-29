@@ -4,6 +4,7 @@ set -euo pipefail
 LAB_DIR="${QWENTTS_LAB_DIR:-/home/kamjin/projects/hermes-tts-lab}"
 SRC_DIR="$LAB_DIR/src/qwentts.cpp"
 MODELS_DIR="$LAB_DIR/models"
+QUANT="${QWENTTS_QUANT:-Q8_0}"
 
 mkdir -p "$LAB_DIR/src" "$MODELS_DIR" "$LAB_DIR/build" "$LAB_DIR/samples" "$LAB_DIR/benchmarks"
 
@@ -48,11 +49,11 @@ else
 fi
 
 "${HF_DOWNLOAD[@]}" Serveurperso/Qwen3-TTS-GGUF \
-  qwen-talker-1.7b-base-Q4_K_M.gguf \
-  qwen-tokenizer-12hz-Q4_K_M.gguf \
+  "qwen-talker-1.7b-base-${QUANT}.gguf" \
+  "qwen-tokenizer-12hz-${QUANT}.gguf" \
   --local-dir "$MODELS_DIR"
 
 echo "QwenTTS lab ready:"
 echo "  bin=$SRC_DIR/build/qwen-tts"
-echo "  model=$MODELS_DIR/qwen-talker-1.7b-base-Q4_K_M.gguf"
-echo "  codec=$MODELS_DIR/qwen-tokenizer-12hz-Q4_K_M.gguf"
+echo "  model=$MODELS_DIR/qwen-talker-1.7b-base-${QUANT}.gguf"
+echo "  codec=$MODELS_DIR/qwen-tokenizer-12hz-${QUANT}.gguf"

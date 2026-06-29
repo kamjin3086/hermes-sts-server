@@ -3,8 +3,8 @@ set -euo pipefail
 
 LAB_DIR="${QWENTTS_LAB_DIR:-/home/kamjin/projects/hermes-tts-lab}"
 BIN="${QWENTTS_CPP_BIN:-$LAB_DIR/src/qwentts.cpp/build/qwen-tts}"
-MODEL="${QWENTTS_CPP_MODEL:-$LAB_DIR/models/qwen-talker-1.7b-base-Q4_K_M.gguf}"
-CODEC="${QWENTTS_CPP_CODEC:-$LAB_DIR/models/qwen-tokenizer-12hz-Q4_K_M.gguf}"
+MODEL="${QWENTTS_CPP_MODEL:-$LAB_DIR/models/qwen-talker-1.7b-base-Q8_0.gguf}"
+CODEC="${QWENTTS_CPP_CODEC:-$LAB_DIR/models/qwen-tokenizer-12hz-Q8_0.gguf}"
 BACKEND="${QWENTTS_CPP_BACKEND:-Vulkan0}"
 LANG="${QWENTTS_CPP_LANG:-Chinese}"
 SAMPLES_DIR="$LAB_DIR/samples"
@@ -30,23 +30,28 @@ run_case() {
   {
     echo "===== $name ====="
     echo "$text"
+    start_ns="$(date +%s%N)"
     /usr/bin/time -f "wall_seconds=%e max_rss_kb=%M" env GGML_BACKEND="$BACKEND" "$BIN" \
       --model "$MODEL" \
       --codec "$CODEC" \
       --format wav16 \
       --lang "$LANG" \
       -o "$out" <<<"$text"
-    python - "$out" <<'PY'
+    end_ns="$(date +%s%N)"
+    python - "$out" "$start_ns" "$end_ns" <<'PY'
 import sys, wave
 path = sys.argv[1]
+wall_seconds = (int(sys.argv[3]) - int(sys.argv[2])) / 1_000_000_000
 with wave.open(path, "rb") as wf:
     raw = wf.readframes(wf.getnframes())
     width = wf.getsampwidth()
+    audio_seconds = wf.getnframes() / wf.getframerate() if wf.getframerate() else 0.0
     if width == 2:
         peak = max((abs(int.from_bytes(raw[i:i + 2], "little", signed=True)) for i in range(0, len(raw), 2)), default=0)
     else:
         peak = 0
-    print(f"wav={path} rate={wf.getframerate()} channels={wf.getnchannels()} width={width} frames={wf.getnframes()} peak={peak}")
+    rtf = wall_seconds / audio_seconds if audio_seconds else 0.0
+    print(f"wav={path} rate={wf.getframerate()} channels={wf.getnchannels()} width={width} frames={wf.getnframes()} audio_seconds={audio_seconds:.2f} rtf={rtf:.2f} peak={peak}")
 PY
   } 2>&1 | tee -a "$LOG"
 }

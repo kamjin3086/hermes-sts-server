@@ -95,6 +95,8 @@ class Settings:
     llm_api_key: str = os.getenv("LLM_API_KEY", os.getenv("HERMES_API_KEY", ""))
     llm_max_tokens: int = _int_env("LLM_MAX_TOKENS", _int_env("HERMES_MAX_TOKENS", 220))
     llm_timeout_seconds: float = _float_env("LLM_TIMEOUT_SECONDS", _float_env("HERMES_TIMEOUT_SECONDS", 45.0))
+    llm_cache_prompt: bool = _bool_env("STS_LLM_CACHE_PROMPT", True)
+    llm_cache_slot: int = _int_env("STS_LLM_CACHE_SLOT", -1)
     llm_fallback_enabled: bool = _bool_env("LLM_FALLBACK_ENABLED", True)
     llm_fallback_base_url: str = os.getenv("LLM_FALLBACK_BASE_URL", "")
     llm_fallback_model: str = os.getenv("LLM_FALLBACK_MODEL", "")
@@ -138,23 +140,23 @@ class Settings:
     )
     qwentts_cpp_model: str = _path_env(
         "QWENTTS_CPP_MODEL",
-        "../hermes-tts-lab/models/qwen-talker-1.7b-base-Q4_K_M.gguf",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-base-Q8_0.gguf",
     )
     qwentts_cpp_codec: str = _path_env(
         "QWENTTS_CPP_CODEC",
-        "../hermes-tts-lab/models/qwen-tokenizer-12hz-Q4_K_M.gguf",
+        "../hermes-tts-lab/models/qwen-tokenizer-12hz-Q8_0.gguf",
     )
     qwentts_cpp_base_model: str = _path_env(
         "QWENTTS_CPP_BASE_MODEL",
-        "../hermes-tts-lab/models/qwen-talker-1.7b-base-Q4_K_M.gguf",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-base-Q8_0.gguf",
     )
     qwentts_cpp_customvoice_model: str = _path_env(
         "QWENTTS_CPP_CUSTOMVOICE_MODEL",
-        "../hermes-tts-lab/models/qwen-talker-1.7b-customvoice-Q4_K_M.gguf",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-customvoice-Q8_0.gguf",
     )
     qwentts_cpp_voicedesign_model: str = _path_env(
         "QWENTTS_CPP_VOICEDESIGN_MODEL",
-        "../hermes-tts-lab/models/qwen-talker-1.7b-voicedesign-Q4_K_M.gguf",
+        "../hermes-tts-lab/models/qwen-talker-1.7b-voicedesign-Q8_0.gguf",
     )
     qwentts_cpp_voice_mode: str = os.getenv("QWENTTS_CPP_VOICE_MODE", "default")
     qwentts_cpp_voice_preset: str = os.getenv("QWENTTS_CPP_VOICE_PRESET", "")

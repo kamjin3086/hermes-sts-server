@@ -29,7 +29,7 @@ from hermes_sts.config_store import ConfigStore
 from hermes_sts.conversation_store import ConversationStore
 from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, LLMToolCallDetected, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
-from hermes_sts.tts import QwenTtsCpp, TtsVoice, build_tts
+from hermes_sts.tts import QwenTtsCpp, TtsVoice, _stdin_text, build_tts
 from hermes_sts.tools import ToolRegistry
 from hermes_sts.vad import EnergyVad, build_vad
 
@@ -193,6 +193,68 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result.forwarded)
         self.assertEqual(result.mode, "client")
         self.assertEqual(result.arguments, {"dance": "happy"})
+
+    def test_tool_registry_openai_tools_are_canonical(self) -> None:
+        first = ToolRegistry()
+        first.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "zeta",
+                    "description": "Second by name.",
+                    "parameters": {
+                        "required": ["b", "a"],
+                        "properties": {
+                            "b": {"description": "B", "type": "string"},
+                            "a": {"type": "string", "description": "A"},
+                        },
+                        "type": "object",
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "alpha",
+                    "description": "First by name.",
+                    "parameters": {
+                        "properties": {"x": {"type": "string", "description": "X"}},
+                        "type": "object",
+                    },
+                },
+            ]
+        )
+        second = ToolRegistry()
+        second.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "alpha",
+                    "description": "First by name.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"description": "X", "type": "string"}},
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "zeta",
+                    "description": "Second by name.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"description": "A", "type": "string"},
+                            "b": {"type": "string", "description": "B"},
+                        },
+                        "required": ["b", "a"],
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(first.openai_tools(), second.openai_tools())
+        self.assertEqual(
+            [tool["function"]["name"] for tool in first.openai_tools()],
+            ["alpha", "current_time", "noop", "zeta"],
+        )
 
     def test_tool_registry_snapshot_groups_local_and_client_tools(self) -> None:
         registry = ToolRegistry()
@@ -636,7 +698,7 @@ class CoreTests(unittest.TestCase):
             )
             pcm16 = QwenTtsCpp(settings)._synthesize_sync("你好")
 
-            self.assertEqual(marker_path.read_text(encoding="utf-8"), "Vulkan0|你好")
+            self.assertEqual(marker_path.read_text(encoding="utf-8"), "Vulkan0|你好\n")
             self.assertGreater(len(pcm16), 0)
             self.assertEqual(len(pcm16) % 2, 0)
             self.assertLess(len(pcm16), 2400 * 2)
@@ -810,6 +872,10 @@ class CoreTests(unittest.TestCase):
                     ref_rvq="/tmp/ref.rvq",
                 ),
             )
+            ref_wav_cmd = provider._command(
+                tmp_path / "ref_wav.wav",
+                voice=TtsVoice(ref_wav="/tmp/ref.wav"),
+            )
 
         self.assertIn("--speaker", speaker_cmd)
         self.assertIn("vivian", speaker_cmd)
@@ -818,14 +884,20 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("--speaker", clone_cmd)
         self.assertIn("--instruct", clone_cmd)
         self.assertIn("warm tone", clone_cmd)
-        self.assertIn("--ref-wav", clone_cmd)
-        self.assertIn("/tmp/ref.wav", clone_cmd)
+        self.assertNotIn("--ref-wav", clone_cmd)
+        self.assertNotIn("/tmp/ref.wav", clone_cmd)
         self.assertIn("--ref-text", clone_cmd)
         self.assertIn("/tmp/ref.txt", clone_cmd)
         self.assertIn("--ref-spk", clone_cmd)
         self.assertIn("/tmp/ref.spk", clone_cmd)
         self.assertIn("--ref-rvq", clone_cmd)
         self.assertIn("/tmp/ref.rvq", clone_cmd)
+        self.assertIn("--ref-wav", ref_wav_cmd)
+        self.assertIn("/tmp/ref.wav", ref_wav_cmd)
+
+    def test_qwen3tts_stdin_text_is_newline_terminated(self) -> None:
+        self.assertEqual(_stdin_text("你好"), "你好\n".encode("utf-8"))
+        self.assertEqual(_stdin_text("你好\n"), "你好\n".encode("utf-8"))
 
     def test_qwen3tts_command_uses_voice_snapshot_for_deterministic_turns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
