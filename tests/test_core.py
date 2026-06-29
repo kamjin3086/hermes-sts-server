@@ -278,6 +278,22 @@ class CoreTests(unittest.TestCase):
         provider._reset_history_if_idle(15.0)
         self.assertEqual(provider.history, [])
 
+    def test_llm_history_prompt_keeps_stable_anchor_when_window_slides(self) -> None:
+        settings = Settings(
+            hermes_history_max_messages=6,
+            hermes_history_anchor_messages=2,
+            hermes_history_max_chars=10000,
+        )
+        provider = DummyChatProvider(settings)
+        provider.history = [{"role": "user", "content": f"m{i}"} for i in range(10)]
+
+        first = provider._history_for_prompt()
+        provider.history.extend([{"role": "assistant", "content": "m10"}, {"role": "user", "content": "m11"}])
+        second = provider._history_for_prompt()
+
+        self.assertEqual([message["content"] for message in first], ["m0", "m1", "m6", "m7", "m8", "m9"])
+        self.assertEqual([message["content"] for message in second], ["m0", "m1", "m8", "m9", "m10", "m11"])
+
     def test_tool_registry_executes_registered_tool(self) -> None:
         result = asyncio.run(ToolRegistry().execute("noop", "{}"))
         self.assertEqual(result.result, "noop completed")
@@ -1473,20 +1489,12 @@ class CoreTests(unittest.TestCase):
 
     def test_admin_state_exposes_ui_required_values_and_validates_qwen_speaker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            old_db = os.environ.get("HERMES_STS_CONFIG_DB")
-            os.environ["HERMES_STS_CONFIG_DB"] = str(Path(tmp) / "admin.sqlite3")
-            try:
-                store = ConfigStore.default()
-                payload = _settings_payload(store.load_settings(), store)
-                with self.assertRaises(HTTPException) as bad_speaker:
-                    _validate_settings_patch({"qwentts_cpp_voice_preset": "not_a_real_speaker"})
-                with self.assertRaises(HTTPException) as bad_omni_mode:
-                    _validate_settings_patch({"omnivoice_voice_mode": "preset"})
-            finally:
-                if old_db is None:
-                    os.environ.pop("HERMES_STS_CONFIG_DB", None)
-                else:
-                    os.environ["HERMES_STS_CONFIG_DB"] = old_db
+            store = ConfigStore(Path(tmp) / "admin.sqlite3")
+            payload = _settings_payload(store.load_settings(), store)
+            with self.assertRaises(HTTPException) as bad_speaker:
+                _validate_settings_patch({"qwentts_cpp_voice_preset": "not_a_real_speaker"})
+            with self.assertRaises(HTTPException) as bad_omni_mode:
+                _validate_settings_patch({"omnivoice_voice_mode": "preset"})
 
         values = payload["values"]
         self.assertIn("sts_persona_source", values)
@@ -1499,6 +1507,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("omnivoice_model", values)
         self.assertIn("hermes_history_max_messages", values)
         self.assertIn("hermes_history_max_chars", values)
+        self.assertIn("hermes_history_anchor_messages", values)
         self.assertIn("hermes_history_idle_reset_seconds", values)
         self.assertIn("hermes_agent_max_wait_seconds", values)
         self.assertIn("hermes_filler_interval_seconds", values)
@@ -1516,30 +1525,22 @@ class CoreTests(unittest.TestCase):
 
     def test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            old_db = os.environ.get("HERMES_STS_CONFIG_DB")
-            os.environ["HERMES_STS_CONFIG_DB"] = str(Path(tmp) / "admin.sqlite3")
-            try:
-                store = ConfigStore.default()
-                voice_id = "seed_test"
-                store.upsert_voice(
-                    {
-                        "id": voice_id,
-                        "name": "冷静 A",
-                        "provider": "qwen3tts",
-                        "mode": "seed",
-                        "seed": 12345,
-                        "tags": "冷静,清晰",
-                        "note": "第三条随机，低频更稳",
-                    }
-                )
-                voice = store.voice_profile(voice_id)
-                store.set_settings({"qwentts_cpp_voice_mode": "default", "qwentts_cpp_seed": voice["seed"]})
-                settings = store.load_settings()
-            finally:
-                if old_db is None:
-                    os.environ.pop("HERMES_STS_CONFIG_DB", None)
-                else:
-                    os.environ["HERMES_STS_CONFIG_DB"] = old_db
+            store = ConfigStore(Path(tmp) / "admin.sqlite3")
+            voice_id = "seed_test"
+            store.upsert_voice(
+                {
+                    "id": voice_id,
+                    "name": "冷静 A",
+                    "provider": "qwen3tts",
+                    "mode": "seed",
+                    "seed": 12345,
+                    "tags": "冷静,清晰",
+                    "note": "第三条随机，低频更稳",
+                }
+            )
+            voice = store.voice_profile(voice_id)
+            store.set_settings({"qwentts_cpp_voice_mode": "default", "qwentts_cpp_seed": voice["seed"]})
+            settings = store.load_settings()
 
         self.assertIsNotNone(voice)
         self.assertEqual(voice["tags"], "冷静,清晰")
@@ -1625,8 +1626,9 @@ class CoreTests(unittest.TestCase):
 
     def test_realtime_turn_metrics_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            old_db = os.environ.get("HERMES_STS_CONFIG_DB")
-            os.environ["HERMES_STS_CONFIG_DB"] = str(Path(tmp) / "metrics.sqlite3")
+            store = ConfigStore(Path(tmp) / "metrics.sqlite3")
+            original_default = ConfigStore.default
+            ConfigStore.default = classmethod(lambda cls: store)  # type: ignore[method-assign]
             try:
                 session = bare_session()
                 session.settings = Settings(latency_logging=True)
@@ -1644,12 +1646,9 @@ class CoreTests(unittest.TestCase):
                     ),
                     status="completed",
                 )
-                metrics = ConfigStore.default().metrics(5)
+                metrics = store.metrics(5)
             finally:
-                if old_db is None:
-                    os.environ.pop("HERMES_STS_CONFIG_DB", None)
-                else:
-                    os.environ["HERMES_STS_CONFIG_DB"] = old_db
+                ConfigStore.default = original_default  # type: ignore[method-assign]
 
         self.assertEqual(metrics[0]["kind"], "turn")
         self.assertEqual(metrics[0]["value"]["turn_id"], "turn_test")

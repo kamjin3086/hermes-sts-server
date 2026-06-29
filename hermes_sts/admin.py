@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from hermes_sts.config import ROOT, Settings
-from hermes_sts.config_store import ATTR_TO_ENV, ENV_TO_ATTR, ConfigStore
+from hermes_sts.config_store import ENV_TO_ATTR, ConfigStore
 from hermes_sts.persona import build_persona_instructions
 from hermes_sts.tts import TtsVoice, build_tts
 
@@ -962,6 +962,7 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "hermes_voice_no_think",
             "hermes_history_max_messages",
             "hermes_history_max_chars",
+            "hermes_history_anchor_messages",
             "hermes_history_idle_reset_seconds",
             "memory_enabled",
             "memory_provider",
@@ -1073,7 +1074,7 @@ def _legacy_categories(settings: Settings, store: ConfigStore) -> list[dict[str,
             "name": group,
             "settings": [
                 {
-                    "env": ATTR_TO_ENV.get(key, key),
+                    "env": key,
                     "key": key,
                     "label": _label_for(key),
                     "kind": "password" if key.endswith("api_key") else "text",
@@ -1106,6 +1107,7 @@ def _llm_context_payload(llm: Any, settings: Settings) -> dict[str, Any]:
         "chars": chars,
         "max_messages": settings.hermes_history_max_messages,
         "max_chars": settings.hermes_history_max_chars,
+        "anchor_messages": settings.hermes_history_anchor_messages,
         "idle_reset_seconds": settings.hermes_history_idle_reset_seconds,
         "last_llm_call_started_at": getattr(llm, "last_llm_call_started_at", None),
         "reset_available": callable(getattr(llm, "reset_history", None)),

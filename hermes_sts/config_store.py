@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 import contextlib
@@ -42,6 +41,7 @@ ENV_TO_ATTR: dict[str, str] = {
     "HERMES_FALLBACK_TEXTS": "hermes_fallback_texts",
     "HERMES_HISTORY_MAX_MESSAGES": "hermes_history_max_messages",
     "HERMES_HISTORY_MAX_CHARS": "hermes_history_max_chars",
+    "HERMES_HISTORY_ANCHOR_MESSAGES": "hermes_history_anchor_messages",
     "HERMES_HISTORY_IDLE_RESET_SECONDS": "hermes_history_idle_reset_seconds",
     "HERMES_VOICE_NO_THINK": "hermes_voice_no_think",
     "STS_LLM_PROVIDER": "llm_provider",
@@ -191,11 +191,6 @@ ENV_TO_ATTR: dict[str, str] = {
     "HERMES_STS_CONFIG_DB": "config_db",
 }
 
-ATTR_TO_ENV: dict[str, str] = {}
-for env, attr in ENV_TO_ATTR.items():
-    ATTR_TO_ENV.setdefault(attr, env)
-
-
 PERSONA_PROFILE_DEFAULTS = [
     {
         "id": "operator",
@@ -264,11 +259,7 @@ class ConfigStore:
 
     @classmethod
     def default(cls) -> "ConfigStore":
-        raw = os.getenv("HERMES_STS_CONFIG_DB", str(ROOT / "data" / "hermes_sts.sqlite3"))
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = ROOT / path
-        return cls(path)
+        return cls(ROOT / "data" / "hermes_sts.sqlite3")
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -411,6 +402,11 @@ class ConfigStore:
                 "tts_provider": "qwen3tts",
                 "tts_voice_source": "settings",
                 "llm_streaming_enabled": True,
+                "llm_cache_prompt": True,
+                "llm_cache_slot": -1,
+                "hermes_history_max_messages": 2000,
+                "hermes_history_max_chars": 262144,
+                "hermes_history_anchor_messages": 80,
                 "qwentts_cpp_seed": 42,
                 "qwentts_cpp_max_new_frames": 512,
                 "qwentts_cpp_extra_args": FAST_QWENTTS_EXTRA_ARGS,
@@ -485,14 +481,14 @@ class ConfigStore:
                     profile_id,
                     "Hermes Agent",
                     "hermes_agent",
-                    os.getenv("HERMES_BASE_URL", "http://127.0.0.1:8642/v1"),
-                    os.getenv("HERMES_MODEL", "hermes-agent"),
-                    os.getenv("HERMES_API_KEY", ""),
-                    int(os.getenv("HERMES_MAX_TOKENS", "220")),
-                    float(os.getenv("HERMES_TIMEOUT_SECONDS", "45.0")),
+                    "http://127.0.0.1:8642/v1",
+                    "hermes-agent",
+                    "",
+                    220,
+                    45.0,
                     1,
                     0,
-                    float(os.getenv("HERMES_AGENT_MAX_WAIT_SECONDS", "60.0")),
+                    60.0,
                     1,
                     0,
                     "默认 Hermes Agent 连接",

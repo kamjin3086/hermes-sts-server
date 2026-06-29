@@ -589,15 +589,50 @@ class BaseOpenAIChatProvider:
         if not self.history or max_messages == 0 or max_chars == 0:
             return []
 
-        recent = self.history[-max_messages:]
-        total = 0
+        selected, anchor_count = self._history_window_with_anchor(max_messages)
+        kept = self._trim_history_to_char_budget(selected, max_chars, anchor_count)
+        return self._sanitize_prompt_messages(kept)
+
+    def _history_window_with_anchor(self, max_messages: int) -> tuple[list[Message], int]:
+        if len(self.history) <= max_messages:
+            return list(self.history), len(self.history)
+
+        anchor_messages = max(0, getattr(self.settings, "hermes_history_anchor_messages", 0))
+        anchor_count = min(anchor_messages, max_messages)
+        if anchor_count == 0:
+            return list(self.history[-max_messages:]), 0
+
+        tail_count = max_messages - anchor_count
+        if tail_count == 0:
+            return list(self.history[:anchor_count]), anchor_count
+
+        anchor = self.history[:anchor_count]
+        tail_start = max(anchor_count, len(self.history) - tail_count)
+        return list(anchor) + list(self.history[tail_start:]), anchor_count
+
+    @staticmethod
+    def _trim_history_to_char_budget(messages: list[Message], max_chars: int, anchor_count: int) -> list[Message]:
+        total = sum(len(str(message.get("content", ""))) for message in messages)
+        if total <= max_chars:
+            return messages
+
+        kept = list(messages)
+        index = min(max(anchor_count, 0), max(len(kept) - 1, 0))
+        while len(kept) > max(anchor_count, 1) and total > max_chars and index < len(kept):
+            content_len = len(str(kept[index].get("content", "")))
+            total -= content_len
+            del kept[index]
+        if total <= max_chars:
+            return kept
+
         kept_reversed: list[Message] = []
-        for message in reversed(recent):
+        total = 0
+        for message in reversed(messages):
             total += len(str(message.get("content", "")))
             if total > max_chars and kept_reversed:
                 break
             kept_reversed.append(message)
-        return self._sanitize_prompt_messages(list(reversed(kept_reversed)))
+        return list(reversed(kept_reversed))
 
     @property
     def base_url(self) -> str:
