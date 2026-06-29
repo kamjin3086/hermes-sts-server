@@ -1056,8 +1056,10 @@ class CoreTests(unittest.TestCase):
             sts_persona_source="settings",
             sts_persona_preset="night_copilot",
         )
-        self.assertIn("夜航副驾", session._effective_instructions())
-        self.assertNotIn("WS profile", session._effective_instructions("temporary"))
+        settings_effective = session._effective_instructions("temporary")
+        self.assertIn("夜航副驾", settings_effective)
+        self.assertIn("WS profile", settings_effective)
+        self.assertIn("Response-specific instructions", settings_effective)
 
         session.settings = Settings(
             sts_persona_source="ws",

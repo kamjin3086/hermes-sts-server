@@ -368,19 +368,20 @@ class RealtimeSession:
 
     def _effective_instructions(self, response_instructions: str | None = None) -> str:
         settings_persona = build_persona_instructions(self.settings)
+        ws_instructions = self._merge_instructions(self.instructions, response_instructions or "")
         if self.settings.sts_persona_source.strip().lower() == "ws":
-            ws_instructions = self._merge_instructions(self.instructions, response_instructions or "")
             result = ws_instructions or settings_persona
             logger.info(
                 "DBG effective_instructions session_id=%s source=ws preset=%s chars=%d",
                 self.session_id, self.settings.sts_persona_preset, len(result),
             )
             return result
+        result = self._merge_instructions(settings_persona, ws_instructions)
         logger.info(
             "DBG effective_instructions session_id=%s source=settings preset=%s chars=%d",
-            self.session_id, self.settings.sts_persona_preset, len(settings_persona),
+            self.session_id, self.settings.sts_persona_preset, len(result),
         )
-        return settings_persona
+        return result
 
     def _consume_response_voice(self) -> TtsVoice | None:
         voice = self.next_response_voice
@@ -1352,6 +1353,7 @@ class RealtimeSession:
             "工具调用必须通过 API 的 tool_calls/function_call 结构化字段完成，"
             "不要在正文输出 <tool_call>、<function>、JSON 工具调用或任何工具标签。"
             "工具名、JSON、动作参数和表情标签不能作为语音内容读出来。"
+            "不要描述或评论自己的动作、工具或执行过程；用户要求跳舞、摇头、表情等动作时，应调用工具而不是说自己正在做。"
             "只输出要被朗读的自然语言；不要输出 emoji、颜文字、舞台提示、括号里的情绪动作，"
             "也不要写音色、嗓音、语速、语调或口音描述。音色描述由 TTS 声音配置单独控制。"
             "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
