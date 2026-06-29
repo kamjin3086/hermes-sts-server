@@ -160,21 +160,49 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(clean[0]["content"], "<tool_call>这只是用户原文</tool_call>")
         self.assertEqual(clean[1]["content"], "")
 
-    def test_chat_does_not_save_inline_tool_markup_as_text(self) -> None:
+    def test_chat_parses_inline_tool_markup_without_saving_text(self) -> None:
         class InlineToolProvider(DummyChatProvider):
             async def _post_chat_completions(self, body):
                 return {
                     "choices": [
                         {
                             "message": {
-                                "content": "<function=play_emotion>\n<parameter=emotion>\nattentive\n</parameter>\n</function>"
+                                "content": (
+                                    "<tool_call>dance>\n"
+                                    "<parameter=move>\nside_to_side_sway\n</parameter>\n"
+                                    "<parameter=repeat>\n3\n</parameter>\n"
+                                    "</function>\n"
+                                    "</tool_call>"
+                                )
                             }
                         }
                     ]
                 }
 
         provider = InlineToolProvider(Settings())
-        response = asyncio.run(provider.chat("聊天", tools=[{"type": "function", "function": {"name": "play_emotion"}}]))
+        response = asyncio.run(provider.chat("跳舞", tools=[{"type": "function", "function": {"name": "dance"}}]))
+
+        self.assertEqual(response.text, "")
+        self.assertEqual(len(response.tool_calls), 1)
+        self.assertEqual(response.tool_calls[0].name, "dance")
+        self.assertEqual(response.tool_calls[0].arguments, '{"move": "side_to_side_sway", "repeat": 3}')
+        self.assertEqual(provider.history, [])
+
+    def test_unknown_inline_tool_markup_is_dropped_without_execution(self) -> None:
+        class InlineToolProvider(DummyChatProvider):
+            async def _post_chat_completions(self, body):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "<function=unknown_tool>\n<parameter=x>\n1\n</parameter>\n</function>"
+                            }
+                        }
+                    ]
+                }
+
+        provider = InlineToolProvider(Settings())
+        response = asyncio.run(provider.chat("测试", tools=[{"type": "function", "function": {"name": "dance"}}]))
 
         self.assertEqual(response.text, "")
         self.assertEqual(response.tool_calls, [])

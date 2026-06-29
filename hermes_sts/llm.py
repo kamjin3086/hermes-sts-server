@@ -31,6 +31,15 @@ INLINE_TOOL_BLOCK_RE = re.compile(
     r"|<\s*function(?:\s*=\s*[^>\s]+|\b[^>]*)>.*?<\s*/\s*function\s*>",
     re.IGNORECASE | re.DOTALL,
 )
+INLINE_TOOL_NAME_RE = re.compile(
+    r"<\s*function\s*=\s*([A-Za-z0-9_.:-]+)\s*>"
+    r"|<\s*tool[_-]?call\s*>\s*([A-Za-z0-9_.:-]+)\s*>?",
+    re.IGNORECASE,
+)
+INLINE_TOOL_PARAM_RE = re.compile(
+    r"<\s*parameter\s*=\s*([A-Za-z0-9_.:-]+)\s*>\s*(.*?)\s*<\s*/\s*parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 INLINE_TOOL_PREFIXES = ("<tool_call", "<tool-call", "<toolcall", "<function", "<function=")
 
 
@@ -228,7 +237,12 @@ class BaseOpenAIChatProvider:
 
         message = choice.get("message") or {}
         tool_calls = self._parse_message_tool_calls(message)
-        text, stripped_inline_tool = self._strip_inline_tool_markup((message.get("content") or "").strip())
+        raw_text = (message.get("content") or "").strip()
+        if not tool_calls:
+            tool_calls = self._parse_inline_tool_calls(raw_text, tools)
+            if tool_calls:
+                logger.warning("Parsed inline tool-call markup from assistant content; backend did not return structured tool_calls")
+        text, stripped_inline_tool = self._strip_inline_tool_markup(raw_text)
         if stripped_inline_tool and not tool_calls:
             logger.warning("Dropped inline tool-call markup from assistant content; backend did not return structured tool_calls")
         if transcript and text and not tool_calls:
@@ -401,6 +415,56 @@ class BaseOpenAIChatProvider:
         if text.lstrip().lower().startswith(INLINE_TOOL_PREFIXES):
             return "", True
         return text, True
+
+    @classmethod
+    def _parse_inline_tool_calls(cls, text: str, tools: list[dict[str, Any]] | None) -> list[ToolCall]:
+        if not text or not tools or not INLINE_TOOL_TAG_RE.search(text):
+            return []
+        allowed_names = cls._tool_names(tools)
+        if not allowed_names:
+            return []
+        calls: list[ToolCall] = []
+        for index, block in enumerate(INLINE_TOOL_BLOCK_RE.findall(text) or [text]):
+            match = INLINE_TOOL_NAME_RE.search(block)
+            if not match:
+                continue
+            name = (match.group(1) or match.group(2) or "").strip()
+            if name not in allowed_names:
+                logger.warning("Ignoring inline tool-call markup for unknown tool: %s", name)
+                continue
+            args: dict[str, Any] = {}
+            for key, value in INLINE_TOOL_PARAM_RE.findall(block):
+                args[key.strip()] = cls._coerce_inline_tool_value(value.strip())
+            calls.append(
+                ToolCall(
+                    id=f"call_inline_{index}",
+                    name=name,
+                    arguments=json.dumps(args, ensure_ascii=False),
+                )
+            )
+        return calls
+
+    @staticmethod
+    def _tool_names(tools: list[dict[str, Any]]) -> set[str]:
+        names: set[str] = set()
+        for tool in tools:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            if isinstance(function, dict) and function.get("name"):
+                names.add(str(function["name"]))
+            elif isinstance(tool, dict) and tool.get("name"):
+                names.add(str(tool["name"]))
+        return names
+
+    @staticmethod
+    def _coerce_inline_tool_value(value: str) -> Any:
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+        try:
+            return int(value)
+        except ValueError:
+            return value
 
     def _apply_prompt_cache_options(self, body: dict[str, Any]) -> None:
         if self.settings.llm_cache_prompt:
