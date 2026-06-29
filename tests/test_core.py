@@ -324,6 +324,35 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result.forwarded)
         self.assertEqual(result.mode, "client")
         self.assertEqual(result.arguments, {"dance": "happy"})
+        self.assertFalse(result.needs_response)
+        self.assertEqual(result.category, "motion")
+
+    def test_tool_registry_infers_client_tool_response_policy(self) -> None:
+        registry = ToolRegistry()
+        registry.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                },
+                {
+                    "type": "function",
+                    "name": "play_emotion",
+                    "description": "Play a robot emotion.",
+                    "parameters": {"type": "object", "properties": {"emotion": {"type": "string"}}},
+                },
+            ]
+        )
+
+        camera = asyncio.run(registry.execute("camera", '{"question":"what is this?"}'))
+        emotion = asyncio.run(registry.execute("play_emotion", '{"emotion":"happy"}'))
+
+        self.assertTrue(camera.needs_response)
+        self.assertEqual(camera.category, "vision")
+        self.assertFalse(emotion.needs_response)
+        self.assertEqual(emotion.category, "emotion")
 
     def test_tool_registry_openai_tools_are_canonical(self) -> None:
         first = ToolRegistry()
@@ -499,12 +528,49 @@ class CoreTests(unittest.TestCase):
             session._ask_llm_with_tools("跳舞", response_id="resp_1", item_id="item_1")
         )
 
-        self.assertEqual(answer, "")
+        self.assertIsNone(answer)
+        self.assertIsNone(session.pending_tool_context)
+        event_types = [event["type"] for event in events]
+        self.assertEqual(event_types, ["response.created", "response.function_call_arguments.done", "response.output_audio.done", "response.output_audio_transcript.done", "response.done"])
+        self.assertEqual(events[1]["name"], "dance")
+        self.assertEqual(events[1]["call_id"], "call_1")
+        self.assertEqual(events[1]["arguments"], '{"dance": "happy"}')
+
+    def test_session_keeps_followup_for_client_tool_that_needs_response(self) -> None:
+        class FakeLlm:
+            async def chat(self, *args, **kwargs):
+                return LLMResponse(
+                    tool_calls=[ToolCall(id="call_camera", name="camera", arguments='{"question":"what is this?"}')]
+                )
+
+            async def ensure_active_conversation(self) -> str:
+                return ""
+
+        session = bare_session()
+        session.llm = FakeLlm()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                }
+            ]
+        )
+        events = []
+
+        async def fake_send(self, event):
+            events.append(event)
+
+        session._send = types.MethodType(fake_send, session)
+        answer = asyncio.run(session._ask_llm_with_tools("看看这是什么", response_id="resp_1", item_id="item_1"))
+
+        self.assertIsNone(answer)
         self.assertIsNotNone(session.pending_tool_context)
-        self.assertEqual(events[0]["type"], "response.function_call_arguments.done")
-        self.assertEqual(events[0]["name"], "dance")
-        self.assertEqual(events[0]["call_id"], "call_1")
-        self.assertEqual(events[0]["arguments"], '{"dance": "happy"}')
+        self.assertEqual(events[0]["type"], "response.created")
+        self.assertEqual(events[1]["type"], "response.function_call_arguments.done")
+        self.assertEqual(events[1]["name"], "camera")
 
     def test_direct_dance_command_routes_to_client_tool_without_llm(self) -> None:
         class FakeLlm:
@@ -540,7 +606,7 @@ class CoreTests(unittest.TestCase):
         tool_event = next(event for event in events if event["type"] == "response.function_call_arguments.done")
         self.assertEqual(tool_event["name"], "dance")
         self.assertEqual(json.loads(tool_event["arguments"]), {"move": "random", "repeat": 1})
-        self.assertIsNotNone(session.pending_tool_context)
+        self.assertIsNone(session.pending_tool_context)
 
     def test_direct_contextual_start_routes_to_dance_only_after_dance_context(self) -> None:
         class FakeLlm:
@@ -649,7 +715,7 @@ class CoreTests(unittest.TestCase):
                 return LLMResponse(
                     tool_calls=[
                         ToolCall(id="call_local", name="current_time", arguments="{}"),
-                        ToolCall(id="call_client", name="dance", arguments='{"dance":"happy"}'),
+                        ToolCall(id="call_client", name="camera", arguments='{"question":"what is this?"}'),
                     ]
                 )
 
@@ -662,9 +728,9 @@ class CoreTests(unittest.TestCase):
             [
                 {
                     "type": "function",
-                    "name": "dance",
-                    "description": "Queue a Reachy Mini dance.",
-                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
                 }
             ]
         )
@@ -676,8 +742,8 @@ class CoreTests(unittest.TestCase):
         session._send = types.MethodType(fake_send, session)
         answer = asyncio.run(session._ask_llm_with_tools("报时并跳舞", response_id="resp_1", item_id="item_1"))
 
-        self.assertEqual(answer, "")
-        self.assertEqual(events[0]["name"], "dance")
+        self.assertIsNone(answer)
+        self.assertEqual(events[1]["name"], "camera")
         self.assertIsNotNone(session.pending_tool_context)
         tool_messages = [msg for msg in session.pending_tool_context or [] if msg.get("role") == "tool"]
         self.assertEqual(len(tool_messages), 1)

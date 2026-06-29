@@ -26,6 +26,8 @@ class ToolSpec:
     parameters: dict[str, Any]
     mode: ToolMode
     handler: ToolHandler | None = None
+    needs_response: bool = True
+    category: str = "general"
 
     def as_openai_tool(self) -> dict[str, Any]:
         return {
@@ -45,6 +47,8 @@ class ToolExecution:
     result: str
     mode: ToolMode
     forwarded: bool = False
+    needs_response: bool = True
+    category: str = "general"
 
 
 class ToolRegistry:
@@ -126,15 +130,31 @@ class ToolRegistry:
                 result=f"Forwarded client tool {name!r} for execution.",
                 mode="client",
                 forwarded=True,
+                needs_response=tool.needs_response,
+                category=tool.category,
             )
 
         if tool.handler is None:
-            return ToolExecution(name=name, arguments=args, result="Tool has no handler.", mode="local")
+            return ToolExecution(
+                name=name,
+                arguments=args,
+                result="Tool has no handler.",
+                mode="local",
+                needs_response=tool.needs_response,
+                category=tool.category,
+            )
 
         result = tool.handler(args)
         if asyncio.iscoroutine(result):
             result = await result
-        return ToolExecution(name=name, arguments=args, result=str(result), mode="local")
+        return ToolExecution(
+            name=name,
+            arguments=args,
+            result=str(result),
+            mode="local",
+            needs_response=tool.needs_response,
+            category=tool.category,
+        )
 
     @classmethod
     def _tool_from_realtime_schema(cls, raw_tool: dict[str, Any]) -> ToolSpec | None:
@@ -164,6 +184,8 @@ class ToolRegistry:
             kind="client",
             mode="client",
             parameters=parameters,
+            needs_response=cls._client_tool_needs_response(name, description),
+            category=cls._client_tool_category(name, description),
         )
 
     @staticmethod
@@ -198,10 +220,37 @@ class ToolRegistry:
             "parameters_count": len(properties),
             "required": [str(item) for item in required],
             "parameters": sorted(str(key) for key in properties),
+            "needs_response": tool.needs_response,
+            "category": tool.category,
             "injected": True,
             "last_called_at": None,
             "last_result": None,
         }
+
+    @classmethod
+    def _client_tool_needs_response(cls, name: str, description: str) -> bool:
+        category = cls._client_tool_category(name, description)
+        if category in {"motion", "emotion", "idle"}:
+            return False
+        return True
+
+    @staticmethod
+    def _client_tool_category(name: str, description: str) -> str:
+        key = name.strip().lower()
+        text = f"{key} {description}".lower()
+        if key in {"dance", "stop_dance", "move_head", "sweep_look", "go_to_sleep"}:
+            return "motion"
+        if key in {"play_emotion", "stop_emotion"}:
+            return "emotion"
+        if key == "idle_do_nothing":
+            return "idle"
+        if key == "camera" or "camera" in text or "picture" in text:
+            return "vision"
+        if key in {"remember", "forget"}:
+            return "memory"
+        if key in {"task_status", "task_cancel"}:
+            return "task"
+        return "general"
 
 
 def register_default_local_tools(

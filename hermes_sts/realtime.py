@@ -310,6 +310,13 @@ class RealtimeSession:
         if item_type == "function_call_output":
             call_id = str(item.get("call_id") or "")
             output = item.get("output")
+            if not self.pending_tool_context:
+                logger.info(
+                    "Ignoring tool result without pending follow-up session_id=%s call_id=%s",
+                    self.session_id,
+                    call_id,
+                )
+                return
             if call_id:
                 self.pending_tool_results.append(
                     {
@@ -677,6 +684,8 @@ class RealtimeSession:
                     first_filler_pcm_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await first_filler_pcm_task
+                if answer is None:
+                    return
                 await self._send_response(answer, transcript=answer, metrics=metrics, voice=voice)
                 return
             except asyncio.TimeoutError:
@@ -721,6 +730,8 @@ class RealtimeSession:
             if answer is None:
                 answer = await llm_task
 
+            if answer is None:
+                return
             await self._send_text_segments(
                 answer,
                 response_id=response_id,
@@ -757,7 +768,8 @@ class RealtimeSession:
         execution = await self.tools.execute(tool_call.name, tool_call.arguments)
         if not execution.forwarded:
             return False
-        self.pending_tool_context = [
+        needs_response = execution.needs_response
+        pending_context = [
             {"role": "system", "content": self._tool_system_prompt(instructions=instructions)},
             {"role": "user", "content": transcript},
             {
@@ -766,6 +778,8 @@ class RealtimeSession:
                 "tool_calls": [self._tool_call_message(tool_call)],
             },
         ]
+        if needs_response:
+            self.pending_tool_context = pending_context
         await self._send_response_created(response_id, item_id, metrics=metrics)
         await self._send_tool_call_event(
             tool_call=tool_call,
@@ -775,10 +789,11 @@ class RealtimeSession:
         )
         await self._send_response_done(response_id=response_id, item_id=item_id, transcript="")
         logger.info(
-            "Routed direct client action session_id=%s transcript=%r tool=%s",
+            "Routed direct client action session_id=%s transcript=%r tool=%s needs_response=%s",
             self.session_id,
             transcript[:80],
             tool_call.name,
+            needs_response,
         )
         return True
 
@@ -953,7 +968,7 @@ class RealtimeSession:
         item_id: str,
         metrics: TurnMetrics | None = None,
         instructions: str | None = None,
-    ) -> str:
+    ) -> str | None:
         if instructions is None:
             instructions = self._effective_instructions()
         instructions = await self._inject_memory(transcript, instructions)
@@ -981,9 +996,16 @@ class RealtimeSession:
 
         messages = self._tool_followup_messages(transcript, response, instructions=instructions)
         waiting_for_client_tool = False
+        needs_client_followup = False
+        created_for_tools = False
         for tool_call in response.tool_calls:
             execution = await self.tools.execute(tool_call.name, tool_call.arguments)
             if execution.forwarded:
+                if not created_for_tools:
+                    await self._send_response_created(response_id, item_id, metrics=metrics)
+                    created_for_tools = True
+                if execution.needs_response:
+                    self.pending_tool_context = messages
                 await self._send_tool_call_event(
                     tool_call=tool_call,
                     execution=execution,
@@ -991,6 +1013,7 @@ class RealtimeSession:
                     item_id=item_id,
                 )
                 waiting_for_client_tool = True
+                needs_client_followup = needs_client_followup or execution.needs_response
                 continue
             messages.append(
                 {
@@ -1001,13 +1024,16 @@ class RealtimeSession:
                 }
             )
         if waiting_for_client_tool:
-            self.pending_tool_context = messages
+            await self._send_response_done(response_id=response_id, item_id=item_id, transcript="")
+            if not needs_client_followup:
+                self.pending_tool_context = None
             logger.info(
-                "Waiting for client tool result session_id=%s pending_context_messages=%d",
+                "Forwarded client tool batch session_id=%s needs_followup=%s pending_context_messages=%d",
                 self.session_id,
-                len(messages),
+                needs_client_followup,
+                len(messages) if needs_client_followup else 0,
             )
-            return ""
+            return None
         final_started = time.perf_counter()
         final = await self.llm.chat(messages=messages, instructions=instructions)
         if metrics:
