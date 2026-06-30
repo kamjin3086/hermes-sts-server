@@ -194,59 +194,48 @@ ENV_TO_ATTR: dict[str, str] = {
 PERSONA_PROFILE_DEFAULTS = [
     {
         "id": "operator",
-        "name": "默认同伴",
+        "name": "可靠小搭档",
+        "voice_engine": "qwen3tts",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
+        "voice_seed": 42,
         "prompt": "你是一个可靠、直接、轻松自然的个人语音助手，像一直在线的聪明同伴。回答简洁，优先给出可执行结论；语气有温度，有一点机敏和松弛感，但不过度表演。",
     },
     {
         "id": "night_copilot",
         "name": "夜航副驾",
+        "voice_engine": "qwen3tts",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
+        "voice_seed": 42,
         "prompt": "你是一个夜航副驾型语音助手，冷静、敏捷、带一点未来感。你会快速抓住用户真正想做的事，给出清晰下一步；必要时提醒风险，但不要说教。语气像并肩处理复杂任务的搭档，短句、有判断、有节奏。",
     },
     {
         "id": "news_anchor",
         "name": "清醒播报",
+        "voice_engine": "qwen3tts",
         "voice_mode": "preset",
         "voice_ref": "ryan",
+        "voice_seed": 42,
         "prompt": "你是一个清醒、克制、声线稳定的简报型语音助手。用词准确，节奏稳，先给结论，再给一两句关键信息。适合播报状态、日程、新闻和摘要；不要夸张，不要拖长。",
     },
     {
         "id": "field_operator",
         "name": "快反执行",
+        "voice_engine": "qwen3tts",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
+        "voice_seed": 42,
         "prompt": "你是一个快反执行型语音助手，反应快、判断明确、动作感强。回答短、准、能立刻执行；对不确定信息直接标明，不绕弯。适合设备控制、任务推进和即时决策，语气干净利落。",
-    },
-    {
-        "id": "baritone_male",
-        "name": "冷感低音",
-        "voice_mode": "design",
-        "voice_ref": "male, middle aged, low pitch, warm baritone, calm tone",
-        "prompt": "你是一个冷感低音型语音助手，沉稳、磁性、可靠，有安全感。文字风格从容、简洁、有分寸，偶尔带一点低调幽默。不要过度热情，也不要像播报机器。",
     },
     {
         "id": "soft_companion",
         "name": "柔和陪伴",
+        "voice_engine": "qwen3tts",
         "voice_mode": "default",
         "voice_ref": "qwen-default",
+        "voice_seed": 42,
         "prompt": "你是一个柔和陪伴型语音助手，温柔、耐心、会照顾用户的情绪和节奏。回答要自然、轻一点，像认真听懂以后给出舒服的回应。可以适度表达关心，但不要腻，不要装可怜，也不要强行撒娇。",
-    },
-    {
-        "id": "taiwan_sweet",
-        "name": "台湾甜声",
-        "voice_mode": "design",
-        "voice_ref": "young adult female, sweet bright voice, Taiwanese Mandarin accent, lively but clear, natural pace",
-        "prompt": "你是一个声音甜、语气轻快的台湾风格语音助手。表达亲切、自然、有一点俏皮；中文回答可以带轻微台湾口语气质，但不要堆叠语气词。适合日常聊天、提醒、轻松陪伴；遇到严肃问题时要马上收敛，保持清楚可靠。",
-    },
-    {
-        "id": "quiet_cat",
-        "name": "安静猫系",
-        "voice_mode": "default",
-        "voice_ref": "qwen-default",
-        "prompt": "你是一个安静猫系语音助手，亲近、聪明、轻微撒娇，但始终有边界感。回答短而灵动，可以有一点软软的语气，但不要频繁喵、不要幼稚化。适合陪伴、提醒和轻松互动；涉及工作任务时切回清晰可靠的表达。",
     },
 ]
 
@@ -280,8 +269,10 @@ class ConfigStore:
                     id text primary key,
                     name text not null,
                     prompt text not null,
+                    voice_engine text not null default 'qwen3tts',
                     voice_mode text not null,
                     voice_ref text not null,
+                    voice_seed integer,
                     updated_at real not null
                 );
                 create table if not exists deleted_persona_profiles (
@@ -343,13 +334,29 @@ class ConfigStore:
                 conn.execute("alter table voice_profiles add column note text not null default ''")
             if "omnivoice_ref_rvq" not in columns:
                 conn.execute("alter table voice_profiles add column omnivoice_ref_rvq text not null default ''")
+            persona_columns = {row["name"] for row in conn.execute("pragma table_info(persona_profiles)").fetchall()}
+            if "voice_engine" not in persona_columns:
+                conn.execute("alter table persona_profiles add column voice_engine text not null default 'qwen3tts'")
+            if "voice_seed" not in persona_columns:
+                conn.execute("alter table persona_profiles add column voice_seed integer")
         self.ensure_defaults()
 
     def ensure_defaults(self) -> None:
         now = time.time()
         preset_value = None
         with self.connect() as conn:
-            conn.execute("delete from persona_profiles where id in ('assistant', 'soft_catgirl', 'systems_analyst')")
+            removed_default_personas = (
+                "assistant",
+                "soft_catgirl",
+                "systems_analyst",
+                "baritone_male",
+                "taiwan_sweet",
+                "quiet_cat",
+            )
+            conn.execute(
+                f"delete from persona_profiles where id in ({','.join('?' for _ in removed_default_personas)})",
+                removed_default_personas,
+            )
             deleted_personas = {
                 row["id"]
                 for row in conn.execute("select id from deleted_persona_profiles").fetchall()
@@ -360,15 +367,17 @@ class ConfigStore:
                 conn.execute(
                     """
                     insert or replace into persona_profiles
-                    (id, name, prompt, voice_mode, voice_ref, updated_at)
-                    values (?, ?, ?, ?, ?, ?)
+                    (id, name, prompt, voice_engine, voice_mode, voice_ref, voice_seed, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile["id"],
                         profile["name"],
                         profile["prompt"],
+                        profile.get("voice_engine", "qwen3tts"),
                         profile["voice_mode"],
                         profile["voice_ref"],
+                        profile.get("voice_seed"),
                         now,
                     ),
                 )
@@ -384,7 +393,7 @@ class ConfigStore:
                 "select value_json from settings where key='sts_persona_preset'"
             ).fetchone()
             preset_value = json.loads(preset["value_json"]) if preset else ""
-            if preset_value in {"assistant", "soft_catgirl", "systems_analyst"}:
+            if preset_value in {"assistant", "soft_catgirl", "systems_analyst", "baritone_male", "taiwan_sweet", "quiet_cat"}:
                 logger.warning("DBG ensure_defaults migrating old persona preset=%s to 'operator'", preset_value)
                 for key, value in {
                     "sts_persona_preset": "operator",
@@ -803,15 +812,17 @@ class ConfigStore:
             conn.execute(
                 """
                 insert or replace into persona_profiles
-                (id, name, prompt, voice_mode, voice_ref, updated_at)
-                values (?, ?, ?, ?, ?, ?)
+                (id, name, prompt, voice_engine, voice_mode, voice_ref, voice_seed, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile["id"],
                     profile["name"],
                     profile["prompt"],
+                    profile.get("voice_engine", "qwen3tts"),
                     profile.get("voice_mode", "default"),
                     profile.get("voice_ref", ""),
+                    profile.get("voice_seed"),
                     time.time(),
                 ),
             )
