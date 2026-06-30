@@ -19,6 +19,7 @@ from hermes_sts.admin import (
     PreviewRequest,
     _conversation_payload,
     _diagnostics_payload,
+    _effective_voice_payload,
     _preview_voice,
     _requires_rebuild,
     _settings_for_voice_profile,
@@ -1940,10 +1941,59 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             _settings_for_voice_profile(voice),
             {
+                "tts_provider": "qwen3tts",
                 "qwentts_cpp_voice_mode": "design",
                 "qwentts_cpp_voice_design": "female adult, cool clear Mandarin, calm pace, low energy",
             },
         )
+
+    def test_effective_voice_reports_qwen_design_fallback_when_model_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            base = tmp_path / "base.gguf"
+            codec = tmp_path / "codec.gguf"
+            base.touch()
+            codec.touch()
+            store = ConfigStore(tmp_path / "settings.sqlite3")
+            store.set_settings(
+                {
+                    "tts_provider": "qwen3tts",
+                    "qwentts_cpp_voice_mode": "design",
+                    "qwentts_cpp_voice_design": "cool clear Mandarin",
+                    "qwentts_cpp_base_model": str(base),
+                    "qwentts_cpp_voicedesign_model": str(tmp_path / "missing-design.gguf"),
+                    "qwentts_cpp_codec": str(codec),
+                }
+            )
+            payload = _effective_voice_payload(store.load_settings(), store)
+
+        self.assertEqual(payload["engine"], "qwen3tts")
+        self.assertEqual(payload["mode"], "design")
+        self.assertFalse(payload["ready"])
+        self.assertIn("VoiceDesign", payload["fallback_reason"])
+
+    def test_omnivoice_voice_profile_maps_provider_without_touching_qwen_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+            store.upsert_voice(
+                {
+                    "id": "omni_design",
+                    "name": "Omni 冷静",
+                    "provider": "omnivoice",
+                    "mode": "design",
+                    "design_prompt": "female, young adult, chinese accent, moderate pitch",
+                }
+            )
+            voice = store.voice_profile("omni_design")
+            assert voice is not None
+            store.set_settings({"qwentts_cpp_voice_mode": "preset", "qwentts_cpp_voice_preset": "vivian"})
+            store.set_settings(_settings_for_voice_profile(voice))
+            settings = store.load_settings()
+
+        self.assertEqual(settings.tts_provider, "omnivoice")
+        self.assertEqual(settings.omnivoice_voice_mode, "design")
+        self.assertEqual(settings.omnivoice_voice_design, "female, young adult, chinese accent, moderate pitch")
+        self.assertEqual(settings.qwentts_cpp_voice_mode, "preset")
 
     def test_preview_voice_preserves_qwen_settings_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

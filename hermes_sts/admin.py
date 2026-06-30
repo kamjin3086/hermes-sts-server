@@ -65,8 +65,10 @@ class PersonaPatch(BaseModel):
     id: str
     name: str
     prompt: str
+    voice_engine: str = "qwen3tts"
     voice_mode: str = "default"
     voice_ref: str = ""
+    voice_seed: int | None = None
     apply: bool = True
 
 
@@ -205,6 +207,7 @@ def create_admin_router(
         metrics = store.metrics(80)
         return {
             "health": _health(current),
+            "effective_voice": _effective_voice_payload(current, store),
             "llm_context": _llm_context_payload(get_llm() if get_llm else None, current),
             "diagnostics": _diagnostics_payload(current, metrics, memory=memory, tools=tools, web_search=web_search),
             "conversation": _conversation_payload(conv_store),
@@ -382,35 +385,41 @@ def create_admin_router(
 
     @router.post("/api/personas")
     async def upsert_persona(payload: PersonaPatch) -> dict[str, Any]:
-        if payload.voice_mode not in {"default", "preset", "design", "clone"}:
+        voice_engine = payload.voice_engine.strip().lower() or "qwen3tts"
+        if voice_engine not in {"qwen3tts", "omnivoice", "sherpa_kokoro"}:
+            raise HTTPException(status_code=422, detail=f"unsupported persona voice engine: {payload.voice_engine}")
+        if voice_engine == "qwen3tts" and payload.voice_mode not in {"default", "preset", "design", "clone"}:
             raise HTTPException(status_code=422, detail=f"unsupported qwen voice mode: {payload.voice_mode}")
-        if payload.voice_mode == "preset" and payload.voice_ref and payload.voice_ref not in QWEN_SPEAKERS:
+        if voice_engine == "omnivoice" and payload.voice_mode not in {"auto", "design", "clone"}:
+            raise HTTPException(status_code=422, detail=f"unsupported omnivoice voice mode: {payload.voice_mode}")
+        if voice_engine == "qwen3tts" and payload.voice_mode == "preset" and payload.voice_ref and payload.voice_ref not in QWEN_SPEAKERS:
             raise HTTPException(status_code=422, detail=f"unsupported qwen speaker: {payload.voice_ref}")
         profile = payload.model_dump()
+        profile["voice_engine"] = voice_engine
         profile.pop("apply", None)
         store.upsert_persona(profile)
         logger.info(
-            "DBG POST /api/personas id=%s apply=%s name=%s voice_mode=%s voice_ref=%s",
-            payload.id, payload.apply, payload.name, payload.voice_mode, payload.voice_ref,
+            "DBG POST /api/personas id=%s apply=%s name=%s voice_engine=%s voice_mode=%s voice_ref=%s",
+            payload.id, payload.apply, payload.name, voice_engine, payload.voice_mode, payload.voice_ref,
         )
         if not payload.apply:
             return {"ok": True, "applied": False, "state": await admin_state()}
         values = {
             "sts_persona_preset": payload.id,
             "sts_persona_custom": payload.prompt,
-            "qwentts_cpp_voice_mode": payload.voice_mode,
         }
-        voice_ref_key = _voice_ref_key(payload.voice_mode)
-        if voice_ref_key:
-            values[voice_ref_key] = payload.voice_ref
+        values.update(_settings_for_persona_voice(profile))
         changed = store.set_settings(values)
         refresh_settings()
         restart_scheduled = _restart_if_required(changed, "persona applied")
+        next_state = await admin_state()
         return {
             "ok": True,
             "applied": True,
             "restart_scheduled": restart_scheduled,
-            "state": await admin_state(),
+            "effective_voice": next_state["effective_voice"],
+            "confirmation": _confirmation_text(profile, next_state["effective_voice"]),
+            "state": next_state,
         }
 
     @router.post("/api/llm/profiles")
@@ -465,11 +474,8 @@ def create_admin_router(
             values = {
                 "sts_persona_preset": fallback["id"],
                 "sts_persona_custom": fallback["prompt"],
-                "qwentts_cpp_voice_mode": fallback.get("voice_mode", "default"),
             }
-            voice_ref_key = _voice_ref_key(values["qwentts_cpp_voice_mode"])
-            if voice_ref_key:
-                values[voice_ref_key] = fallback.get("voice_ref", "")
+            values.update(_settings_for_persona_voice(fallback))
             changed = store.set_settings(values)
             refresh_settings()
         restart_scheduled = _restart_if_required(changed, "active persona deleted")
@@ -1453,16 +1459,173 @@ def _voice_ref_key(mode: str) -> str:
 
 
 def _settings_for_voice_profile(voice: dict[str, Any]) -> dict[str, Any]:
+    provider = str(voice.get("provider") or "qwen3tts").strip().lower()
     mode = str(voice.get("mode") or "default")
+    if provider == "omnivoice":
+        if mode == "design":
+            return {"tts_provider": "omnivoice", "omnivoice_voice_mode": "design", "omnivoice_voice_design": voice.get("design_prompt", "")}
+        if mode == "clone":
+            return {"tts_provider": "omnivoice", "omnivoice_voice_mode": "clone", "omnivoice_clone_voice_id": voice.get("id", "")}
+        return {"tts_provider": "omnivoice", "omnivoice_voice_mode": "auto", "omnivoice_seed": int(voice.get("seed") or 42)}
     if mode == "seed":
-        return {"qwentts_cpp_voice_mode": "default", "qwentts_cpp_seed": int(voice.get("seed") or 42)}
+        return {"tts_provider": "qwen3tts", "qwentts_cpp_voice_mode": "default", "qwentts_cpp_seed": int(voice.get("seed") or 42)}
     if mode == "preset":
-        return {"qwentts_cpp_voice_mode": "preset", "qwentts_cpp_voice_preset": voice.get("speaker", "")}
+        return {"tts_provider": "qwen3tts", "qwentts_cpp_voice_mode": "preset", "qwentts_cpp_voice_preset": voice.get("speaker", "")}
     if mode == "design":
-        return {"qwentts_cpp_voice_mode": "design", "qwentts_cpp_voice_design": voice.get("design_prompt", "")}
+        return {"tts_provider": "qwen3tts", "qwentts_cpp_voice_mode": "design", "qwentts_cpp_voice_design": voice.get("design_prompt", "")}
     if mode == "clone":
-        return {"qwentts_cpp_voice_mode": "clone", "qwentts_cpp_clone_voice_id": voice.get("id", "")}
-    return {"qwentts_cpp_voice_mode": "default"}
+        return {"tts_provider": "qwen3tts", "qwentts_cpp_voice_mode": "clone", "qwentts_cpp_clone_voice_id": voice.get("id", "")}
+    return {"tts_provider": "qwen3tts", "qwentts_cpp_voice_mode": "default"}
+
+
+def _settings_for_persona_voice(profile: dict[str, Any]) -> dict[str, Any]:
+    engine = str(profile.get("voice_engine") or "qwen3tts").strip().lower()
+    mode = str(profile.get("voice_mode") or ("auto" if engine == "omnivoice" else "default")).strip().lower()
+    ref = str(profile.get("voice_ref") or "").strip()
+    seed = profile.get("voice_seed")
+    values: dict[str, Any] = {"tts_provider": engine, "tts_voice_source": "settings"}
+    if engine == "omnivoice":
+        values["omnivoice_voice_mode"] = mode if mode in {"auto", "design", "clone"} else "auto"
+        if mode == "design":
+            values["omnivoice_voice_design"] = ref
+        elif mode == "clone":
+            values["omnivoice_clone_voice_id"] = ref
+        if seed is not None:
+            values["omnivoice_seed"] = int(seed)
+        return values
+    if engine == "sherpa_kokoro":
+        return values
+    values["qwentts_cpp_voice_mode"] = mode if mode in {"default", "preset", "design", "clone"} else "default"
+    if mode == "preset":
+        values["qwentts_cpp_voice_preset"] = ref
+    elif mode == "design":
+        values["qwentts_cpp_voice_design"] = ref
+    elif mode == "clone":
+        values["qwentts_cpp_clone_voice_id"] = ref
+    if seed is not None:
+        values["qwentts_cpp_seed"] = int(seed)
+    return values
+
+
+def _effective_voice_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
+    if settings.tts_provider == "omnivoice":
+        mode = settings.omnivoice_voice_mode or "auto"
+        ref = ""
+        fallback_reason = ""
+        if mode == "design":
+            ref = settings.omnivoice_voice_design
+            if not ref.strip():
+                fallback_reason = "OmniVoice 描述为空，将按自动音色发声"
+        elif mode == "clone":
+            ref = settings.omnivoice_clone_voice_id
+            voice = store.voice_profile(ref)
+            if not voice:
+                fallback_reason = "未找到 OmniVoice 克隆音色，将按自动音色发声"
+            elif not (voice.get("omnivoice_ref_rvq") or voice.get("ref_wav")):
+                fallback_reason = "OmniVoice 克隆音色未预编码，将按参考 WAV 或自动音色处理"
+        model_ready = Path(settings.omnivoice_model).is_file()
+        codec_ready = Path(settings.omnivoice_codec).is_file()
+        ready = model_ready and codec_ready and not fallback_reason
+        return {
+            "engine": "omnivoice",
+            "mode": mode,
+            "label": _effective_voice_label("omnivoice", mode, ref, settings.omnivoice_seed, store),
+            "ref": ref,
+            "seed": settings.omnivoice_seed,
+            "model": settings.omnivoice_model,
+            "codec": settings.omnivoice_codec,
+            "ready": ready,
+            "fallback_reason": fallback_reason or ("" if model_ready and codec_ready else "OmniVoice 模型或 tokenizer 缺失"),
+        }
+    if settings.tts_provider == "sherpa_kokoro":
+        return {
+            "engine": "sherpa_kokoro",
+            "mode": "voice",
+            "label": f"Kokoro voice {settings.sherpa_kokoro_voice}",
+            "ref": str(settings.sherpa_kokoro_voice),
+            "seed": None,
+            "model": settings.sherpa_kokoro_model,
+            "codec": "",
+            "ready": bool(settings.sherpa_kokoro_model and settings.sherpa_kokoro_voices and settings.sherpa_kokoro_tokens),
+            "fallback_reason": "" if settings.sherpa_kokoro_model else "Kokoro 模型未配置",
+        }
+
+    mode = settings.qwentts_cpp_voice_mode or "default"
+    ref = ""
+    fallback_reason = ""
+    expected_model = settings.qwentts_cpp_base_model
+    if mode == "preset":
+        ref = settings.qwentts_cpp_voice_preset
+        expected_model = settings.qwentts_cpp_customvoice_model
+        if not ref:
+            fallback_reason = "未选择 Qwen 预设 speaker，将按默认音色发声"
+        elif not Path(expected_model).is_file():
+            fallback_reason = "CustomVoice 模型缺失，将回退到 Base 默认音色"
+    elif mode == "design":
+        ref = settings.qwentts_cpp_voice_design
+        expected_model = settings.qwentts_cpp_voicedesign_model
+        if not ref.strip():
+            fallback_reason = "Qwen 音色描述为空，将按默认音色发声"
+        elif not Path(expected_model).is_file():
+            fallback_reason = "VoiceDesign 模型缺失，将回退到 Base 默认音色"
+    elif mode == "clone":
+        ref = settings.qwentts_cpp_clone_voice_id
+        voice = store.voice_profile(ref)
+        if not voice:
+            fallback_reason = "未找到 Qwen 克隆音色，将按默认音色发声"
+        elif not (voice.get("ref_spk") or voice.get("ref_rvq") or voice.get("ref_wav")):
+            fallback_reason = "Qwen 克隆音色未预编码，将按默认音色发声"
+    model_ready = Path(expected_model).is_file()
+    codec_ready = Path(settings.qwentts_cpp_codec).is_file()
+    ready = model_ready and codec_ready and not fallback_reason
+    return {
+        "engine": "qwen3tts",
+        "mode": mode,
+        "label": _effective_voice_label("qwen3tts", mode, ref, settings.qwentts_cpp_seed, store),
+        "ref": ref,
+        "seed": settings.qwentts_cpp_seed,
+        "model": expected_model,
+        "codec": settings.qwentts_cpp_codec,
+        "ready": ready,
+        "fallback_reason": fallback_reason or ("" if model_ready and codec_ready else "Qwen 模型或 codec 缺失"),
+    }
+
+
+def _effective_voice_label(engine: str, mode: str, ref: str, seed: int | None, store: ConfigStore) -> str:
+    if engine == "omnivoice":
+        if mode == "design":
+            return f"OmniVoice 描述造声 · {ref[:36] or '未填写'}"
+        if mode == "clone":
+            voice = store.voice_profile(ref)
+            return f"OmniVoice 克隆 · {(voice or {}).get('name') or ref or '未选择'}"
+        return f"OmniVoice 自动音色 · seed {seed}"
+    if mode == "preset":
+        return f"Qwen3TTS 预设 · {_speaker_name(ref)}"
+    if mode == "design":
+        return f"Qwen3TTS 描述造声 · {ref[:36] or '未填写'}"
+    if mode == "clone":
+        voice = store.voice_profile(ref)
+        return f"Qwen3TTS 克隆 · {(voice or {}).get('name') or ref or '未选择'}"
+    return f"Qwen3TTS 默认音色 · seed {seed}"
+
+
+def _speaker_name(speaker: str) -> str:
+    return {
+        "serena": "Serena",
+        "vivian": "Vivian",
+        "uncle_fu": "Uncle Fu",
+        "ryan": "Ryan",
+        "aiden": "Aiden",
+        "ono_anna": "Ono Anna",
+        "sohee": "Sohee",
+        "eric": "Eric",
+        "dylan": "Dylan",
+    }.get(speaker, speaker or "未选择")
+
+
+def _confirmation_text(profile: dict[str, Any], effective_voice: dict[str, Any]) -> str:
+    persona = str(profile.get("name") or "当前人格")
+    return f"已应用：{persona} + {effective_voice.get('label') or '当前声音'}"
 
 
 async def _suggest_voice_with_llm(payload: WorkshopSuggestRequest, settings: Settings) -> dict[str, Any]:
