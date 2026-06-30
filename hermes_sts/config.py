@@ -206,9 +206,9 @@ class Settings:
     openviking_commit_timeout_seconds: float = _float_default(30.0)
     sqlite_memory_path: str = _path_default("data/memory.sqlite3")
     web_search_enabled: bool = _bool_default(False)
-    web_search_providers: str = "tavily,brave,searxng,duckduckgo"
+    web_search_providers: str = "brave,tavily,searxng,duckduckgo"
     tavily_api_key: str = ""
-    tavily_search_depth: str = "ultra-fast"
+    tavily_search_depth: str = "basic"
     tavily_max_results: int = _int_default(3)
     tavily_timeout_seconds: float = _float_default(2.0)
     tavily_base_url: str = "https://api.tavily.com"

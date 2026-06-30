@@ -14,6 +14,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+LOW_VALUE_SEARCH_DOMAINS = {
+    "ecywang.com",
+    "instagram.com",
+    "pinterest.com",
+    "tiktok.com",
+}
+LOW_VALUE_TITLE_MARKERS = {
+    "千图网",
+}
+
 
 @dataclass(frozen=True)
 class SearchHit:
@@ -43,24 +53,25 @@ class NoopWebSearchProvider:
 
 
 class TavilySearchProvider:
+    _SUPPORTED_DEPTHS = {"ultra-fast", "basic", "advanced"}
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-        depth = settings.tavily_search_depth
-        if depth == "advanced":
+        depth = settings.tavily_search_depth.strip().lower()
+        if depth not in self._SUPPORTED_DEPTHS:
             depth = "basic"
-            logger.warning("tavily_search_depth 'advanced' is not supported, falling back to 'basic'")
+            logger.warning("Unsupported tavily_search_depth, falling back to 'basic'")
         self._depth = depth
 
         timeout = settings.tavily_timeout_seconds
-        if timeout > 3.0:
-            timeout = 3.0
-            logger.warning("tavily_timeout_seconds > 3.0 is clamped to 3.0")
-        self._timeout = timeout
+        if timeout > 5.0:
+            timeout = 5.0
+            logger.warning("tavily_timeout_seconds > 5.0 is clamped to 5.0")
+        self._timeout = max(0.2, timeout)
 
     async def search(self, query: str, *, max_results: int | None = None) -> list[SearchHit]:
         body = {
-            "api_key": self.settings.tavily_api_key,
             "query": query,
             "search_depth": self._depth,
             "max_results": max_results or self.settings.tavily_max_results,
@@ -69,6 +80,7 @@ class TavilySearchProvider:
         }
         headers = {
             "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.settings.tavily_api_key}",
         }
         try:
             async with httpx.AsyncClient(
@@ -82,7 +94,7 @@ class TavilySearchProvider:
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
-            logger.warning("Tavily search failed: %s", exc)
+            logger.warning("Tavily search failed: %s: %s", type(exc).__name__, exc)
             return []
 
         hits: list[SearchHit] = []
@@ -241,12 +253,13 @@ class ChainedWebSearchProvider:
                 logger.warning("Search provider %s failed: %s", name, exc)
                 self._last_error = f"{name}: {exc}"
                 hits = []
+            hits = _filter_usable_hits(query, hits)
             if hits:
                 self._last_success = name
                 self._last_error = None
                 self._failed_until.pop(name, None)
                 return hits
-            self._last_error = f"{name}: no results"
+            self._last_error = f"{name}: no usable results"
             self._failed_until[name] = now + self.cooldown_seconds
         return []
 
@@ -342,6 +355,31 @@ def _decode_duckduckgo_url(raw_url: str) -> str:
     return url
 
 
+def _filter_usable_hits(query: str, hits: list[SearchHit]) -> list[SearchHit]:
+    query_key = query.lower()
+    usable: list[SearchHit] = []
+    for hit in hits:
+        if not hit.title.strip() or not hit.url.strip():
+            continue
+        parsed = urlparse(hit.url)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        host = parsed.netloc.lower().removeprefix("www.")
+        if any(_domain_matches(host, blocked) for blocked in LOW_VALUE_SEARCH_DOMAINS):
+            if not any(part in query_key for part in host.split(".") if part):
+                continue
+        title = hit.title.lower()
+        if any(marker.lower() in title for marker in LOW_VALUE_TITLE_MARKERS):
+            if not any(marker.lower() in query_key for marker in LOW_VALUE_TITLE_MARKERS):
+                continue
+        usable.append(hit)
+    return usable
+
+
+def _domain_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith(f".{domain}")
+
+
 def build_websearch(settings: Settings) -> WebSearchProvider:
     if not settings.web_search_enabled:
         return NoopWebSearchProvider()
@@ -349,13 +387,14 @@ def build_websearch(settings: Settings) -> WebSearchProvider:
     enabled = [item.strip().lower() for item in settings.web_search_providers.split(",") if item.strip()]
     enabled_set = set(enabled)
 
+    online_seen: set[str] = set()
     for name in enabled:
-        if name == "tavily" and settings.tavily_api_key:
+        if name == "tavily" and settings.tavily_api_key and "tavily" not in online_seen:
             providers.append(TavilySearchProvider(settings))
-            break
-        if name in {"brave", "brava"} and settings.brave_api_key:
+            online_seen.add("tavily")
+        if name in {"brave", "brava"} and settings.brave_api_key and "brave" not in online_seen:
             providers.append(BraveSearchProvider(settings))
-            break
+            online_seen.add("brave")
 
     if "searxng" in enabled_set and settings.searxng_base_url:
         providers.append(SearxngSearchProvider(settings))

@@ -297,7 +297,9 @@ def _make_web_search_handler(provider: WebSearchProvider) -> ToolHandler:
             return "Search temporarily unavailable."
         if not hits:
             return "No results found."
-        lines = []
+        lines = [
+            "Web search returned the following live results. Use these results to answer the user directly; do not tell the user to search again."
+        ]
         for i, h in enumerate(hits[:5], 1):
             snippet = (h.content or "")[:300]
             lines.append(f"{i}. {h.title or '(no title)'}\n   {h.url}\n   {snippet}")

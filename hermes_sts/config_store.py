@@ -450,7 +450,7 @@ class ConfigStore:
                 "memory_provider": "sqlite",
                 "memory_remember_in_hermes": True,
                 "web_search_enabled": False,
-                "web_search_providers": "tavily,brave,searxng,duckduckgo",
+                "web_search_providers": "brave,tavily,searxng,duckduckgo",
                 "memory_injection_budget": 500,
                 "memory_recall_limit": 5,
                 "memory_recall_min_score": 0.0,
@@ -463,10 +463,14 @@ class ConfigStore:
             if web_search_row is not None:
                 with contextlib.suppress(Exception):
                     current_providers = json.loads(web_search_row["value_json"])
-                    if current_providers in {"tavily,duckduckgo,searxng", "tavily,duckduckgo"}:
+                    if current_providers in {
+                        "tavily,duckduckgo,searxng",
+                        "tavily,duckduckgo",
+                        "tavily,brave,searxng,duckduckgo",
+                    }:
                         conn.execute(
                             "insert or replace into settings values (?, ?, ?)",
-                            ("web_search_providers", json.dumps("tavily,brave,searxng,duckduckgo"), now),
+                            ("web_search_providers", json.dumps("brave,tavily,searxng,duckduckgo"), now),
                         )
             profile_id = "hermes_default"
             conn.execute(

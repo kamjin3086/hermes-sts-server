@@ -1361,14 +1361,14 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
         if api_key is not None and not api_key.strip():
             raise HTTPException(status_code=422, detail="openviking_api_key is required when memory_provider=openviking")
     search_depth = values.get("tavily_search_depth")
-    if search_depth is not None and search_depth not in {"ultra-fast", "fast", "basic"}:
+    if search_depth is not None and search_depth not in {"ultra-fast", "basic", "advanced"}:
         raise HTTPException(status_code=422, detail=f"unsupported tavily search depth: {search_depth}")
     tavily_timeout = values.get("tavily_timeout_seconds")
     if tavily_timeout is not None:
         try:
             tv = float(tavily_timeout)
-            if tv > 3.0:
-                raise HTTPException(status_code=422, detail="tavily_timeout_seconds must not exceed 3.0")
+            if tv > 5.0:
+                raise HTTPException(status_code=422, detail="tavily_timeout_seconds must not exceed 5.0")
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="tavily_timeout_seconds must be a number")
     providers = values.get("web_search_providers")

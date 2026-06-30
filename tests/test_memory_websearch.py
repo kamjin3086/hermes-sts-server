@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ from hermes_sts.websearch import (
     TavilySearchProvider,
     _DuckDuckGoHtmlParser,
     _decode_duckduckgo_url,
+    _filter_usable_hits,
     build_websearch,
 )
 
@@ -188,6 +190,47 @@ class OpenVikingMemoryProviderTests(unittest.TestCase):
 
 
 class TavilySearchProviderTests(unittest.TestCase):
+    def test_provider_uses_bearer_auth_and_parses_results(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.host, "api.tavily.com")
+            self.assertEqual(request.url.path, "/search")
+            self.assertEqual(request.headers.get("Authorization"), "Bearer tavily-key")
+            body = json.loads(request.content.decode("utf-8"))
+            self.assertNotIn("api_key", body)
+            self.assertEqual(body["query"], "杭州天气")
+            self.assertEqual(body["search_depth"], "advanced")
+            self.assertEqual(body["max_results"], 2)
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": "杭州天气",
+                            "url": "https://weather.example.test/hangzhou",
+                            "content": "杭州天气搜索结果",
+                            "score": 0.91,
+                        }
+                    ]
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+
+        def client_factory(*args, **kwargs):
+            kwargs["transport"] = transport
+            return real_async_client(*args, **kwargs)
+
+        provider = TavilySearchProvider(
+            Settings(web_search_enabled=True, tavily_api_key="tavily-key", tavily_search_depth="advanced")
+        )
+        with patch("hermes_sts.websearch.httpx.AsyncClient", side_effect=client_factory):
+            hits = _run(provider.search("杭州天气", max_results=2))
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].title, "杭州天气")
+        self.assertEqual(hits[0].score, 0.91)
+
     def test_search_unreachable_returns_empty(self) -> None:
         settings = Settings(
             web_search_enabled=True,
@@ -198,11 +241,20 @@ class TavilySearchProviderTests(unittest.TestCase):
         provider = TavilySearchProvider(settings)
         self.assertEqual(_run(provider.search("anything")), [])
 
-    def test_advanced_search_depth_downgraded(self) -> None:
+    def test_advanced_search_depth_is_preserved(self) -> None:
         settings = Settings(
             web_search_enabled=True,
             tavily_api_key="test-key",
             tavily_search_depth="advanced",
+        )
+        provider = TavilySearchProvider(settings)
+        self.assertEqual(provider._depth, "advanced")
+
+    def test_unknown_search_depth_downgrades_to_basic(self) -> None:
+        settings = Settings(
+            web_search_enabled=True,
+            tavily_api_key="test-key",
+            tavily_search_depth="fast",
         )
         provider = TavilySearchProvider(settings)
         self.assertEqual(provider._depth, "basic")
@@ -214,7 +266,7 @@ class TavilySearchProviderTests(unittest.TestCase):
             tavily_timeout_seconds=10.0,
         )
         provider = TavilySearchProvider(settings)
-        self.assertEqual(provider._timeout, 3.0)
+        self.assertEqual(provider._timeout, 5.0)
 
 
 class BraveSearchProviderTests(unittest.TestCase):
@@ -345,9 +397,36 @@ class ChainedWebSearchProviderTests(unittest.TestCase):
         self.assertEqual(state["recent_success"], "good")
         self.assertEqual(state["providers"], ["empty", "good"])
 
+    def test_filters_low_value_hits_and_continues_fallback(self) -> None:
+        noisy = FakeSearchProvider(
+            "noisy",
+            [
+                SearchHit(
+                    title="今天美元汇率人民币 | TikTok",
+                    url="https://www.tiktok.com/discover/%E4%BB%8A%E5%A4%A9%E7%BE%8E%E5%85%83",
+                    content="low value",
+                )
+            ],
+        )
+        good = FakeSearchProvider("good", [SearchHit(title="中国银行外汇牌价", url="https://www.boc.cn/sourcedb/whpj/", content="ok")])
+        provider = ChainedWebSearchProvider([noisy, good], cooldown_seconds=0.0)
+
+        hits = _run(provider.search("人民币美元汇率"))
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].title, "中国银行外汇牌价")
+
+    def test_filter_keeps_requested_low_value_domain(self) -> None:
+        hits = _filter_usable_hits(
+            "搜索 tiktok openai",
+            [SearchHit(title="TikTok OpenAI", url="https://www.tiktok.com/@openai", content="ok")],
+        )
+
+        self.assertEqual(len(hits), 1)
+
 
 class BuildWebSearchTests(unittest.TestCase):
-    def test_prefers_one_configured_online_api_then_searxng_then_duckduckgo(self) -> None:
+    def test_prefers_configured_online_apis_then_searxng_then_duckduckgo(self) -> None:
         settings = Settings(
             web_search_enabled=True,
             web_search_providers="duckduckgo,searxng,brave,tavily",
@@ -361,13 +440,13 @@ class BuildWebSearchTests(unittest.TestCase):
         self.assertIsInstance(provider, ChainedWebSearchProvider)
         self.assertEqual(
             provider.state()["providers"],
-            ["brave", "searxng(http://searx.local)", "duckduckgo"],
+            ["brave", "tavily(basic)", "searxng(http://searx.local)", "duckduckgo"],
         )
 
     def test_skips_unconfigured_online_and_searxng_providers(self) -> None:
         settings = Settings(
             web_search_enabled=True,
-            web_search_providers="tavily,brave,searxng,duckduckgo",
+            web_search_providers="brave,tavily,searxng,duckduckgo",
             tavily_api_key="",
             brave_api_key="",
             searxng_base_url="",

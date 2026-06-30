@@ -1009,6 +1009,7 @@ class RealtimeSession:
 
         messages = self._tool_followup_messages(transcript, response, instructions=instructions)
         created_for_tools = False
+        used_web_search = False
         for iteration in range(1, 4):
             waiting_for_client_tool = False
             needs_client_followup = False
@@ -1037,6 +1038,8 @@ class RealtimeSession:
                         "content": execution.result,
                     }
                 )
+                if tool_call.name == "web_search":
+                    used_web_search = True
             if waiting_for_client_tool:
                 await self._send_response_done(response_id=response_id, item_id=item_id, transcript="")
                 if not needs_client_followup:
@@ -1050,7 +1053,8 @@ class RealtimeSession:
                 return None
 
             final_started = time.perf_counter()
-            response = await self.llm.chat(messages=messages, instructions=instructions, tools=tools)
+            followup_tools = None if used_web_search else tools
+            response = await self.llm.chat(messages=messages, instructions=instructions, tools=followup_tools)
             if metrics:
                 metrics.llm_ms += (time.perf_counter() - final_started) * 1000
             if not response.tool_calls:
@@ -1144,11 +1148,24 @@ class RealtimeSession:
             return None
         if not self._should_search_before_llm(transcript):
             return None
+        query = self._search_query_for_transcript(transcript)
         return ToolCall(
             id=f"call_{uuid.uuid4().hex}",
             name="web_search",
-            arguments=json.dumps({"query": transcript.strip()}, ensure_ascii=False),
+            arguments=json.dumps({"query": query}, ensure_ascii=False),
         )
+
+    @classmethod
+    def _search_query_for_transcript(cls, transcript: str) -> str:
+        text = transcript.strip()
+        if "汇率" in text and "美元" in text and "人民币" in text:
+            return "美元兑人民币 实时汇率 USD CNY"
+        if "天气" in text:
+            cleaned = re.sub(r"(查一下|查询|查查|搜索|搜一下|简单告诉我|现在|今天|明天|适不适合出门|适合出门)", "", text)
+            match = re.search(r"([\u4e00-\u9fff]{2,8}?)(?:的)?天气", cleaned)
+            if match:
+                return f"{match.group(1)}天气"
+        return text
 
     @staticmethod
     def _should_search_before_llm(transcript: str) -> bool:
@@ -1471,6 +1488,9 @@ class RealtimeSession:
             "只输出要被朗读的自然语言；不要输出 emoji、颜文字、舞台提示、括号里的情绪动作，"
             "也不要写音色、嗓音、语速、语调或口音描述。音色描述由 TTS 声音配置单独控制。"
             "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
+            "如果工具结果包含 web search/search results/搜索结果，就必须基于这些结果直接回答用户；"
+            "不要说“我再查查”“你可以自己查”“信息有点模糊”这类推脱话。"
+            "天气、汇率、新闻等实时问题要给出简短结论，并说明依据来自搜索结果中的最相关信息。"
         )
         effective = instructions if instructions is not None else self._effective_instructions()
         if effective:

@@ -972,6 +972,7 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(answer, "杭州今天多云，出门带伞更稳妥。")
         self.assertEqual(len(llm.calls), 1)
+        self.assertIsNone(llm.calls[0]["kwargs"].get("tools"))
         self.assertEqual(llm.last_messages[-1]["role"], "tool")
         self.assertIn("杭州天气", llm.last_messages[-1]["content"])
 
@@ -1005,6 +1006,16 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(answer, "听起来今天有点累，我在。")
         self.assertEqual(llm.calls[0]["args"], ("今天心情不太好",))
+
+    def test_direct_search_query_is_normalized_for_common_realtime_queries(self) -> None:
+        self.assertEqual(
+            RealtimeSession._search_query_for_transcript("查一下杭州的天气，简单告诉我现在适不适合出门"),
+            "杭州天气",
+        )
+        self.assertEqual(
+            RealtimeSession._search_query_for_transcript("查一下人民币美元汇率，简单告诉我大概是多少"),
+            "美元兑人民币 实时汇率 USD CNY",
+        )
 
     def test_local_tool_loop_can_run_multiple_steps(self) -> None:
         class FakeLlm:
@@ -1047,6 +1058,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("不要输出 emoji", prompt)
         self.assertIn("不要写音色", prompt)
         self.assertIn("音色描述由 TTS 声音配置单独控制", prompt)
+        self.assertIn("必须基于这些结果直接回答用户", prompt)
 
     def test_tts_text_is_split_on_punctuation(self) -> None:
         session = object.__new__(RealtimeSession)
@@ -1513,7 +1525,7 @@ class CoreTests(unittest.TestCase):
             custom_store.ensure_defaults()
             custom = custom_store.load_settings()
 
-        self.assertEqual(migrated.web_search_providers, "tavily,brave,searxng,duckduckgo")
+        self.assertEqual(migrated.web_search_providers, "brave,tavily,searxng,duckduckgo")
         self.assertEqual(custom.web_search_providers, "duckduckgo,tavily")
 
     def test_config_store_llm_profiles_apply_to_settings(self) -> None:
@@ -1775,9 +1787,12 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(bad_omni_mode.exception.status_code, 422)
         _validate_settings_patch({"tts_provider": "omnivoice", "omnivoice_voice_mode": "auto"})
         _validate_settings_patch({"web_search_providers": "tavily,brave,searxng,duckduckgo"})
+        _validate_settings_patch({"tavily_search_depth": "advanced", "tavily_timeout_seconds": 5.0})
         _validate_settings_patch({"web_search_providers": "brava", "brave_timeout_seconds": 1.5})
         with self.assertRaises(HTTPException):
             _validate_settings_patch({"web_search_providers": "unknown"})
+        with self.assertRaises(HTTPException):
+            _validate_settings_patch({"tavily_search_depth": "fast"})
 
     def test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
