@@ -1635,6 +1635,133 @@ button:disabled {
   gap: 12px;
 }
 
+.reachy-studio {
+  align-content: start;
+}
+
+.reachy-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(240px, 0.65fr);
+  gap: 18px;
+  align-items: stretch;
+  border-color: rgba(123, 231, 216, 0.22);
+  background:
+    linear-gradient(135deg, rgba(123, 231, 216, 0.12), rgba(217, 149, 69, 0.055)),
+    rgba(255, 255, 255, 0.045);
+}
+
+.reachy-current {
+  display: grid;
+  gap: 10px;
+}
+
+.reachy-current h2 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.08;
+}
+
+.reachy-current p {
+  max-width: 820px;
+  margin: 0;
+  color: #d4e3da;
+  line-height: 1.6;
+}
+
+.voice-confirm-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.voice-confirm,
+.voice-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm);
+}
+
+.voice-confirm.ok {
+  color: #0c1511;
+  background: linear-gradient(135deg, #e9e1c9, #7be7d8);
+}
+
+.voice-confirm.warn,
+.voice-warning {
+  color: #ffe0bd;
+  border: 1px solid rgba(217, 149, 69, 0.35);
+  background: rgba(217, 149, 69, 0.1);
+}
+
+.reachy-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.reachy-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 10px;
+  border-radius: var(--r-md);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #dfe9df;
+  background: rgba(0, 0, 0, 0.18);
+  transition: 160ms ease;
+}
+
+.reachy-actions button:hover {
+  border-color: rgba(123, 231, 216, 0.42);
+  transform: translateY(-1px);
+}
+
+.reachy-actions button.selected {
+  color: #09110e;
+  background: linear-gradient(135deg, #e9e1c9, #7be7d8);
+  border-color: transparent;
+  box-shadow: var(--shadow-active);
+}
+
+.effective-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.prompt-details {
+  display: grid;
+  gap: 12px;
+}
+
+.prompt-details .field {
+  margin-top: 12px;
+}
+
+.studio-advanced {
+  padding: 0;
+  overflow: hidden;
+}
+
+.studio-advanced .soft-details {
+  padding: 14px 18px;
+}
+
+.compact-commit {
+  margin-top: 12px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
 .mode-grid,
 .kokoro-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2221,6 +2348,7 @@ textarea {
   .hero,
   .cockpit,
   .cockpit-hero,
+  .reachy-identity,
   .studio-commit,
   .voice-layout,
   .daily-actions,
@@ -2232,6 +2360,7 @@ textarea {
   .quick-actions,
   .daily-actions,
   .daily-strip,
+  .effective-grid,
   .signal-board,
   .stat-strip,
   .cockpit-wave {
@@ -2346,6 +2475,8 @@ textarea {
 
   .model-grid,
   .mode-grid,
+  .reachy-actions,
+  .effective-grid,
   .kokoro-grid,
   .speaker-grid,
   .stat-strip,

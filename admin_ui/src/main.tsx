@@ -51,8 +51,9 @@ import "@fontsource/jetbrains-mono/400.css";
 import "./styles.css";
 
 type SettingsValues = Record<string, any>;
-type Persona = { id: string; name: string; prompt: string; voice_mode: string; voice_ref: string };
+type Persona = { id: string; name: string; prompt: string; voice_engine?: string; voice_mode: string; voice_ref: string; voice_seed?: number | null };
 type VoiceProfile = Record<string, any>;
+type EffectiveVoice = { engine: string; mode: string; label: string; ref?: string; seed?: number | null; model?: string; codec?: string; ready?: boolean; fallback_reason?: string };
 type ConversationSummary = {
   id: string;
   title?: string;
@@ -93,6 +94,7 @@ type ModelStatus = Record<string, { path: string; installed: boolean }>;
 type Metric = { id: number; kind: string; value: Record<string, any>; created_at: number };
 type AdminState = {
   health: Record<string, any>;
+  effective_voice?: EffectiveVoice;
   llm_context: Record<string, any>;
   llm_profiles: LlmProfile[];
   active_llm_profile_id: string;
@@ -395,6 +397,7 @@ function Studio({
   const [prompt, setPrompt] = useState(values.sts_persona_custom || activePersona?.prompt || "");
   const [previewText, setPreviewText] = useState("你好，我是 Hermes STS。现在用当前角色和音色说话。");
   const [audioUrl, setAudioUrl] = useState("");
+  const [studioView, setStudioView] = useState<"persona" | "voice" | "preview">("persona");
 
   const personaListRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -419,12 +422,15 @@ function Studio({
 
   const personaPayload = (apply: boolean) => {
     const id = personaId === "custom" || !state.personas.some((p) => p.id === personaId) ? `custom_${Date.now()}` : personaId;
+    const voice = voicePackageForValues(values);
     return {
       id,
       name: personaName || "自定义人格",
       prompt,
-      voice_mode: values.qwentts_cpp_voice_mode || "default",
-      voice_ref: voiceRefForMode(values),
+      voice_engine: voice.engine,
+      voice_mode: voice.mode,
+      voice_ref: voice.ref,
+      voice_seed: voice.seed,
       apply,
     };
   };
@@ -442,25 +448,36 @@ function Studio({
   };
 
   const applyPersona = async () => {
-    let appliedPersonaId = personaId;
+    const payload = personaPayload(true);
+    const data = await api<{ state: AdminState; confirmation?: string; effective_voice?: EffectiveVoice; restart_scheduled?: boolean }>("/api/personas", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    setPersonaId(payload.id);
+    setDirty(false);
+    await reload();
+    setNotice(data.effective_voice?.fallback_reason || data.confirmation || "人格和声音已应用");
+    window.setTimeout(() => setNotice(""), data.effective_voice?.fallback_reason ? 4200 : 2400);
+  };
+
+  const applyPersonaTextOnly = async () => {
+    const payload = personaPayload(false);
     if (personaId === "custom" || !state.personas.some((p) => p.id === personaId)) {
-      const payload = personaPayload(false);
       await api("/api/personas", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      appliedPersonaId = payload.id;
       setPersonaId(payload.id);
     }
     await patch({
       sts_persona_source: values.sts_persona_source || "settings",
-      sts_persona_preset: appliedPersonaId,
+      sts_persona_preset: payload.id,
       sts_persona_custom: prompt,
     });
     setDirty(false);
     await reload();
-    setNotice("人格已应用");
-    window.setTimeout(() => setNotice(""), 2200);
+    setNotice("只应用了人格文字，当前声音保持不变");
+    window.setTimeout(() => setNotice(""), 2400);
   };
 
   const reapplySavedConfig = async () => {
@@ -577,18 +594,33 @@ function Studio({
   };
 
   return (
-    <div className="grid studio">
-<section className="panel span-12 studio-commit">
-        <div>
-          <span className="eyebrow"><CheckCircle2 size={15} /> 重新应用</span>
-          <p className="muted">声线和引擎选择已经在「使用/切换」时立即保存。这里仅从数据库重载配置。</p>
+    <div className="grid studio reachy-studio">
+      <section className="panel span-12 reachy-identity">
+        <div className="reachy-current">
+          <span className="eyebrow"><Bot size={15} /> 当前 Reachy</span>
+          <h2>{activePersona?.name ?? personaName}</h2>
+          <p title={state.health.persona_prompt}>{shortText(state.health.persona_prompt || prompt, 118)}</p>
+          <div className="voice-confirm-row">
+            <span className={state.effective_voice?.ready ? "voice-confirm ok" : "voice-confirm warn"}>
+              <CheckCircle2 size={16} />
+              {state.effective_voice?.label || voiceLabel(state)}
+            </span>
+            {state.effective_voice?.fallback_reason && <span className="voice-warning">{state.effective_voice.fallback_reason}</span>}
+          </div>
         </div>
-        <button className="primary apply-global" onClick={reapplySavedConfig} disabled={busy === "reapply" || busy === "saving"}>
-          <CheckCircle2 size={16} />{busy === "reapply" ? "应用中" : "重新应用配置"}
-        </button>
+        <div className="reachy-actions" role="tablist" aria-label="角色声线主操作">
+          <button className={studioView === "persona" ? "selected" : ""} onClick={() => setStudioView("persona")}><Bot size={16} />换人格</button>
+          <button className={studioView === "voice" ? "selected" : ""} onClick={() => setStudioView("voice")}><AudioLines size={16} />换声音</button>
+          <button className={studioView === "preview" ? "selected" : ""} onClick={() => setStudioView("preview")}><Play size={16} />试听确认</button>
+        </div>
+        <div className="effective-grid">
+          <Kpi label="引擎" value={engineLabel(state.effective_voice?.engine || values.tts_provider)} hint={state.effective_voice?.mode || "default"} />
+          <Kpi label="固定 seed" value={String(state.effective_voice?.seed ?? "--")} hint="同样配置保持稳定声线" />
+          <Kpi label="模型状态" value={state.effective_voice?.ready ? "已就绪" : "需确认"} hint={state.effective_voice?.fallback_reason || "当前配置可用"} />
+        </div>
       </section>
 
-<section className="panel span-4">
+      {studioView === "persona" && <section className="panel span-4">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Bot size={15} /> 人格</span>
@@ -610,9 +642,9 @@ function Studio({
             </div>
           ))}
         </div>
-      </section>
+      </section>}
 
-      <section className="panel span-8">
+      {studioView === "persona" && <section className="panel span-8">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Sparkles size={15} /> 角色与提示词</span>
@@ -626,6 +658,7 @@ function Studio({
             <button className="secondary" onClick={resetToOriginal} disabled={!state.personas.some((p) => p.id === personaId)}>
               <RefreshCw size={16} />重置
             </button>
+            <button className="secondary" onClick={applyPersonaTextOnly}><Check size={16} />只应用文字</button>
             <button className="primary" onClick={applyPersona}><CheckCircle2 size={16} />应用人格</button>
           </div>
         </div>
@@ -633,17 +666,20 @@ function Studio({
           <span>角色名称</span>
           <input value={personaName} onChange={(e) => { setPersonaName(e.target.value); setPersonaId("custom"); setDirty(true); }} />
         </label>
-        <label className="field">
-          <span>完整提示词</span>
-          <textarea className="prompt-box" value={prompt} onChange={(e) => onPromptChange(e.target.value)} />
-        </label>
+        <details className="soft-details prompt-details" open={dirty || personaId === "custom"}>
+          <summary><Settings2 size={15} /> 编辑完整提示词</summary>
+          <label className="field">
+            <span>完整提示词</span>
+            <textarea className="prompt-box" value={prompt} onChange={(e) => onPromptChange(e.target.value)} />
+          </label>
+        </details>
         <div className="switch-line">
           <span>人格来源</span>
           <SwitchControl checked={values.sts_persona_source !== "ws"} onChange={(checked) => patch({ sts_persona_source: checked ? "settings" : "ws" })} onLabel="界面控制" offLabel="跟随 Reachy Profile" />
         </div>
-      </section>
+      </section>}
 
-      <section className="panel span-12">
+      {studioView === "voice" && <section className="panel span-12">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><AudioLines size={15} /> 声线</span>
@@ -662,9 +698,9 @@ function Studio({
         ) : (
           <KokoroVoice state={state} values={values} patch={patch} />
         )}
-      </section>
+      </section>}
 
-      <section className="panel span-12">
+      {studioView === "preview" && <section className="panel span-12 preview-confirm-panel">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Play size={15} /> 试听</span>
@@ -674,6 +710,21 @@ function Studio({
         </div>
         <textarea className="preview-text" value={previewText} onChange={(e) => setPreviewText(e.target.value)} />
         {audioUrl && <audio controls src={audioUrl} className="audio" autoPlay />}
+      </section>}
+
+      <section className="panel span-12 studio-advanced">
+        <details className="soft-details">
+          <summary><Wrench size={15} /> 高级维护</summary>
+          <div className="studio-commit compact-commit">
+            <div>
+              <span className="eyebrow"><CheckCircle2 size={15} /> 重新应用</span>
+              <p className="muted">声线和引擎选择已经在「使用/切换」时立即保存。这里仅从数据库重载配置。</p>
+            </div>
+            <button className="primary apply-global" onClick={reapplySavedConfig} disabled={busy === "reapply" || busy === "saving"}>
+              <CheckCircle2 size={16} />{busy === "reapply" ? "应用中" : "重新应用配置"}
+            </button>
+          </div>
+        </details>
       </section>
     </div>
   );
@@ -2201,20 +2252,30 @@ function describeCurrentVoice(values: SettingsValues) {
 }
 
 function settingsForVoiceProfile(voice: VoiceProfile): SettingsValues {
+  const provider = String(voice.provider || "qwen3tts");
   const mode = String(voice.mode || "default");
+  if (provider === "omnivoice") {
+    if (mode === "design") {
+      return { tts_provider: "omnivoice", omnivoice_voice_mode: "design", omnivoice_voice_design: voice.design_prompt || "" };
+    }
+    if (mode === "clone") {
+      return { tts_provider: "omnivoice", omnivoice_voice_mode: "clone", omnivoice_clone_voice_id: voice.id || "" };
+    }
+    return { tts_provider: "omnivoice", omnivoice_voice_mode: "auto", omnivoice_seed: Number(voice.seed || 42) };
+  }
   if (mode === "seed") {
-    return { qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: Number(voice.seed || 42) };
+    return { tts_provider: "qwen3tts", qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: Number(voice.seed || 42) };
   }
   if (mode === "preset") {
-    return { qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: voice.speaker || "" };
+    return { tts_provider: "qwen3tts", qwentts_cpp_voice_mode: "preset", qwentts_cpp_voice_preset: voice.speaker || "" };
   }
   if (mode === "design") {
-    return { qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: voice.design_prompt || "" };
+    return { tts_provider: "qwen3tts", qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: voice.design_prompt || "" };
   }
   if (mode === "clone") {
-    return { qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id || "" };
+    return { tts_provider: "qwen3tts", qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id || "" };
   }
-  return { qwentts_cpp_voice_mode: "default" };
+  return { tts_provider: "qwen3tts", qwentts_cpp_voice_mode: "default" };
 }
 
 function previewVoicePayload(values: SettingsValues): SettingsValues {
@@ -2277,6 +2338,34 @@ function voiceRefForMode(values: SettingsValues) {
   if (mode === "design") return values.qwentts_cpp_voice_design || "";
   if (mode === "clone") return values.qwentts_cpp_clone_voice_id || "";
   return "qwen-default";
+}
+
+function voicePackageForValues(values: SettingsValues) {
+  if (values.tts_provider === "omnivoice") {
+    const mode = String(values.omnivoice_voice_mode || "auto");
+    return {
+      engine: "omnivoice",
+      mode,
+      ref: mode === "design" ? String(values.omnivoice_voice_design || "") : mode === "clone" ? String(values.omnivoice_clone_voice_id || "") : "",
+      seed: Number(values.omnivoice_seed ?? 42),
+    };
+  }
+  if (values.tts_provider === "sherpa_kokoro") {
+    return { engine: "sherpa_kokoro", mode: "voice", ref: String(values.sherpa_kokoro_voice ?? ""), seed: null };
+  }
+  const mode = String(values.qwentts_cpp_voice_mode || "default");
+  return {
+    engine: "qwen3tts",
+    mode,
+    ref: voiceRefForMode(values),
+    seed: Number(values.qwentts_cpp_seed ?? 42),
+  };
+}
+
+function engineLabel(engine: string) {
+  if (engine === "omnivoice") return "OmniVoice";
+  if (engine === "sherpa_kokoro") return "Kokoro";
+  return "Qwen3TTS";
 }
 
 function modelName(key: string) {
