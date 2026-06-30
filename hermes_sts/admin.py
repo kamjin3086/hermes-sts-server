@@ -969,6 +969,11 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "memory_remember_in_hermes",
             "web_search_enabled",
             "web_search_providers",
+            "terminal_tool_enabled",
+            "terminal_tool_allowed_commands",
+            "terminal_tool_cwd",
+            "terminal_tool_timeout_seconds",
+            "terminal_tool_max_output_chars",
         ],
         "stt": ["stt_provider", "sherpa_sensevoice_model", "sherpa_sensevoice_tokens"],
         "tts": [
@@ -1058,6 +1063,11 @@ def _settings_payload(settings: Settings, store: ConfigStore) -> dict[str, Any]:
             "duckduckgo_timeout_seconds",
             "searxng_base_url",
             "searxng_timeout_seconds",
+            "terminal_tool_enabled",
+            "terminal_tool_allowed_commands",
+            "terminal_tool_cwd",
+            "terminal_tool_timeout_seconds",
+            "terminal_tool_max_output_chars",
         ],
     }
     return {
@@ -1384,6 +1394,25 @@ def _validate_settings_patch(values: dict[str, Any]) -> None:
                     raise ValueError
             except (TypeError, ValueError):
                 raise HTTPException(status_code=422, detail=f"{key} must be a positive number")
+    if "terminal_tool_timeout_seconds" in values:
+        try:
+            timeout = float(values["terminal_tool_timeout_seconds"])
+            if timeout <= 0 or timeout > 30:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="terminal_tool_timeout_seconds must be between 0 and 30")
+    if "terminal_tool_max_output_chars" in values:
+        try:
+            output_chars = int(values["terminal_tool_max_output_chars"])
+            if output_chars < 500 or output_chars > 12000:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="terminal_tool_max_output_chars must be between 500 and 12000")
+    commands = values.get("terminal_tool_allowed_commands")
+    if commands is not None:
+        invalid = [item.strip() for item in str(commands).split(",") if item.strip() and ("/" in item or "\\" in item)]
+        if invalid:
+            raise HTTPException(status_code=422, detail="terminal_tool_allowed_commands must contain executable names, not paths")
 
 
 def _safe_profile_id(raw: str) -> str:

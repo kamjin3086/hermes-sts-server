@@ -218,6 +218,11 @@ class Settings:
     duckduckgo_timeout_seconds: float = _float_default(2.5)
     searxng_base_url: str = ""
     searxng_timeout_seconds: float = _float_default(3.0)
+    terminal_tool_enabled: bool = _bool_default(False)
+    terminal_tool_allowed_commands: str = "curl,python3,node,date,pwd,ls,rg,jq"
+    terminal_tool_cwd: str = _path_default(str(ROOT))
+    terminal_tool_timeout_seconds: float = _float_default(6.0)
+    terminal_tool_max_output_chars: int = _int_default(4000)
 
     models_dir: Path = Path(_path_default(str(ROOT / "models")))
     log_dir: Path = Path(_path_default(str(ROOT / "logs")))

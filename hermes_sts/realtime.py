@@ -1144,9 +1144,16 @@ class RealtimeSession:
         }
 
     def _direct_local_tool_call(self, transcript: str) -> ToolCall | None:
-        if self.tools.get("web_search") is None:
-            return None
+        terminal_command = self._terminal_command_for_transcript(transcript)
+        if terminal_command and self.tools.get("terminal_exec") is not None:
+            return ToolCall(
+                id=f"call_{uuid.uuid4().hex}",
+                name="terminal_exec",
+                arguments=json.dumps({"command": terminal_command}, ensure_ascii=False),
+            )
         if not self._should_search_before_llm(transcript):
+            return None
+        if self.tools.get("web_search") is None:
             return None
         query = self._search_query_for_transcript(transcript)
         return ToolCall(
@@ -1154,6 +1161,36 @@ class RealtimeSession:
             name="web_search",
             arguments=json.dumps({"query": query}, ensure_ascii=False),
         )
+
+    @staticmethod
+    def _terminal_command_for_transcript(transcript: str) -> str:
+        text = transcript.strip()
+        lowered = text.lower()
+        if not text:
+            return ""
+        explicit_markers = (
+            "terminal_exec",
+            "终端",
+            "terminal",
+            "执行命令",
+            "运行命令",
+            "跑命令",
+            "命令行",
+        )
+        if not any(marker in lowered for marker in explicit_markers):
+            return ""
+        patterns = (
+            r"terminal_exec\s*(?:执行|运行)?(?:命令)?[:：]?\s*(.+)",
+            r"(?:执行|运行|跑)(?:一下)?命令[:：]?\s*(.+)",
+            r"(?:用|通过)?(?:终端|terminal)(?:执行|运行|跑)?(?:一下)?(?:命令)?[:：]?\s*(.+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                command = match.group(1).strip()
+                command = re.sub(r"(?:，|,)?\s*(然后)?(?:简短)?(?:告诉我|回答我|给我)(?:输出|结果)?[。.!！]*$", "", command).strip()
+                return command
+        return ""
 
     @classmethod
     def _search_query_for_transcript(cls, transcript: str) -> str:
@@ -1491,6 +1528,8 @@ class RealtimeSession:
             "如果工具结果包含 web search/search results/搜索结果，就必须基于这些结果直接回答用户；"
             "不要说“我再查查”“你可以自己查”“信息有点模糊”这类推脱话。"
             "天气、汇率、新闻等实时问题要给出简短结论，并说明依据来自搜索结果中的最相关信息。"
+            "当用户明确要求用 terminal_exec、终端、命令行、curl、脚本或代码调用外部 API 时，"
+            "应优先调用 terminal_exec 工具执行；不要用口头猜测替代实际执行。"
         )
         effective = instructions if instructions is not None else self._effective_instructions()
         if effective:

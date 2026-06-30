@@ -6,6 +6,7 @@ import json
 import math
 import os
 import stat
+import sys
 import tempfile
 import time
 import types
@@ -31,7 +32,7 @@ from hermes_sts.conversation_store import ConversationStore
 from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, LLMToolCallDetected, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
 from hermes_sts.tts import OmniVoiceEngine, QwenTtsCpp, TtsVoice, _stdin_text, build_tts
-from hermes_sts.tools import ToolRegistry, ToolSpec
+from hermes_sts.tools import ToolRegistry, ToolSpec, register_default_local_tools
 from hermes_sts.vad import EnergyVad, build_vad
 
 
@@ -440,6 +441,43 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(snapshot["client"][0]["parameters_count"], 1)
         self.assertIs(snapshot["client"][0]["injected"], True)
         self.assertIsNone(snapshot["client"][0]["last_called_at"])
+
+    def test_terminal_tool_executes_allowlisted_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = ToolRegistry()
+            settings = Settings(
+                llm_provider="openai_compatible",
+                terminal_tool_enabled=True,
+                terminal_tool_allowed_commands=Path(sys.executable).name,
+                terminal_tool_cwd=tmp,
+                terminal_tool_timeout_seconds=2.0,
+                terminal_tool_max_output_chars=1000,
+            )
+            register_default_local_tools(registry, settings)
+
+            result = asyncio.run(
+                registry.execute(
+                    "terminal_exec",
+                    {"command": f"{sys.executable} -c 'print(\"terminal-ok\")'"},
+                )
+            )
+
+        self.assertEqual(result.mode, "local")
+        self.assertIn("exit_code: 0", result.result)
+        self.assertIn("terminal-ok", result.result)
+
+    def test_terminal_tool_rejects_unallowlisted_command(self) -> None:
+        registry = ToolRegistry()
+        settings = Settings(
+            llm_provider="openai_compatible",
+            terminal_tool_enabled=True,
+            terminal_tool_allowed_commands="curl",
+        )
+        register_default_local_tools(registry, settings)
+
+        result = asyncio.run(registry.execute("terminal_exec", {"command": "rm -rf /tmp/nope"}))
+
+        self.assertIn("not allowlisted", result.result)
 
     def test_realtime_session_extracts_text_item(self) -> None:
         item = {
@@ -976,6 +1014,45 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(llm.last_messages[-1]["role"], "tool")
         self.assertIn("杭州天气", llm.last_messages[-1]["content"])
 
+    def test_explicit_terminal_request_uses_terminal_tool_before_llm(self) -> None:
+        class FakeLlm:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self.last_messages: list[dict[str, object]] = []
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def chat(self, *args, **kwargs):
+                self.calls.append({"args": args, "kwargs": kwargs})
+                messages = kwargs["messages"]
+                self.last_messages = messages
+                return LLMResponse(text="命令输出是 terminal-ok。")
+
+        session = bare_session()
+        llm = FakeLlm()
+        session.llm = llm
+        seen_args: list[dict[str, object]] = []
+        session.tools.register_local(
+            ToolSpec(
+                name="terminal_exec",
+                description="Run a terminal command.",
+                kind="slow",
+                mode="local",
+                parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+                handler=lambda args: seen_args.append(args) or "stdout:\nterminal-ok",
+            )
+        )
+
+        answer = asyncio.run(
+            session._ask_llm_with_tools("请调用 terminal_exec 执行命令 date，然后简短告诉我输出。", response_id="resp_1", item_id="item_1")
+        )
+
+        self.assertEqual(answer, "命令输出是 terminal-ok。")
+        self.assertEqual(seen_args, [{"command": "date"}])
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.last_messages[-1]["name"], "terminal_exec")
+
     def test_plain_today_phrase_does_not_force_web_search(self) -> None:
         class FakeLlm:
             def __init__(self) -> None:
@@ -1016,6 +1093,17 @@ class CoreTests(unittest.TestCase):
             RealtimeSession._search_query_for_transcript("查一下人民币美元汇率，简单告诉我大概是多少"),
             "美元兑人民币 实时汇率 USD CNY",
         )
+
+    def test_direct_terminal_command_extracts_only_explicit_commands(self) -> None:
+        self.assertEqual(
+            RealtimeSession._terminal_command_for_transcript("请通过终端运行 curl -s https://wttr.in/Hangzhou?format=j1，然后告诉我结果。"),
+            "curl -s https://wttr.in/Hangzhou?format=j1",
+        )
+        self.assertEqual(
+            RealtimeSession._terminal_command_for_transcript("请执行命令 date，然后简短告诉我输出。"),
+            "date",
+        )
+        self.assertEqual(RealtimeSession._terminal_command_for_transcript("现在几点了"), "")
 
     def test_local_tool_loop_can_run_multiple_steps(self) -> None:
         class FakeLlm:
@@ -1783,16 +1871,27 @@ class CoreTests(unittest.TestCase):
         self.assertIn("brave_api_key", values)
         self.assertIn("brave_base_url", values)
         self.assertIn("brave_timeout_seconds", values)
+        self.assertIn("terminal_tool_enabled", values)
+        self.assertIn("terminal_tool_allowed_commands", values)
         self.assertEqual(bad_speaker.exception.status_code, 422)
         self.assertEqual(bad_omni_mode.exception.status_code, 422)
         _validate_settings_patch({"tts_provider": "omnivoice", "omnivoice_voice_mode": "auto"})
         _validate_settings_patch({"web_search_providers": "tavily,brave,searxng,duckduckgo"})
         _validate_settings_patch({"tavily_search_depth": "advanced", "tavily_timeout_seconds": 5.0})
         _validate_settings_patch({"web_search_providers": "brava", "brave_timeout_seconds": 1.5})
+        _validate_settings_patch(
+            {
+                "terminal_tool_allowed_commands": "curl,python3",
+                "terminal_tool_timeout_seconds": 5,
+                "terminal_tool_max_output_chars": 1000,
+            }
+        )
         with self.assertRaises(HTTPException):
             _validate_settings_patch({"web_search_providers": "unknown"})
         with self.assertRaises(HTTPException):
             _validate_settings_patch({"tavily_search_depth": "fast"})
+        with self.assertRaises(HTTPException):
+            _validate_settings_patch({"terminal_tool_allowed_commands": "/bin/curl"})
 
     def test_admin_seed_voice_profiles_can_be_saved_tagged_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

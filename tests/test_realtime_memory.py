@@ -158,6 +158,21 @@ class RealtimeMemoryTests(unittest.TestCase):
         tool_names = [t["function"]["name"] for t in registry.openai_tools()]
         self.assertIn("web_search", tool_names)
 
+    def test_terminal_tool_is_explicitly_gated(self):
+        hermes_registry = ToolRegistry()
+        register_default_local_tools(
+            hermes_registry,
+            Settings(llm_provider="hermes_agent", terminal_tool_enabled=True),
+        )
+        self.assertNotIn("terminal_exec", [t["function"]["name"] for t in hermes_registry.openai_tools()])
+
+        openai_registry = ToolRegistry()
+        register_default_local_tools(
+            openai_registry,
+            Settings(llm_provider="openai_compatible", terminal_tool_enabled=True),
+        )
+        self.assertIn("terminal_exec", [t["function"]["name"] for t in openai_registry.openai_tools()])
+
 
 if __name__ == "__main__":
     unittest.main()

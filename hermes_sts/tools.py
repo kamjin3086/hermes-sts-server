@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import shlex
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,6 +17,11 @@ if TYPE_CHECKING:
     from hermes_sts.websearch import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", ">", ">>", "<", "<<", "$(", "`"}
+TERMINAL_RESULT_HEADER = (
+    "Terminal command completed. Use stdout/stderr below to answer the user directly; "
+    "do not ask the user to run the command again."
+)
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[str] | str]
 ToolMode = Literal["local", "client"]
@@ -261,29 +270,54 @@ def register_default_local_tools(
 ) -> None:
     """Register STS-local tools gated by settings and provider.
 
-    Currently only web_search for openai_compatible mode.
+    These tools are intended for direct OpenAI-compatible model calls. Hermes
+    agent mode has its own tool loop, so STS-local tools stay out of that path.
     """
     if settings.llm_provider.strip().lower() != "openai_compatible":
         return
-    if not settings.web_search_enabled:
-        return
-    if web_search_provider is None or web_search_provider.description() == "noop":
-        return
-    registry.register_local(
-        ToolSpec(
-            name="web_search",
-            description="Search the web for current information. Returns titles, URLs and short snippets. Use when user asks about current events, weather, news, prices or anything you don't know. Keep queries concise.",
-            kind="slow",
-            mode="local",
-            parameters={
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Search query in user's language"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            handler=_make_web_search_handler(web_search_provider),
+
+    if settings.web_search_enabled and web_search_provider is not None and web_search_provider.description() != "noop":
+        registry.register_local(
+            ToolSpec(
+                name="web_search",
+                description="Search the web for current information. Returns titles, URLs and short snippets. Use when user asks about current events, weather, news, prices or anything you don't know. Keep queries concise.",
+                kind="slow",
+                mode="local",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Search query in user's language"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                handler=_make_web_search_handler(web_search_provider),
+            )
         )
-    )
+
+    if settings.terminal_tool_enabled:
+        registry.register_local(
+            ToolSpec(
+                name="terminal_exec",
+                description="Run one configured, non-interactive terminal command on the STS server. Use for simple API calls, diagnostics or small code snippets when a dedicated tool is unavailable. The server enforces an executable allowlist, working directory boundary, timeout and output limit.",
+                kind="slow",
+                mode="local",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Command line to run. Shell pipelines and redirection are not supported; call one allowlisted executable with arguments.",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Optional working directory relative to the configured terminal tool root.",
+                        },
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                handler=_make_terminal_handler(settings),
+            )
+        )
 
 
 def _make_web_search_handler(provider: WebSearchProvider) -> ToolHandler:
@@ -306,6 +340,118 @@ def _make_web_search_handler(provider: WebSearchProvider) -> ToolHandler:
         return "\n\n".join(lines)[:2000]
 
     return handler
+
+
+def _make_terminal_handler(settings: Settings) -> ToolHandler:
+    async def handler(args: dict[str, Any]) -> str:
+        try:
+            command = str(args.get("command") or "").strip()
+            if not command:
+                return "No terminal command provided."
+            argv = _parse_terminal_command(command)
+            executable = Path(argv[0]).name
+            allowed = _allowed_terminal_commands(settings)
+            if executable not in allowed:
+                return f"Terminal command rejected: executable {executable!r} is not allowlisted."
+            cwd = _terminal_cwd(settings, str(args.get("cwd") or ""))
+            timeout = _terminal_timeout(settings)
+            env = _terminal_env()
+            executable_path = argv[0] if os.path.sep in argv[0] else shutil.which(argv[0])
+            if not executable_path:
+                return f"Terminal command rejected: executable {executable!r} was not found on PATH."
+        except ValueError as exc:
+            return f"Terminal command rejected: {exc}"
+
+        process = await asyncio.create_subprocess_exec(
+            executable_path,
+            *argv[1:],
+            cwd=str(cwd),
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            return f"Terminal command timed out after {timeout:.1f}s."
+
+        return _format_terminal_result(process.returncode or 0, stdout, stderr, settings.terminal_tool_max_output_chars)
+
+    return handler
+
+
+def _parse_terminal_command(command: str) -> list[str]:
+    if len(command) > 2000:
+        raise ValueError("command is too long")
+    if any(ch in command for ch in ("\x00", "\n", "\r")):
+        raise ValueError("command must be a single line")
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"could not parse command: {exc}") from exc
+    if not argv:
+        raise ValueError("command is empty")
+    if any(token in SHELL_CONTROL_TOKENS or token.startswith("$(") for token in argv):
+        raise ValueError("shell operators are not supported")
+    return argv
+
+
+def _allowed_terminal_commands(settings: Settings) -> set[str]:
+    return {
+        item.strip()
+        for item in str(settings.terminal_tool_allowed_commands or "").split(",")
+        if item.strip() and "/" not in item.strip()
+    }
+
+
+def _terminal_cwd(settings: Settings, raw_cwd: str) -> Path:
+    root = Path(settings.terminal_tool_cwd or ".").expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"configured working directory does not exist: {root}")
+    cwd = root
+    if raw_cwd.strip():
+        requested = Path(raw_cwd.strip()).expanduser()
+        cwd = (root / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    try:
+        cwd.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("cwd must stay under the configured terminal tool root") from exc
+    if not cwd.is_dir():
+        raise ValueError(f"cwd does not exist: {cwd}")
+    return cwd
+
+
+def _terminal_timeout(settings: Settings) -> float:
+    try:
+        return max(0.2, min(30.0, float(settings.terminal_tool_timeout_seconds)))
+    except (TypeError, ValueError):
+        return 6.0
+
+
+def _terminal_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    for key in ("PATH", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
+def _format_terminal_result(returncode: int, stdout: bytes, stderr: bytes, limit: int) -> str:
+    try:
+        max_chars = max(500, min(12000, int(limit)))
+    except (TypeError, ValueError):
+        max_chars = 4000
+    stdout_text = stdout.decode("utf-8", errors="replace").strip()
+    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+    body = f"{TERMINAL_RESULT_HEADER}\nexit_code: {returncode}\nstdout:\n{stdout_text}\nstderr:\n{stderr_text}"
+    if len(body) <= max_chars:
+        return body
+    omitted = len(body) - max_chars
+    return body[:max_chars] + f"\n...[truncated {omitted} chars]"
 
 
 def _canonical_json_value(value: Any) -> Any:
