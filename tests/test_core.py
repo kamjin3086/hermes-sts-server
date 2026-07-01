@@ -2500,7 +2500,7 @@ class CoreTests(unittest.TestCase):
             session.settings = Settings(client_tool_followup_timeout_seconds=0.01)
             session.pending_tool_context = [{"role": "user", "content": "摇头"}]
             session.pending_tool_results = [{"role": "tool", "content": "done"}]
-            session.tool_followup_timer = None
+            session._start_tool_followup_watchdog()
             await asyncio.sleep(0.05)
             return session.pending_tool_context, len(session.pending_tool_results)
 
@@ -2510,21 +2510,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(pending_results_len, 0)
 
     def test_client_tool_followup_timeout_cancelled_by_response(self) -> None:
-        session = bare_session()
-        session.settings = Settings(client_tool_followup_timeout_seconds=10.0)
-        session.pending_tool_context = [
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "摇头"},
-        ]
-        session.pending_tool_results = []
-        session.tool_followup_timer = None
+        async def run() -> bool:
+            session = bare_session()
+            session.settings = Settings(client_tool_followup_timeout_seconds=10.0)
+            session.pending_tool_context = [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "摇头"},
+            ]
+            session.pending_tool_results = []
+            session._start_tool_followup_watchdog()
+            timer_task = session.tool_followup_timer
 
-        session._handle_conversation_item(
-            {"type": "function_call_output", "call_id": "call_1", "output": "done"}
-        )
+            session._handle_conversation_item(
+                {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+            )
 
-        self.assertEqual(len(session.pending_tool_results), 1)
-        self.assertIsNotNone(session.tool_followup_timer)
+            await asyncio.sleep(0)
+            cancelled = timer_task is None or timer_task.cancelled() or timer_task.done()
+            if timer_task and not timer_task.done():
+                timer_task.cancel()
+                try:
+                    await asyncio.wait_for(timer_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            return cancelled
+
+        cancelled = asyncio.run(run())
+        self.assertTrue(cancelled)
 
     def test_client_tool_followup_timeout_cancelled_on_disconnect(self) -> None:
         async def run() -> bool:

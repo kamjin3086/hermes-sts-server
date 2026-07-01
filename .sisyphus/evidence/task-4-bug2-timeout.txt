@@ -1,0 +1,13 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.0.3, pluggy-1.6.0 -- /home/kamjin/apps/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/kamjin/projects/hermes-sts-server
+configfile: pyproject.toml
+plugins: anyio-4.13.0, hydra-core-1.3.2
+collecting ... collected 97 items / 94 deselected / 3 selected
+
+tests/test_core.py::CoreTests::test_client_tool_followup_timeout_cancelled_by_response PASSED [ 33%]
+tests/test_core.py::CoreTests::test_client_tool_followup_timeout_cancelled_on_disconnect PASSED [ 66%]
+tests/test_core.py::CoreTests::test_client_tool_followup_timeout_clears_pending_state PASSED [100%]
+
+======================= 3 passed, 94 deselected in 0.31s =======================

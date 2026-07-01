@@ -67,6 +67,7 @@ class RealtimeSession:
     pending_text_inputs: list[str] = field(default_factory=list)
     pending_tool_results: list[Message] = field(default_factory=list)
     pending_tool_context: list[Message] | None = None
+    tool_followup_timer: asyncio.Task | None = None
     next_response_instructions: str = ""
     session_voice: TtsVoice | None = None
     next_response_voice: TtsVoice | None = None
@@ -331,6 +332,7 @@ class RealtimeSession:
                     call_id,
                     len(self.pending_tool_results),
                 )
+            self._cancel_tool_followup_watchdog()
             return
 
         text = self._extract_text_from_item(item)
@@ -589,6 +591,7 @@ class RealtimeSession:
         results = list(self.pending_tool_results)
         self.pending_tool_context = None
         self.pending_tool_results.clear()
+        self._cancel_tool_followup_watchdog()
         try:
             started = time.perf_counter()
             messages = [*context, *results]
@@ -1115,6 +1118,7 @@ class RealtimeSession:
                         created_for_tools = True
                     if execution.needs_response:
                         self.pending_tool_context = messages
+                        self._start_tool_followup_watchdog()
                     await self._send_tool_call_event(
                         tool_call=tool_call,
                         execution=execution,
@@ -1176,6 +1180,31 @@ class RealtimeSession:
         if memory is None or not answer:
             return
         asyncio.create_task(self._record_memory_turn(transcript, answer))
+
+    def _start_tool_followup_watchdog(self) -> None:
+        if self.tool_followup_timer is not None and not self.tool_followup_timer.done():
+            self.tool_followup_timer.cancel()
+        self.tool_followup_timer = asyncio.create_task(
+            self._tool_followup_timeout(self.settings.client_tool_followup_timeout_seconds)
+        )
+
+    async def _tool_followup_timeout(self, timeout: float) -> None:
+        try:
+            await asyncio.sleep(timeout)
+            logger.warning(
+                "client tool followup timed out session_id=%s timeout=%.1fs; clearing pending_tool_context",
+                self.session_id, timeout,
+            )
+            self.pending_tool_context = None
+            self.pending_tool_results.clear()
+        except asyncio.CancelledError:
+            pass
+
+    def _cancel_tool_followup_watchdog(self) -> None:
+        timer = self.tool_followup_timer
+        if timer is not None and not timer.done():
+            timer.cancel()
+        self.tool_followup_timer = None
 
     async def _send_tool_call_event(
         self,
@@ -1949,6 +1978,7 @@ class RealtimeSession:
         self.state = "idle"
 
     async def _cancel_processing(self, *, reason: str = "cancelled", send_done: bool = True) -> None:
+        self._cancel_tool_followup_watchdog()
         task = self.processing
         self.processing = None
         if task and not task.done():
