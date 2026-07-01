@@ -20,6 +20,7 @@ import {
   MessageSquare,
   Mic2,
   Minimize2,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -51,7 +52,7 @@ import "@fontsource/jetbrains-mono/400.css";
 import "./styles.css";
 
 type SettingsValues = Record<string, any>;
-type Persona = { id: string; name: string; prompt: string; voice_engine?: string; voice_mode: string; voice_ref: string; voice_seed?: number | null };
+type Persona = { id: string; name: string; prompt: string; voice_engine?: string; voice_mode: string; voice_identity?: string; voice_ref: string; voice_seed?: number | null };
 type VoiceProfile = Record<string, any>;
 type EffectiveVoice = { engine: string; mode: string; label: string; ref?: string; seed?: number | null; model?: string; codec?: string; ready?: boolean; fallback_reason?: string };
 type ConversationSummary = {
@@ -115,6 +116,15 @@ type AdminState = {
   memory?: Record<string, any> | null;
 };
 
+type VoiceSaveDraft = {
+  key: string;
+  title: string;
+  name: string;
+  note?: string;
+  actionLabel?: string;
+  onSave: (name: string, note: string) => Promise<void>;
+};
+
 const navItems = [
   { id: "dashboard", label: "总览", icon: Activity },
   { id: "studio", label: "角色声线", icon: AudioLines },
@@ -143,6 +153,15 @@ const speakerNames: Record<string, string> = {
   dylan: "Dylan",
 };
 
+const voiceIdentityOptions = [
+  { id: "young_female", label: "年轻女声", prompt: "single consistent young adult female Mandarin speaker identity" },
+  { id: "adult_female", label: "成熟女声", prompt: "single consistent adult female Mandarin speaker identity" },
+  { id: "young_male", label: "年轻男声", prompt: "single consistent young adult male Mandarin speaker identity" },
+  { id: "adult_male", label: "成熟男声", prompt: "single consistent adult male Mandarin speaker identity" },
+  { id: "child", label: "童声", prompt: "single consistent child Mandarin speaker identity" },
+  { id: "elder", label: "长者声", prompt: "single consistent elderly Mandarin speaker identity" },
+] as const;
+
 const waveStyles = [
   { id: "scanner", name: "扫描线" },
   { id: "bars", name: "能量条" },
@@ -150,6 +169,48 @@ const waveStyles = [
   { id: "ribbon", name: "轨迹带" },
   { id: "needles", name: "声纹针列" },
 ] as const;
+
+function VoiceSavePopover({ draft, onClose }: { draft: VoiceSaveDraft | null; onClose: () => void }) {
+  const [name, setName] = useState(draft?.name || "");
+  const [note, setNote] = useState(draft?.note || "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setName(draft?.name || "");
+    setNote(draft?.note || "");
+    setSaving(false);
+  }, [draft?.key]);
+
+  if (!draft) return null;
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await draft.onSave(name.trim(), note.trim());
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="voice-save-popover">
+      <strong>{draft.title}</strong>
+      <label className="field compact-field">
+        <span>名称</span>
+        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 夜间低声线" autoFocus />
+      </label>
+      <label className="field compact-field">
+        <span>备注</span>
+        <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="可选：适合什么场景、听感特点" maxLength={240} />
+      </label>
+      <div className="save-popover-actions">
+        <button className="secondary" onClick={onClose} disabled={saving}>取消</button>
+        <button className="primary" onClick={save} disabled={saving}>{saving ? "保存中" : draft.actionLabel || "保存"}</button>
+      </div>
+    </div>
+  );
+}
 
 function App() {
   const [state, setState] = useState<AdminState | null>(null);
@@ -221,7 +282,7 @@ function App() {
         </nav>
         <div className="side-foot">
           <StatusDot ok={state.health.status === "ok"} />
-          <span>{state.health.tts_provider === "qwen3tts" ? "Qwen3TTS" : "Kokoro"} online</span>
+          <span>{providerLabel(state.health.tts_provider)} online</span>
         </div>
       </aside>
 
@@ -394,41 +455,62 @@ function Studio({
   const [dirty, setDirty] = useState(false);
   const [personaId, setPersonaId] = useState(activePersona?.id ?? "operator");
   const [personaName, setPersonaName] = useState(activePersona?.name ?? "自定义人格");
+  const [voiceIdentity, setVoiceIdentity] = useState(activePersona?.voice_identity || "young_female");
   const [prompt, setPrompt] = useState(values.sts_persona_custom || activePersona?.prompt || "");
   const [previewText, setPreviewText] = useState("你好，我是 Hermes STS。现在用当前角色和音色说话。");
   const [audioUrl, setAudioUrl] = useState("");
-  const [studioView, setStudioView] = useState<"persona" | "voice" | "preview">("persona");
 
-  const personaListRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (dirty) return;
     const persona = state.personas.find((p) => p.id === values.sts_persona_preset) ?? state.personas[0];
     setPersonaId(persona?.id ?? "operator");
     setPersonaName(persona?.name ?? "自定义人格");
+    setVoiceIdentity(persona?.voice_identity || "young_female");
     setPrompt(values.sts_persona_custom || persona?.prompt || "");
   }, [dirty, state.personas, values.sts_persona_custom, values.sts_persona_preset]);
 
-  useEffect(() => {
-    const el = personaListRef.current?.querySelector(".selected");
-    el?.scrollIntoView({ block: "nearest" });
-  }, [state.personas]);
-
-  const selectPersona = (persona: Persona) => {
+  const selectPersona = async (persona: Persona) => {
     setPersonaId(persona.id);
     setPersonaName(persona.name);
+    setVoiceIdentity(persona.voice_identity || "young_female");
     setPrompt(persona.prompt);
-    setDirty(true);
+    setDirty(false);
+    setBusy("persona-apply");
+    try {
+      const data = await api<{ state: AdminState; confirmation?: string; effective_voice?: EffectiveVoice; restart_scheduled?: boolean }>("/api/personas", {
+        method: "POST",
+        body: JSON.stringify({ ...persona, apply: true }),
+      });
+      await reload();
+      setNotice(data.effective_voice?.fallback_reason || data.confirmation || `已切换到「${persona.name}」`);
+      window.setTimeout(() => setNotice(""), data.effective_voice?.fallback_reason ? 4200 : 2200);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const voicePackageForPersona = (persona: Persona | undefined) => {
+    if (!persona) return voicePackageForValues(values);
+    return {
+      engine: persona.voice_engine || "qwen3tts",
+      mode: persona.voice_mode || "default",
+      identity: persona.voice_identity || "young_female",
+      ref: persona.voice_ref || "",
+      seed: persona.voice_seed ?? null,
+    };
   };
 
   const personaPayload = (apply: boolean) => {
-    const id = personaId === "custom" || !state.personas.some((p) => p.id === personaId) ? `custom_${Date.now()}` : personaId;
-    const voice = voicePackageForValues(values);
+    const existingPersona = state.personas.find((p) => p.id === personaId);
+    const id = personaId === "custom" || !existingPersona ? `custom_${Date.now()}` : personaId;
+    const voice = existingPersona ? voicePackageForPersona(existingPersona) : voicePackageForValues(values);
     return {
       id,
       name: personaName || "自定义人格",
       prompt,
       voice_engine: voice.engine,
       voice_mode: voice.mode,
+      voice_identity: voiceIdentity || voice.identity || "young_female",
       voice_ref: voice.ref,
       voice_seed: voice.seed,
       apply,
@@ -528,6 +610,7 @@ function Studio({
       return;
     }
     setPersonaName(original.name);
+    setVoiceIdentity(original.voice_identity || "young_female");
     setPrompt(original.prompt);
     setDirty(false);
     setNotice(`已恢复"${original.name}"的原始提示词`);
@@ -549,6 +632,7 @@ function Studio({
       const nextPersona = data.state.personas.find((p) => p.id === data.state.settings.values.sts_persona_preset) ?? data.state.personas[0];
       setPersonaId(nextPersona?.id ?? "custom");
       setPersonaName(nextPersona?.name ?? "自定义人格");
+      setVoiceIdentity(nextPersona?.voice_identity || "young_female");
       setPrompt(data.state.settings.values.sts_persona_custom || nextPersona?.prompt || "");
     }
     await reload();
@@ -559,6 +643,7 @@ function Studio({
   const newPersona = () => {
     setPersonaId("custom");
     setPersonaName("新人格");
+    setVoiceIdentity("young_female");
     setPrompt("你是 Hermes 的语音助手。保持回答自然、简洁、有分寸，先理解用户意图，再给出清晰可执行的回应。");
     setDirty(true);
   };
@@ -608,33 +693,36 @@ function Studio({
             {state.effective_voice?.fallback_reason && <span className="voice-warning">{state.effective_voice.fallback_reason}</span>}
           </div>
         </div>
-        <div className="reachy-actions" role="tablist" aria-label="角色声线主操作">
-          <button className={studioView === "persona" ? "selected" : ""} onClick={() => setStudioView("persona")}><Bot size={16} />换人格</button>
-          <button className={studioView === "voice" ? "selected" : ""} onClick={() => setStudioView("voice")}><AudioLines size={16} />换声音</button>
-          <button className={studioView === "preview" ? "selected" : ""} onClick={() => setStudioView("preview")}><Play size={16} />试听确认</button>
-        </div>
-        <div className="effective-grid">
-          <Kpi label="引擎" value={engineLabel(state.effective_voice?.engine || values.tts_provider)} hint={state.effective_voice?.mode || "default"} />
-          <Kpi label="固定 seed" value={String(state.effective_voice?.seed ?? "--")} hint="同样配置保持稳定声线" />
-          <Kpi label="模型状态" value={state.effective_voice?.ready ? "已就绪" : "需确认"} hint={state.effective_voice?.fallback_reason || "当前配置可用"} />
+        <div className="audition-compact">
+          <textarea
+            className="audition-compact-input"
+            value={previewText}
+            onChange={(e) => setPreviewText(e.target.value)}
+            placeholder="输入试听文本..."
+            rows={1}
+          />
+          <button className="primary" onClick={preview} disabled={busy === "preview"}>
+            <Play size={16} />{busy === "preview" ? "生成中" : "试听"}
+          </button>
+          {audioUrl && (
+            <audio controls src={audioUrl} className="audio audition-audio" autoPlay />
+          )}
         </div>
       </section>
 
-      {studioView === "persona" && <section className="panel span-4">
+      <section className="panel span-4 persona-preset-panel">
         <div className="panel-head">
           <div>
-            <span className="eyebrow"><Bot size={15} /> 人格</span>
             <h2>人格预设</h2>
           </div>
           <button className="secondary" onClick={newPersona}><Plus size={16} />新增</button>
         </div>
-        <p className="muted">点选只会装载到编辑框；改完提示词后用"应用人格"提交。</p>
-        <div className="persona-list studio-persona-list" ref={personaListRef}>
+        <div className="persona-list studio-persona-list">
           {state.personas.map((persona) => (
             <div key={persona.id} className={personaId === persona.id ? "persona selected" : "persona"}>
               <button className="persona-main" onClick={() => selectPersona(persona)}>
                 <strong>{persona.name}</strong>
-                <span style={{ color: "#3c3939" }}>{persona.voice_mode === "default" ? "默认音色" : modeLabels[persona.voice_mode]?.title}</span>
+                <span>{personaVoiceSubtitle(persona)}</span>
               </button>
               <button className="persona-delete" onClick={() => deletePersona(persona)} title="删除人格">
                 <Trash2 size={15} />
@@ -642,9 +730,9 @@ function Studio({
             </div>
           ))}
         </div>
-      </section>}
+      </section>
 
-      {studioView === "persona" && <section className="panel span-8">
+      <section className="panel span-8 persona-editor-panel">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><Sparkles size={15} /> 角色与提示词</span>
@@ -666,24 +754,30 @@ function Studio({
           <span>角色名称</span>
           <input value={personaName} onChange={(e) => { setPersonaName(e.target.value); setPersonaId("custom"); setDirty(true); }} />
         </label>
-        <details className="soft-details prompt-details" open={dirty || personaId === "custom"}>
-          <summary><Settings2 size={15} /> 编辑完整提示词</summary>
-          <label className="field">
-            <span>完整提示词</span>
-            <textarea className="prompt-box" value={prompt} onChange={(e) => onPromptChange(e.target.value)} />
-          </label>
-        </details>
+        <label className="field compact-field">
+          <span>声线身份</span>
+          <div className="select-wrap">
+            <select value={voiceIdentity} onChange={(e) => { setVoiceIdentity(e.target.value); setDirty(true); }}>
+              {voiceIdentityOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+            <ChevronDown size={16} />
+          </div>
+        </label>
+        <label className="field prompt-details">
+          <span>完整提示词</span>
+          <textarea className="prompt-box" value={prompt} onChange={(e) => onPromptChange(e.target.value)} />
+        </label>
         <div className="switch-line">
           <span>人格来源</span>
           <SwitchControl checked={values.sts_persona_source !== "ws"} onChange={(checked) => patch({ sts_persona_source: checked ? "settings" : "ws" })} onLabel="界面控制" offLabel="跟随 Reachy Profile" />
         </div>
-      </section>}
+      </section>
 
-      {studioView === "voice" && <section className="panel span-12">
+      <section className="panel span-12 voice-workbench-panel">
         <div className="panel-head">
           <div>
             <span className="eyebrow"><AudioLines size={15} /> 声线</span>
-            <h2>引擎与音色</h2>
+            <h2>声线微调</h2>
           </div>
           <div className="segmented compact">
             <button disabled={busy === "tts-provider"} className={values.tts_provider === "qwen3tts" ? "selected" : ""} onClick={() => switchTtsProvider("qwen3tts")}>Qwen3TTS</button>
@@ -696,21 +790,9 @@ function Studio({
         ) : values.tts_provider === "omnivoice" ? (
           <OmniVoice state={state} values={values} patch={patch} reload={reload} busy={busy} setBusy={setBusy} setNotice={setNotice} goSetup={goSetup} />
         ) : (
-          <KokoroVoice state={state} values={values} patch={patch} />
+          <KokoroVoice state={state} values={values} patch={patch} reload={reload} setNotice={setNotice} />
         )}
-      </section>}
-
-      {studioView === "preview" && <section className="panel span-12 preview-confirm-panel">
-        <div className="panel-head">
-          <div>
-            <span className="eyebrow"><Play size={15} /> 试听</span>
-            <h2>实时确认当前角色和声线</h2>
-          </div>
-          <button className="primary" onClick={preview} disabled={busy === "preview"}><Play size={16} />{busy === "preview" ? "生成中" : "生成试听"}</button>
-        </div>
-        <textarea className="preview-text" value={previewText} onChange={(e) => setPreviewText(e.target.value)} />
-        {audioUrl && <audio controls src={audioUrl} className="audio" autoPlay />}
-      </section>}
+      </section>
 
       <section className="panel span-12 studio-advanced">
         <details className="soft-details">
@@ -752,12 +834,10 @@ function QwenVoice({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [cloneName, setCloneName] = useState("我的克隆音色");
   const [cloneText, setCloneText] = useState("");
+  const [cloneNote, setCloneNote] = useState("");
   const [voicePreviewUrl, setVoicePreviewUrl] = useState("");
   const [lastRandomSeed, setLastRandomSeed] = useState<number | null>(null);
-  const [randomName, setRandomName] = useState("收藏声线");
-  const [randomTags, setRandomTags] = useState("沉稳,清晰");
-  const [randomNote, setRandomNote] = useState("");
-  const [tagFilter, setTagFilter] = useState("");
+  const [saveDraft, setSaveDraft] = useState<VoiceSaveDraft | null>(null);
   const [seedBatch, setSeedBatch] = useState<number[]>([]);
   const [queuedSeeds, setQueuedSeeds] = useState<number[]>([]);
   const [workshopBrief, setWorkshopBrief] = useState("冷静、清晰、有一点未来感，适合长期陪伴的中文语音助手");
@@ -767,9 +847,8 @@ function QwenVoice({
   const [designDraft, setDesignDraft] = useState(String(values.qwentts_cpp_voice_design || ""));
   const customVoiceReady = Boolean(state.qwen.models.customvoice?.installed);
   const voiceDesignReady = Boolean(state.qwen.models.voicedesign?.installed);
-  const favoriteVoices = state.voices.filter((voice) => ["seed", "design"].includes(String(voice.mode)));
-  const favoriteTags = Array.from(new Set(favoriteVoices.flatMap((voice) => splitTags(voice.tags))));
-  const shownVoices = tagFilter ? favoriteVoices.filter((voice) => splitTags(voice.tags).includes(tagFilter)) : favoriteVoices;
+  const favoriteVoices = state.voices.filter((voice) => String(voice.provider || "qwen3tts") === "qwen3tts" && ["seed", "preset", "design"].includes(String(voice.mode)));
+  const shownVoices = favoriteVoices;
 
   useEffect(() => {
     setDesignDraft(String(values.qwentts_cpp_voice_design || ""));
@@ -804,24 +883,39 @@ function QwenVoice({
       window.setTimeout(() => setNotice(""), 1600);
       return;
     }
-    await api("/api/qwen/voices/seed", {
-      method: "POST",
-      body: JSON.stringify({ name: randomName || `Seed ${lastRandomSeed}`, seed: lastRandomSeed, tags: splitTags(randomTags), note: randomNote }),
+    setSaveDraft({
+      key: `qwen-seed-${lastRandomSeed}`,
+      title: "收藏这条声线",
+      name: `Seed ${lastRandomSeed}`,
+      actionLabel: "收藏并使用",
+      onSave: async (name, note) => {
+        await api("/api/qwen/voices/seed", {
+          method: "POST",
+          body: JSON.stringify({ provider: "qwen3tts", name: name || `Seed ${lastRandomSeed}`, seed: lastRandomSeed, tags: [], note }),
+        });
+        await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: lastRandomSeed, tts_voice_source: "settings" });
+        await reload();
+        setNotice(`已收藏并使用 seed ${lastRandomSeed}`);
+        window.setTimeout(() => setNotice(""), 1800);
+      },
     });
-    await patch({ qwentts_cpp_voice_mode: "default", qwentts_cpp_seed: lastRandomSeed, tts_voice_source: "settings" });
-    await reload();
-    setNotice(`已收藏并使用 seed ${lastRandomSeed}`);
-    window.setTimeout(() => setNotice(""), 1800);
   };
 
   const keepSeed = async (seed: number, name = `Seed ${seed}`) => {
-    await api("/api/qwen/voices/seed", {
-      method: "POST",
-      body: JSON.stringify({ name, seed, tags: splitTags(randomTags), note: randomNote }),
+    setSaveDraft({
+      key: `qwen-seed-candidate-${seed}`,
+      title: "收藏候选声线",
+      name,
+      onSave: async (savedName, note) => {
+        await api("/api/qwen/voices/seed", {
+          method: "POST",
+          body: JSON.stringify({ provider: "qwen3tts", name: savedName || name, seed, tags: [], note }),
+        });
+        await reload();
+        setNotice(`已收藏 seed ${seed}`);
+        window.setTimeout(() => setNotice(""), 1800);
+      },
     });
-    await reload();
-    setNotice(`已收藏 seed ${seed}`);
-    window.setTimeout(() => setNotice(""), 1800);
   };
 
   const generateSeedBatch = () => {
@@ -862,6 +956,25 @@ function QwenVoice({
     await reload();
   };
 
+  const editVoiceProfile = (voice: VoiceProfile) => {
+    setSaveDraft({
+      key: `edit-${voice.id}`,
+      title: "编辑收藏声线",
+      name: String(voice.name || "收藏声线"),
+      note: String(voice.note || ""),
+      actionLabel: "保存修改",
+      onSave: async (name, note) => {
+        await api(`/api/tts/voices/${encodeURIComponent(String(voice.id))}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: name || voice.name || "收藏声线", note }),
+        });
+        await reload();
+        setNotice("收藏声线已更新");
+        window.setTimeout(() => setNotice(""), 1800);
+      },
+    });
+  };
+
   const suggestVoice = async () => {
     setBusy("workshop");
     try {
@@ -888,9 +1001,9 @@ function QwenVoice({
     try {
       const data = await api<{ suggestion: Record<string, any> }>("/api/qwen/workshop/suggest", {
         method: "POST",
-        body: JSON.stringify({ brief: `只生成 VoiceDesign 音色描述。目标气质：${brief}`, persona_hint: state.health.persona_prompt || "" }),
+        body: JSON.stringify({ brief: `只生成 VoiceDesign 音色描述。目标气质：${brief}。必须固定单一说话人身份，明确 gender 和 age，不要让男女或年龄漂移。`, persona_hint: state.health.persona_prompt || "" }),
       });
-      const prompt = String(data.suggestion.design_prompt || "").trim() || `natural Mandarin voice, clear articulation, ${brief}, calm tone, comfortable pace`;
+      const prompt = buildVoiceDesignPrompt(String(data.suggestion.design_prompt || "").trim() || `natural Mandarin voice, clear articulation, ${brief}, calm tone, comfortable pace`, "young_female");
       setDesignDraft(prompt);
       setNotice("AI 已生成音色描述，确认后再应用");
       window.setTimeout(() => setNotice(""), 2200);
@@ -900,12 +1013,13 @@ function QwenVoice({
   };
 
   const applyDesignDraft = async () => {
-    const prompt = designDraft.trim();
+    const prompt = buildVoiceDesignPrompt(designDraft, "young_female");
     if (!prompt) {
       setNotice("先填写或生成音色描述");
       window.setTimeout(() => setNotice(""), 1600);
       return;
     }
+    setDesignDraft(prompt);
     await patch({ qwentts_cpp_voice_mode: "design", qwentts_cpp_voice_design: prompt, tts_voice_source: "settings" });
     await reload();
     setNotice("描述造声已启用");
@@ -913,24 +1027,61 @@ function QwenVoice({
   };
 
   const saveCurrentDesignVoice = async () => {
-    const prompt = designDraft.trim();
+    const prompt = buildVoiceDesignPrompt(designDraft, "young_female");
     if (!prompt) {
       setNotice("先填写或生成音色描述");
       window.setTimeout(() => setNotice(""), 1600);
       return;
     }
-    await api("/api/qwen/voices/design", {
-      method: "POST",
-      body: JSON.stringify({
-        name: randomName || "描述造声音色",
-        design_prompt: prompt,
-        tags: splitTags(randomTags),
-        note: randomNote,
-      }),
+    setDesignDraft(prompt);
+    setSaveDraft({
+      key: `qwen-design-${prompt}`,
+      title: "收藏描述声线",
+      name: "描述造声音色",
+      onSave: async (name, note) => {
+        await api("/api/qwen/voices/design", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: "qwen3tts",
+            name: name || "描述造声音色",
+            design_prompt: prompt,
+            tags: [],
+            note,
+          }),
+        });
+        await reload();
+        setNotice("描述声线已收藏");
+        window.setTimeout(() => setNotice(""), 1800);
+      },
     });
-    await reload();
-    setNotice("描述声线已收藏");
-    window.setTimeout(() => setNotice(""), 1800);
+  };
+
+  const saveCurrentPresetVoice = async () => {
+    const speaker = String(values.qwentts_cpp_voice_preset || "vivian").trim();
+    if (!speaker) {
+      setNotice("先选择一个预设 speaker");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    setSaveDraft({
+      key: `qwen-preset-${speaker}`,
+      title: "收藏预设声线",
+      name: `预设 ${speakerNames[speaker] ?? speaker}`,
+      onSave: async (name, note) => {
+        await api("/api/qwen/voices/preset", {
+          method: "POST",
+          body: JSON.stringify({
+            name: name || `预设 ${speakerNames[speaker] ?? speaker}`,
+            speaker,
+            tags: [],
+            note,
+          }),
+        });
+        await reload();
+        setNotice("预设声线已收藏");
+        window.setTimeout(() => setNotice(""), 1800);
+      },
+    });
   };
 
   const applySuggestion = async () => {
@@ -952,39 +1103,48 @@ function QwenVoice({
   const saveSuggestionVoice = async () => {
     if (!workshopSuggestion) return;
     const mode = String(workshopSuggestion.voice_mode || "design");
-    const tags = Array.isArray(workshopSuggestion.tags) ? workshopSuggestion.tags : splitTags(workshopSuggestion.tags);
     const note = String(workshopSuggestion.save_note || workshopSuggestion.rationale || workshopSuggestion.notes || "").slice(0, 240);
-    if (mode === "design") {
-      const designPrompt = String(workshopSuggestion.design_prompt || "").trim();
-      if (!designPrompt) {
-        setNotice("这条方案没有音色描述，无法收藏为描述造声");
+    setSaveDraft({
+      key: `qwen-suggestion-${Date.now()}`,
+      title: "收藏 AI 声线",
+      name: String(workshopSuggestion.name || (mode === "design" ? "AI 描述声线" : `Seed ${Number(workshopSuggestion.seed || 42)}`)),
+      note,
+      onSave: async (name, savedNote) => {
+        if (mode === "design") {
+          const designPrompt = String(workshopSuggestion.design_prompt || "").trim();
+          if (!designPrompt) {
+            setNotice("这条方案没有音色描述，无法收藏为描述造声");
+            window.setTimeout(() => setNotice(""), 1800);
+            return;
+          }
+          await api("/api/qwen/voices/design", {
+            method: "POST",
+            body: JSON.stringify({
+              name: name || "AI 描述声线",
+              provider: "qwen3tts",
+              design_prompt: designPrompt,
+              tags: [],
+              note: savedNote,
+            }),
+          });
+        } else {
+          const seed = Number(workshopSuggestion.seed || 42);
+          await api("/api/qwen/voices/seed", {
+            method: "POST",
+            body: JSON.stringify({
+              name: name || `Seed ${seed}`,
+              provider: "qwen3tts",
+              seed,
+              tags: [],
+              note: savedNote,
+            }),
+          });
+        }
+        await reload();
+        setNotice("AI 声线已收藏");
         window.setTimeout(() => setNotice(""), 1800);
-        return;
-      }
-      await api("/api/qwen/voices/design", {
-        method: "POST",
-        body: JSON.stringify({
-          name: workshopSuggestion.name || "AI 描述声线",
-          design_prompt: designPrompt,
-          tags,
-          note,
-        }),
-      });
-    } else {
-      const seed = Number(workshopSuggestion.seed || 42);
-      await api("/api/qwen/voices/seed", {
-        method: "POST",
-        body: JSON.stringify({
-          name: workshopSuggestion.name || `Seed ${seed}`,
-          seed,
-          tags,
-          note,
-        }),
-      });
-    }
-    await reload();
-    setNotice("AI 声线已收藏");
-    window.setTimeout(() => setNotice(""), 1800);
+      },
+    });
   };
 
   const saveSuggestionAsPersona = async () => {
@@ -1021,6 +1181,8 @@ function QwenVoice({
     const form = new FormData();
     form.append("name", cloneName);
     form.append("reference_text", cloneText);
+    form.append("tags", "");
+    form.append("note", cloneNote);
     form.append("file", file);
     const uploaded = await api<{ voice: VoiceProfile }>("/api/qwen/clone/upload", { method: "POST", body: form, raw: true });
     await api("/api/qwen/clone/encode", {
@@ -1031,6 +1193,33 @@ function QwenVoice({
     await patch({ qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: uploaded.voice.id, tts_voice_source: "settings" });
     setNotice("克隆音色已预编码并启用");
     await reload();
+  };
+
+  const encodeQwenClone = async (voiceId: string) => {
+    setBusy("encode-qwen-clone");
+    try {
+      await api("/api/qwen/clone/encode", {
+        method: "POST",
+        body: JSON.stringify({ voice_id: voiceId }),
+      });
+      await reload();
+      setNotice("Qwen 克隆音色已预编码");
+      window.setTimeout(() => setNotice(""), 1800);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const applyQwenClone = async (voice: VoiceProfile) => {
+    if (!(voice.ref_spk || voice.ref_rvq)) {
+      setNotice("这条克隆音色还没有为 Qwen3TTS 预编码");
+      window.setTimeout(() => setNotice(""), 2600);
+      return;
+    }
+    await patch({ qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id, tts_voice_source: "settings" });
+    await reload();
+    setNotice(`已套用「${voice.name}」`);
+    window.setTimeout(() => setNotice(""), 1800);
   };
 
   const switchQwenMode = async (mode: string) => {
@@ -1089,6 +1278,11 @@ function QwenVoice({
                 </div>
               ))}
             </div>
+            <div className="preset-save-bar">
+              <button className="secondary" onClick={saveCurrentPresetVoice} disabled={!values.qwentts_cpp_voice_preset}>
+                <Save size={16} />收藏预设
+              </button>
+            </div>
           </div>
         )}
         {values.qwentts_cpp_voice_mode === "default" && (
@@ -1102,9 +1296,6 @@ function QwenVoice({
               <button className="secondary" onClick={randomPreview} disabled={false}><Shuffle size={16} />随机试听</button>
               <button className="primary" onClick={keepRandomSeed} disabled={lastRandomSeed == null}>留下这个声线</button>
             </div>
-            <input value={randomName} onChange={(event) => setRandomName(event.target.value)} placeholder="给这条声线起个名字" />
-            <input value={randomTags} onChange={(event) => setRandomTags(event.target.value)} placeholder="标签，用逗号分隔，例如 沉稳,清晰" />
-            <input className="compact-note-input" value={randomNote} onChange={(event) => setRandomNote(event.target.value)} placeholder="备注，可选：例如 低频、像某次随机里的第 3 条" />
             <code>{lastRandomSeed == null ? `当前固定 seed: ${values.qwentts_cpp_seed ?? 42}` : `刚试听 seed: ${lastRandomSeed}`}</code>
             <div className="ab-rack">
               <div>
@@ -1146,20 +1337,9 @@ function QwenVoice({
               <span>音色描述</span>
               <textarea value={designDraft} onChange={(e) => setDesignDraft(e.target.value)} placeholder="例如：female, young adult, clear warm Mandarin voice, natural pace, soft tone" />
             </label>
-            <div className="field-row">
-              <label className="field">
-                <span>收藏名</span>
-                <input value={randomName} onChange={(event) => setRandomName(event.target.value)} placeholder="例如 冷感播报" />
-              </label>
-              <label className="field">
-                <span>标签</span>
-                <input value={randomTags} onChange={(event) => setRandomTags(event.target.value)} placeholder="沉稳,清晰" />
-              </label>
-            </div>
-            <input className="compact-note-input" value={randomNote} onChange={(event) => setRandomNote(event.target.value)} placeholder="备注，可选：记录这条声线适合什么场景" />
             <div className="design-actions">
               <button className="primary" onClick={applyDesignDraft}><Check size={16} />使用描述</button>
-              <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: designDraft }, "描述造声试听完成")} disabled={!designDraft.trim() || !voiceDesignReady}>
+              <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: buildVoiceDesignPrompt(designDraft, "young_female") }, "描述造声试听完成")} disabled={!designDraft.trim() || !voiceDesignReady}>
                 <Play size={16} />试听
               </button>
               <button className="secondary" onClick={saveCurrentDesignVoice} disabled={!designDraft.trim()}>
@@ -1184,71 +1364,83 @@ function QwenVoice({
               <span>参考文本</span>
               <textarea value={cloneText} onChange={(e) => setCloneText(e.target.value)} placeholder="参考音频里说的原文。越准确，克隆越稳。" />
             </label>
+            <div className="field-row">
+              <label className="field">
+                <span>备注</span>
+                <input value={cloneNote} onChange={(e) => setCloneNote(e.target.value)} placeholder="这条克隆音色适合什么场景" />
+              </label>
+            </div>
             <button className="primary" onClick={uploadClone}><Upload size={16} />上传并预编码</button>
-            <div className="voice-pills">
+            <div className="clone-library">
               {state.voices.filter((v) => v.mode === "clone").map((voice) => (
-                <button key={voice.id} className={values.qwentts_cpp_clone_voice_id === voice.id ? "pill selected" : "pill"} onClick={() => patch({ qwentts_cpp_voice_mode: "clone", qwentts_cpp_clone_voice_id: voice.id, tts_voice_source: "settings" })}>
-                  {voice.name}{voice.ref_spk ? " · ready" : " · 未预编码"}
-                </button>
+                <div key={voice.id} className={values.qwentts_cpp_clone_voice_id === voice.id ? "clone-card selected" : "clone-card"}>
+                  <div>
+                    <strong>{voice.name}</strong>
+                    <span>{voice.ref_spk || voice.ref_rvq ? "Qwen ready" : "Qwen 未预编码"}</span>
+                    {voice.note && <small className="voice-note">{voice.note}</small>}
+                  </div>
+                  <button className="icon-btn" onClick={() => applyQwenClone(voice)} title="使用"><Check size={16} /></button>
+                  <button className="icon-btn" onClick={() => editVoiceProfile(voice)} title="编辑"><Pencil size={16} /></button>
+                  {!(voice.ref_spk || voice.ref_rvq) && (
+                    <button className="icon-btn" onClick={() => encodeQwenClone(String(voice.id))} title="预编码"><Cpu size={16} /></button>
+                  )}
+                  <button className="icon-btn danger" onClick={() => deleteVoiceProfile(voice)} title="删除"><Trash2 size={16} /></button>
+                </div>
               ))}
             </div>
           </div>
         )}
       </div>
       <div className="voice-side">
-        <div className="workshop-box">
-          <span className="eyebrow"><Wand2 size={15} /> 音色工坊</span>
-          <h3>让 AI 先设计一版</h3>
-          <p className="muted">依据当前人格、场景和偏好生成一条可试听、可启用、可收藏的声线。</p>
-          <select value={workshopScenario} onChange={(e) => setWorkshopScenario(e.target.value)}>
-            <option>跟随当前人格</option>
-            <option>日常陪伴和快答</option>
-            <option>播报、提醒、读消息</option>
-            <option>设备控制和短指令</option>
-            <option>夜间低打扰对话</option>
-          </select>
-          <textarea value={workshopBrief} onChange={(e) => setWorkshopBrief(e.target.value)} />
-          <button className="primary" onClick={suggestVoice} disabled={false}>{busy === "workshop" ? "生成中" : "生成方案"}</button>
-          {workshopSuggestion && (
-            <div className="suggestion-card">
-              <strong>{workshopSuggestion.name}</strong>
-              <span>{workshopSuggestion.voice_mode === "design" ? "描述造声" : "默认声线 seed"}{workshopSuggestion.use_case ? ` · ${workshopSuggestion.use_case}` : ""}</span>
-              {workshopSuggestion.design_prompt && <code>{workshopSuggestion.design_prompt}</code>}
-              <em>seed {workshopSuggestion.seed}</em>
-              {(workshopSuggestion.rationale || workshopSuggestion.notes) && <p>{workshopSuggestion.rationale || workshopSuggestion.notes}</p>}
-              {workshopSuggestion.save_note && <small className="voice-note">收藏备注：{workshopSuggestion.save_note}</small>}
-              {workshopSuggestion.persona_prompt && <textarea readOnly value={workshopSuggestion.persona_prompt} />}
-              <button className="secondary" onClick={() => previewVoice({
-                voice_mode: workshopSuggestion.voice_mode,
-                design_prompt: workshopSuggestion.design_prompt,
-                seed: workshopSuggestion.seed,
-                text: workshopSuggestion.preview_text,
-              }, "AI 方案试听完成")}><Play size={15} />试听方案</button>
-              <button className="primary" onClick={applySuggestion}>使用方案</button>
-              <button className="secondary" onClick={saveSuggestionVoice}><Save size={15} />收藏声线</button>
-              <button className="primary" onClick={saveSuggestionAsPersona}>保存成完整角色</button>
-            </div>
-          )}
-        </div>
+        <VoiceSavePopover draft={saveDraft} onClose={() => setSaveDraft(null)} />
+        <details className="soft-details workshop-box">
+          <summary><Wand2 size={15} /> 高级调音</summary>
+          <div className="workshop-content">
+            <h3>让 AI 先设计一版</h3>
+            <p className="muted">依据当前人格、场景和偏好生成一条可试听、可启用、可收藏的声线。</p>
+            <select value={workshopScenario} onChange={(e) => setWorkshopScenario(e.target.value)}>
+              <option>跟随当前人格</option>
+              <option>日常陪伴和快答</option>
+              <option>播报、提醒、读消息</option>
+              <option>设备控制和短指令</option>
+              <option>夜间低打扰对话</option>
+            </select>
+            <textarea value={workshopBrief} onChange={(e) => setWorkshopBrief(e.target.value)} />
+            <button className="primary" onClick={suggestVoice} disabled={false}>{busy === "workshop" ? "生成中" : "生成方案"}</button>
+            {workshopSuggestion && (
+              <div className="suggestion-card">
+                <strong>{workshopSuggestion.name}</strong>
+                <span>{workshopSuggestion.voice_mode === "design" ? "描述造声" : "默认声线 seed"}{workshopSuggestion.use_case ? ` · ${workshopSuggestion.use_case}` : ""}</span>
+                {workshopSuggestion.design_prompt && <code>{workshopSuggestion.design_prompt}</code>}
+                <em>seed {workshopSuggestion.seed}</em>
+                {(workshopSuggestion.rationale || workshopSuggestion.notes) && <p>{workshopSuggestion.rationale || workshopSuggestion.notes}</p>}
+                {workshopSuggestion.save_note && <small className="voice-note">收藏备注：{workshopSuggestion.save_note}</small>}
+                {workshopSuggestion.persona_prompt && <textarea readOnly value={workshopSuggestion.persona_prompt} />}
+                <button className="secondary" onClick={() => previewVoice({
+                  voice_mode: workshopSuggestion.voice_mode,
+                  design_prompt: workshopSuggestion.design_prompt,
+                  seed: workshopSuggestion.seed,
+                  text: workshopSuggestion.preview_text,
+                }, "AI 方案试听完成")}><Play size={15} />试听方案</button>
+                <button className="primary" onClick={applySuggestion}>使用方案</button>
+                <button className="secondary" onClick={saveSuggestionVoice}><Save size={15} />收藏声线</button>
+                <button className="primary" onClick={saveSuggestionAsPersona}>保存成完整角色</button>
+              </div>
+            )}
+          </div>
+        </details>
         {shownVoices.length > 0 && (
           <div className="saved-voices">
             <span className="eyebrow"><Shuffle size={15} /> 收藏声线</span>
-            {favoriteTags.length > 0 && (
-              <div className="tag-filter">
-                <button className={tagFilter === "" ? "pill selected" : "pill"} onClick={() => setTagFilter("")}>全部</button>
-                {favoriteTags.map((tag) => (
-                  <button key={tag} className={tagFilter === tag ? "pill selected" : "pill"} onClick={() => setTagFilter(tag)}>{tag}</button>
-                ))}
-              </div>
-            )}
             {shownVoices.map((voice) => (
               <div className="saved-voice" key={voice.id}>
                 <div>
                   <strong>{voice.name}</strong>
-                  <span>{voiceSummary(voice)}{voice.tags ? ` · ${voice.tags}` : ""}</span>
+                  <span>{voiceSummary(voice)}</span>
                   {voice.note && <small className="voice-note">{voice.note}</small>}
                 </div>
                 <button className="icon-btn" onClick={() => applyVoiceProfile(voice.id)} title="使用"><Check size={16} /></button>
+                <button className="icon-btn" onClick={() => editVoiceProfile(voice)} title="编辑"><Pencil size={16} /></button>
                 <button className="icon-btn danger" onClick={() => deleteVoiceProfile(voice)} title="删除"><Trash2 size={16} /></button>
               </div>
             ))}
@@ -1279,19 +1471,105 @@ function KokoroVoice({
   state,
   values,
   patch,
+  reload,
+  setNotice,
 }: {
   state: AdminState;
   values: SettingsValues;
   patch: (v: SettingsValues) => Promise<void>;
+  reload: () => Promise<void>;
+  setNotice: (v: string) => void;
 }) {
+  const [saveDraft, setSaveDraft] = useState<VoiceSaveDraft | null>(null);
+  const savedVoices = state.voices.filter((voice) => String(voice.provider || "") === "sherpa_kokoro");
+  const currentVoice = Number(values.sherpa_kokoro_voice || 0);
+  const saveCurrentVoice = async () => {
+    setSaveDraft({
+      key: `kokoro-${currentVoice}`,
+      title: "收藏 Kokoro 声线",
+      name: `Kokoro ${currentVoice}`,
+      onSave: async (name, note) => {
+        await api("/api/tts/voices/kokoro", {
+          method: "POST",
+          body: JSON.stringify({
+            name: name || `Kokoro ${currentVoice}`,
+            voice_id: currentVoice,
+            tags: [],
+            note,
+          }),
+        });
+        await reload();
+        setNotice("Kokoro 声线已收藏，之后可一键套用");
+        window.setTimeout(() => setNotice(""), 2200);
+      },
+    });
+  };
+  const applySavedVoice = async (voice: VoiceProfile) => {
+    await patch({ ...settingsForVoiceProfile(voice), tts_voice_source: "settings" });
+    await reload();
+    setNotice(`已套用「${voice.name}」`);
+    window.setTimeout(() => setNotice(""), 1800);
+  };
+  const deleteSavedVoice = async (voice: VoiceProfile) => {
+    if (!window.confirm(`删除「${voice.name}」？删除后不会再出现在收藏声线里。`)) return;
+    await api(`/api/qwen/voices/${encodeURIComponent(voice.id)}`, { method: "DELETE" });
+    await reload();
+    setNotice("收藏声线已删除");
+    window.setTimeout(() => setNotice(""), 1800);
+  };
+  const editSavedVoice = (voice: VoiceProfile) => {
+    setSaveDraft({
+      key: `edit-${voice.id}`,
+      title: "编辑收藏声线",
+      name: String(voice.name || "收藏声线"),
+      note: String(voice.note || ""),
+      actionLabel: "保存修改",
+      onSave: async (name, note) => {
+        await api(`/api/tts/voices/${encodeURIComponent(String(voice.id))}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: name || voice.name || "收藏声线", note }),
+        });
+        await reload();
+        setNotice("收藏声线已更新");
+        window.setTimeout(() => setNotice(""), 1800);
+      },
+    });
+  };
   return (
-    <div className="kokoro-grid">
-      {state.kokoro_voices.map((voice) => (
-        <button key={voice.id} className={Number(values.sherpa_kokoro_voice) === voice.id ? "voice-card selected" : "voice-card"} onClick={() => patch({ sherpa_kokoro_voice: voice.id, tts_voice_source: "settings" })}>
-          <strong>{voice.name}</strong>
-          <span>{voice.note}</span>
-        </button>
-      ))}
+    <div className="kokoro-layout">
+      <div>
+        <div className="kokoro-grid">
+          {state.kokoro_voices.map((voice) => (
+            <button key={voice.id} className={Number(values.sherpa_kokoro_voice) === voice.id ? "voice-card selected" : "voice-card"} onClick={() => patch({ sherpa_kokoro_voice: voice.id, tts_voice_source: "settings" })}>
+              <strong>{voice.name}</strong>
+              <span>{voice.note}</span>
+            </button>
+          ))}
+        </div>
+        <div className="preset-save-bar">
+          <button className="secondary" onClick={saveCurrentVoice}><Save size={16} />收藏当前 Kokoro</button>
+        </div>
+      </div>
+      <div className="kokoro-side">
+        <VoiceSavePopover draft={saveDraft} onClose={() => setSaveDraft(null)} />
+        {savedVoices.length > 0 && (
+          <div className="saved-voices kokoro-saved-voices">
+            <span className="eyebrow"><Save size={15} /> Kokoro 收藏声线</span>
+            {savedVoices.map((voice) => (
+              <div className="saved-voice" key={voice.id}>
+                <div>
+                  <strong>{voice.name}</strong>
+                  <span>{voiceSummary(voice)}</span>
+                  {voice.note && <small className="voice-note">{voice.note}</small>}
+                </div>
+                <button className="icon-btn" onClick={() => applySavedVoice(voice)} title="使用"><Check size={16} /></button>
+                <button className="icon-btn" onClick={() => editSavedVoice(voice)} title="编辑"><Pencil size={16} /></button>
+                <button className="icon-btn danger" onClick={() => deleteSavedVoice(voice)} title="删除"><Trash2 size={16} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1318,11 +1596,14 @@ function OmniVoice({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [cloneName, setCloneName] = useState("OmniVoice 克隆音色");
   const [cloneText, setCloneText] = useState("");
+  const [cloneNote, setCloneNote] = useState("");
   const [designDraft, setDesignDraft] = useState(String(values.omnivoice_voice_design || ""));
   const [previewUrl, setPreviewUrl] = useState("");
+  const [saveDraft, setSaveDraft] = useState<VoiceSaveDraft | null>(null);
   const models = state.omnivoice?.models || {};
   const modes = state.omnivoice?.modes || ["auto", "design", "clone"];
   const currentMode = String(values.omnivoice_voice_mode || "auto");
+  const savedVoices = state.voices.filter((voice) => String(voice.provider || "") === "omnivoice" && ["seed", "design"].includes(String(voice.mode)));
 
   useEffect(() => {
     setDesignDraft(String(values.omnivoice_voice_design || ""));
@@ -1369,6 +1650,93 @@ function OmniVoice({
     window.setTimeout(() => setNotice(""), 1800);
   };
 
+  const saveAutoVoice = async () => {
+    const seed = Number(values.omnivoice_seed || 42);
+    setSaveDraft({
+      key: `omni-seed-${seed}`,
+      title: "收藏 OmniVoice 自动音色",
+      name: `OmniVoice seed ${seed}`,
+      onSave: async (name, note) => {
+        await api("/api/tts/voices/seed", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: "omnivoice",
+            name: name || `OmniVoice seed ${seed}`,
+            seed,
+            tags: [],
+            note,
+          }),
+        });
+        await reload();
+        setNotice("OmniVoice 自动音色已收藏，之后可一键套用");
+        window.setTimeout(() => setNotice(""), 2200);
+      },
+    });
+  };
+
+  const saveDesignVoice = async () => {
+    const prompt = designDraft.trim();
+    if (!prompt) {
+      setNotice("先填写音色描述");
+      window.setTimeout(() => setNotice(""), 1600);
+      return;
+    }
+    setSaveDraft({
+      key: `omni-design-${prompt}`,
+      title: "收藏 OmniVoice 描述声线",
+      name: "OmniVoice 描述声线",
+      onSave: async (name, note) => {
+        await api("/api/tts/voices/design", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: "omnivoice",
+            name: name || "OmniVoice 描述声线",
+            design_prompt: prompt,
+            tags: [],
+            note,
+          }),
+        });
+        await reload();
+        setNotice("OmniVoice 描述声线已收藏，之后可一键套用");
+        window.setTimeout(() => setNotice(""), 2200);
+      },
+    });
+  };
+
+  const applySavedVoice = async (voice: VoiceProfile) => {
+    await patch({ ...settingsForVoiceProfile(voice), tts_voice_source: "settings" });
+    await reload();
+    setNotice(`已套用「${voice.name}」`);
+    window.setTimeout(() => setNotice(""), 1800);
+  };
+
+  const deleteSavedVoice = async (voice: VoiceProfile) => {
+    if (!window.confirm(`删除「${voice.name}」？删除后不会再出现在收藏声线里。`)) return;
+    await api(`/api/qwen/voices/${encodeURIComponent(voice.id)}`, { method: "DELETE" });
+    setNotice("收藏声线已删除");
+    window.setTimeout(() => setNotice(""), 1800);
+    await reload();
+  };
+
+  const editSavedVoice = (voice: VoiceProfile) => {
+    setSaveDraft({
+      key: `edit-${voice.id}`,
+      title: "编辑收藏声线",
+      name: String(voice.name || "收藏声线"),
+      note: String(voice.note || ""),
+      actionLabel: "保存修改",
+      onSave: async (name, note) => {
+        await api(`/api/tts/voices/${encodeURIComponent(String(voice.id))}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: name || voice.name || "收藏声线", note }),
+        });
+        await reload();
+        setNotice("收藏声线已更新");
+        window.setTimeout(() => setNotice(""), 1800);
+      },
+    });
+  };
+
   const uploadClone = async () => {
     const file = fileRef.current?.files?.[0];
     if (!file) {
@@ -1380,6 +1748,8 @@ function OmniVoice({
       const form = new FormData();
       form.append("name", cloneName);
       form.append("reference_text", cloneText);
+      form.append("tags", "");
+      form.append("note", cloneNote);
       form.append("file", file);
       const uploaded = await api<{ voice: VoiceProfile }>("/api/tts/clone/upload", { method: "POST", body: form, raw: true });
       await api("/api/tts/clone/encode?provider=omnivoice", {
@@ -1392,6 +1762,33 @@ function OmniVoice({
     } finally {
       setBusy("");
     }
+  };
+
+  const encodeOmniClone = async (voiceId: string) => {
+    setBusy("encode-omni-clone");
+    try {
+      await api("/api/tts/clone/encode?provider=omnivoice", {
+        method: "POST",
+        body: JSON.stringify({ voice_id: voiceId }),
+      });
+      await reload();
+      setNotice("OmniVoice 克隆音色已预编码");
+      window.setTimeout(() => setNotice(""), 1800);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const applyOmniClone = async (voice: VoiceProfile) => {
+    if (!voice.omnivoice_ref_rvq) {
+      setNotice("这条克隆音色还没有为 OmniVoice 预编码");
+      window.setTimeout(() => setNotice(""), 2600);
+      return;
+    }
+    await patch({ omnivoice_voice_mode: "clone", omnivoice_clone_voice_id: voice.id, tts_voice_source: "settings" });
+    await reload();
+    setNotice(`已套用「${voice.name}」`);
+    window.setTimeout(() => setNotice(""), 1800);
   };
 
   return (
@@ -1413,6 +1810,7 @@ function OmniVoice({
             <div className="random-actions">
               <button className="secondary" onClick={() => previewVoice({ voice_mode: "auto", seed: Number(values.omnivoice_seed || 42) })}><Play size={16} />试听</button>
               <button className="primary" onClick={() => patch({ omnivoice_voice_mode: "auto", tts_voice_source: "settings" })}>使用自动音色</button>
+              <button className="secondary" onClick={saveAutoVoice}><Save size={16} />收藏自动音色</button>
             </div>
           </div>
         )}
@@ -1426,6 +1824,9 @@ function OmniVoice({
               <button className="primary" onClick={applyDesign}><Check size={16} />使用描述</button>
               <button className="secondary" onClick={() => previewVoice({ voice_mode: "design", design_prompt: designDraft }, "OmniVoice 描述试听完成")} disabled={!designDraft.trim()}>
                 <Play size={16} />试听
+              </button>
+              <button className="secondary" onClick={saveDesignVoice} disabled={!designDraft.trim()}>
+                <Save size={16} />收藏描述
               </button>
             </div>
           </div>
@@ -1446,18 +1847,35 @@ function OmniVoice({
               <span>参考文本</span>
               <textarea value={cloneText} onChange={(e) => setCloneText(e.target.value)} placeholder="参考音频里说的原文。" />
             </label>
+            <div className="field-row">
+              <label className="field">
+                <span>备注</span>
+                <input value={cloneNote} onChange={(e) => setCloneNote(e.target.value)} placeholder="这条克隆音色适合什么场景" />
+              </label>
+            </div>
             <button className="primary" onClick={uploadClone} disabled={busy === "upload"}><Upload size={16} />上传并预编码</button>
-            <div className="voice-pills">
+            <div className="clone-library">
               {state.voices.filter((v) => v.mode === "clone").map((voice) => (
-                <button key={voice.id} className={values.omnivoice_clone_voice_id === voice.id ? "pill selected" : "pill"} onClick={() => patch({ omnivoice_voice_mode: "clone", omnivoice_clone_voice_id: voice.id, tts_voice_source: "settings" })}>
-                  {voice.name}{voice.omnivoice_ref_rvq ? " · ready" : " · 未预编码"}
-                </button>
+                <div key={voice.id} className={values.omnivoice_clone_voice_id === voice.id ? "clone-card selected" : "clone-card"}>
+                  <div>
+                    <strong>{voice.name}</strong>
+                    <span>{voice.omnivoice_ref_rvq ? "OmniVoice ready" : "OmniVoice 未预编码"}</span>
+                    {voice.note && <small className="voice-note">{voice.note}</small>}
+                  </div>
+                  <button className="icon-btn" onClick={() => applyOmniClone(voice)} title="使用"><Check size={16} /></button>
+                  <button className="icon-btn" onClick={() => editSavedVoice(voice)} title="编辑"><Pencil size={16} /></button>
+                  {!voice.omnivoice_ref_rvq && (
+                    <button className="icon-btn" onClick={() => encodeOmniClone(String(voice.id))} title="预编码"><Cpu size={16} /></button>
+                  )}
+                  <button className="icon-btn danger" onClick={() => deleteSavedVoice(voice)} title="删除"><Trash2 size={16} /></button>
+                </div>
               ))}
             </div>
           </div>
         )}
       </div>
       <div className="voice-side">
+        <VoiceSavePopover draft={saveDraft} onClose={() => setSaveDraft(null)} />
         <div className="model-status-compact">
           {Object.entries(models).map(([key, model]) => (
             <span key={key} className={model.installed ? "model-tag ok" : "model-tag"}>
@@ -1473,6 +1891,23 @@ function OmniVoice({
           <CheckCircle2 size={16} />
           <span>OmniVoice 使用独立设置；切回 Qwen3TTS 不会覆盖 Qwen 音色。</span>
         </div>
+        {savedVoices.length > 0 && (
+          <div className="saved-voices">
+            <span className="eyebrow"><Save size={15} /> OmniVoice 收藏声线</span>
+            {savedVoices.map((voice) => (
+              <div className="saved-voice" key={voice.id}>
+                <div>
+                  <strong>{voice.name}</strong>
+                  <span>{voiceSummary(voice)}</span>
+                  {voice.note && <small className="voice-note">{voice.note}</small>}
+                </div>
+                <button className="icon-btn" onClick={() => applySavedVoice(voice)} title="使用"><Check size={16} /></button>
+                <button className="icon-btn" onClick={() => editSavedVoice(voice)} title="编辑"><Pencil size={16} /></button>
+                <button className="icon-btn danger" onClick={() => deleteSavedVoice(voice)} title="删除"><Trash2 size={16} /></button>
+              </div>
+            ))}
+          </div>
+        )}
         {previewUrl && <audio controls src={previewUrl} className="audio" autoPlay />}
       </div>
     </div>
@@ -2235,12 +2670,43 @@ function splitTags(raw: any) {
 }
 
 function voiceSummary(voice: VoiceProfile) {
+  const provider = String(voice.provider || "qwen3tts");
   const mode = String(voice.mode || "default");
+  if (provider === "sherpa_kokoro") return `Kokoro voice ${voice.speaker || 0}`;
+  if (provider === "omnivoice" && mode === "seed") return `自动音色 seed ${voice.seed ?? 42}`;
   if (mode === "seed") return `seed ${voice.seed ?? 42}`;
   if (mode === "design") return "描述造声";
   if (mode === "preset") return `预设 ${voice.speaker || ""}`.trim();
   if (mode === "clone") return voice.ref_spk ? "克隆音色 · ready" : "克隆音色 · 未预编码";
   return "默认音色";
+}
+
+function personaVoiceSubtitle(persona: Persona) {
+  const engine = persona.voice_engine === "omnivoice" ? "OmniVoice" : persona.voice_engine === "sherpa_kokoro" ? "Kokoro" : "Qwen3TTS";
+  const idLabels: Record<string, string> = {
+    operator: "温暖清晰中性声",
+    night_copilot: "冷静低中音副驾声",
+    news_anchor: "稳定清醒播报声",
+    field_operator: "利落自信执行声",
+    soft_companion: "柔和温暖陪伴女声",
+    cat_companion: "猫系甜亮可爱女声",
+    taiwan_sweetheart: "台湾甜美女声",
+  };
+  const label = idLabels[persona.id];
+  if (label) return `${engine} · ${label}`;
+  if (persona.voice_mode === "preset") return `${engine} · 预设 ${(speakerNames[persona.voice_ref] ?? persona.voice_ref) || "未选择"}`;
+  if (persona.voice_mode === "design") return `${engine} · 描述造声`;
+  if (persona.voice_mode === "clone") return `${engine} · 克隆音色`;
+  if (persona.voice_mode === "auto") return `${engine} · 自动音色 seed ${persona.voice_seed ?? 42}`;
+  return `${engine} · 默认音色 seed ${persona.voice_seed ?? 42}`;
+}
+
+function buildVoiceDesignPrompt(raw: string, identity = "young_female") {
+  const prompt = raw.trim();
+  if (!prompt) return "";
+  const identityPrompt = voiceIdentityOptions.find((item) => item.id === identity)?.prompt || voiceIdentityOptions[0].prompt;
+  if (prompt.toLowerCase().includes(identityPrompt.toLowerCase())) return prompt;
+  return `${prompt}, ${identityPrompt}`;
 }
 
 function describeCurrentVoice(values: SettingsValues) {
@@ -2346,17 +2812,19 @@ function voicePackageForValues(values: SettingsValues) {
     return {
       engine: "omnivoice",
       mode,
+      identity: "young_female",
       ref: mode === "design" ? String(values.omnivoice_voice_design || "") : mode === "clone" ? String(values.omnivoice_clone_voice_id || "") : "",
       seed: Number(values.omnivoice_seed ?? 42),
     };
   }
   if (values.tts_provider === "sherpa_kokoro") {
-    return { engine: "sherpa_kokoro", mode: "voice", ref: String(values.sherpa_kokoro_voice ?? ""), seed: null };
+    return { engine: "sherpa_kokoro", mode: "voice", identity: "young_female", ref: String(values.sherpa_kokoro_voice ?? ""), seed: null };
   }
   const mode = String(values.qwentts_cpp_voice_mode || "default");
   return {
     engine: "qwen3tts",
     mode,
+    identity: "young_female",
     ref: voiceRefForMode(values),
     seed: Number(values.qwentts_cpp_seed ?? 42),
   };
@@ -2366,6 +2834,13 @@ function engineLabel(engine: string) {
   if (engine === "omnivoice") return "OmniVoice";
   if (engine === "sherpa_kokoro") return "Kokoro";
   return "Qwen3TTS";
+}
+
+function providerLabel(provider?: string) {
+  if (provider === "qwen3tts") return "Qwen3TTS";
+  if (provider === "omnivoice") return "OmniVoice";
+  if (provider === "sherpa_kokoro") return "Kokoro";
+  return "Kokoro";
 }
 
 function modelName(key: string) {

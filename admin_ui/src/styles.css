@@ -255,6 +255,14 @@ nav button.active,
   color: #09110e;
 }
 
+.persona.selected .persona-main span {
+  color: rgba(9, 17, 14, 0.78);
+}
+
+.persona.selected .persona-main strong {
+  color: #09110e;
+}
+
 .speaker-card.selected .secondary {
   color: #09110e;
   background: rgba(9, 17, 14, 0.08);
@@ -885,6 +893,53 @@ nav button.active:hover .nav-icon {
   background: rgba(255, 255, 255, 0.08);
   color: #dce7df;
   font-size: 13px;
+}
+
+.clone-library {
+  display: grid;
+  gap: 0;
+  margin-top: 14px;
+  max-height: 310px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--r-md);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.clone-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(4, 38px);
+  gap: 8px;
+  align-items: center;
+  min-height: 62px;
+  padding: 10px 8px 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  background: transparent;
+}
+
+.clone-card:last-child {
+  border-bottom: 0;
+}
+
+.clone-card.selected {
+  background: rgba(123, 231, 216, 0.09);
+}
+
+.clone-card > div {
+  min-width: 0;
+}
+
+.clone-card strong,
+.clone-card span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clone-card span {
+  color: #9aa8a1;
+  font-size: var(--t-sm);
 }
 
 .wave {
@@ -1641,7 +1696,7 @@ button:disabled {
 
 .reachy-identity {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(240px, 0.65fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: stretch;
   border-color: rgba(123, 231, 216, 0.22);
@@ -1730,19 +1785,47 @@ button:disabled {
   box-shadow: var(--shadow-active);
 }
 
-.effective-grid {
+.audition-compact {
   grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+  align-items: flex-start;
+}
+
+.audition-compact-input {
+  flex: 1;
+  min-width: 240px;
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.22);
+  color: #eef4e8;
+  font-size: var(--t-sm);
+  font-family: inherit;
+  line-height: 1.5;
+  resize: none;
+}
+
+.audition-compact-input:focus {
+  border-color: rgba(123, 231, 216, 0.5);
+  outline: none;
+}
+
+.audition-compact .primary {
+  flex-shrink: 0;
+  min-height: 40px;
+}
+
+.audition-audio {
+  width: 100%;
+  margin-top: 0;
 }
 
 .prompt-details {
   display: grid;
   gap: 12px;
-}
-
-.prompt-details .field {
   margin-top: 12px;
 }
 
@@ -1765,6 +1848,21 @@ button:disabled {
 .mode-grid,
 .kokoro-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.kokoro-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 16px;
+}
+
+.kokoro-side {
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  padding-left: 16px;
+}
+
+.kokoro-saved-voices {
+  max-width: none;
 }
 
 .persona,
@@ -1793,7 +1891,7 @@ button:disabled {
 .persona-main {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  gap: 4px;
   padding: 6px 0;
   text-align: left;
 }
@@ -1893,8 +1991,35 @@ button:disabled {
 .workshop-box,
 .saved-voices {
   display: grid;
-  gap: 12px;
+  gap: 0;
   margin-bottom: 16px;
+}
+
+.workshop-box {
+  gap: 12px;
+}
+
+.workshop-content {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.saved-voices {
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--r-md);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.saved-voices > .eyebrow {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px;
+  background: rgba(14, 22, 18, 0.96);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .workshop-box textarea {
@@ -1931,6 +2056,39 @@ button:disabled {
   align-items: center;
 }
 
+.voice-save-popover {
+  display: grid;
+  gap: 10px;
+  width: min(440px, 100%);
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: var(--r-md);
+  border: 1px solid rgba(123, 231, 216, 0.28);
+  background:
+    linear-gradient(135deg, rgba(123, 231, 216, 0.10), rgba(232, 216, 180, 0.045)),
+    rgba(8, 14, 12, 0.98);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.24);
+}
+
+.voice-save-popover strong {
+  font-size: 14px;
+}
+
+.compact-field {
+  gap: 6px;
+}
+
+.compact-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.save-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .suggestion-card {
   display: grid;
   gap: 8px;
@@ -1965,9 +2123,19 @@ button:disabled {
 
 .saved-voice {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px 42px;
+  grid-template-columns: minmax(0, 1fr) 38px 38px 38px;
   gap: 8px;
   align-items: center;
+  min-height: 64px;
+  padding: 10px 8px 10px 12px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 0;
+  background: transparent;
+}
+
+.saved-voice:last-child {
+  border-bottom: 0;
 }
 
 .saved-voice div {
@@ -1979,12 +2147,6 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tag-filter {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
 }
 
 .danger {
@@ -2156,6 +2318,28 @@ textarea {
   min-height: 36px;
   border-radius: var(--r-sm);
   padding: 0 10px;
+}
+
+.preset-save-bar,
+.save-voice-fields {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: var(--r-md);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(135deg, rgba(123, 231, 216, 0.06), rgba(217, 149, 69, 0.035)),
+    rgba(0, 0, 0, 0.10);
+}
+
+.preset-save-bar input,
+.save-voice-fields input {
+  min-width: 0;
+}
+
+.preset-save-bar .compact-note-input {
+  max-width: none;
 }
 
 .random-voice {
@@ -2351,6 +2535,7 @@ textarea {
   .reachy-identity,
   .studio-commit,
   .voice-layout,
+  .kokoro-layout,
   .daily-actions,
   .cockpit-ops,
   .deploy-grid {
@@ -2360,7 +2545,7 @@ textarea {
   .quick-actions,
   .daily-actions,
   .daily-strip,
-  .effective-grid,
+  .audition-compact,
   .signal-board,
   .stat-strip,
   .cockpit-wave {
@@ -2393,6 +2578,11 @@ textarea {
   }
 
   .voice-side {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .kokoro-side {
     border-left: 0;
     padding-left: 0;
   }
@@ -2476,7 +2666,7 @@ textarea {
   .model-grid,
   .mode-grid,
   .reachy-actions,
-  .effective-grid,
+  .audition-compact,
   .kokoro-grid,
   .speaker-grid,
   .stat-strip,
