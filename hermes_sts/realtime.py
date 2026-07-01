@@ -600,11 +600,16 @@ class RealtimeSession:
                 len(context),
                 len(results),
             )
-            instructions = instructions if instructions is not None else self._effective_instructions()
-            final = await self.llm.chat(messages=messages, instructions=instructions)
-            if metrics:
-                metrics.llm_ms = (time.perf_counter() - started) * 1000
-            text = final.text.strip() or "好的，已完成。"
+            vision_results = self._vision_tool_results(context, results)
+            failed_vision = next((item for item in vision_results if not self._is_meaningful_vision_result(item["content"])), None)
+            if failed_vision is not None:
+                text = self._vision_failure_message(failed_vision["content"])
+            else:
+                instructions = instructions if instructions is not None else self._effective_instructions()
+                final = await self.llm.chat(messages=messages, instructions=instructions)
+                if metrics:
+                    metrics.llm_ms = (time.perf_counter() - started) * 1000
+                text = final.text.strip() or self._tool_result_spoken_fallback(context, results)
             tool_transcript = next(
                 (m.get("content", "") for m in context if m.get("role") == "user"),
                 "",
@@ -812,6 +817,8 @@ class RealtimeSession:
             return call("stop_dance", {"dummy": True})
         if "dance" in client_tools and self._is_dance_command(text, recent_dance_context=self._has_recent_dance_context()):
             return call("dance", {"move": "random", "repeat": self._dance_repeat_for(text)})
+        if "camera" in client_tools and self._is_camera_command(text, recent_camera_context=self._has_recent_camera_context()):
+            return call("camera", {"question": self._camera_question_for(transcript)})
         if "move_head" in client_tools and self._is_head_command(text):
             return call("move_head", {"direction": self._head_direction_for(text)})
         if "play_emotion" in client_tools and self._is_emotion_command(text):
@@ -841,6 +848,66 @@ class RealtimeSession:
             or text in {"跳一下", "三个舞", "dance"}
             or (recent_dance_context and text in {"开始", "再来一个", "再来", "继续"})
         )
+
+    def _has_recent_camera_context(self) -> bool:
+        history = getattr(getattr(self, "llm", None), "history", [])
+        if not isinstance(history, list):
+            return False
+        recent = "".join(str(message.get("content", "")) for message in history[-8:] if isinstance(message, dict))
+        normalized = self._normalize_action_text(recent)
+        return any(
+            token in normalized
+            for token in (
+                "看一下这是什么",
+                "看看这是什么",
+                "前面是什么",
+                "拍照",
+                "照片",
+                "相机",
+                "摄像头",
+                "camera",
+            )
+        )
+
+    @staticmethod
+    def _is_camera_command(text: str, *, recent_camera_context: bool = False) -> bool:
+        direct = any(
+            token in text
+            for token in (
+                "看前面",
+                "看看前面",
+                "看前方",
+                "前面是什么",
+                "前方是什么",
+                "你看到了什么",
+                "看到什么",
+                "看一下",
+                "看一眼",
+                "看这里",
+                "看看这里",
+                "拍照",
+                "拍张照",
+                "拍个照",
+                "摄像头",
+                "相机",
+                "camera",
+            )
+        )
+        if direct:
+            return True
+        return any(
+            token in text
+            for token in (
+                "这是什么",
+                "这个是什么",
+                "是什么",
+            )
+        ) and recent_camera_context
+
+    @staticmethod
+    def _camera_question_for(transcript: str) -> str:
+        question = transcript.strip()
+        return question or "请描述摄像头前方看到的主要内容。"
 
     @staticmethod
     def _dance_repeat_for(text: str) -> int:
@@ -1134,6 +1201,111 @@ class RealtimeSession:
             RealtimeSession._tool_call_message(tool_call) for tool_call in response.tool_calls
         ]
         messages.append(assistant_message)
+
+    def _vision_tool_results(self, context: list[Message], results: list[Message]) -> list[dict[str, str]]:
+        call_names = self._tool_call_names_from_context(context)
+        vision_results: list[dict[str, str]] = []
+        for result in results:
+            call_id = str(result.get("tool_call_id") or "")
+            name = call_names.get(call_id, "")
+            tool = self.tools.get(name) if name else None
+            category = getattr(tool, "category", "") if tool is not None else ""
+            if category == "vision" or name == "camera":
+                vision_results.append({"call_id": call_id, "name": name or "camera", "content": str(result.get("content") or "")})
+        return vision_results
+
+    @staticmethod
+    def _tool_call_names_from_context(context: list[Message]) -> dict[str, str]:
+        names: dict[str, str] = {}
+        for message in context:
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or "")
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name = str(function.get("name") or call.get("name") or "")
+                if call_id and name:
+                    names[call_id] = name
+        return names
+
+    @classmethod
+    def _is_meaningful_vision_result(cls, content: str) -> bool:
+        data = cls._parse_tool_content(content)
+        if isinstance(data, dict):
+            if cls._tool_payload_has_error(data):
+                return False
+            if cls._extract_tool_summary(data):
+                return True
+            descriptive = {key: value for key, value in data.items() if key not in {"ok", "success", "completed", "status"}}
+            return bool(descriptive and cls._extract_tool_summary(descriptive))
+        if isinstance(data, list):
+            return bool(cls._extract_tool_summary(data))
+        text = str(content or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        return lowered not in {"ok", "done", "completed", "success", "true", "null", "{}", "[]"}
+
+    @classmethod
+    def _vision_failure_message(cls, content: str) -> str:
+        data = cls._parse_tool_content(content)
+        error = ""
+        if isinstance(data, dict):
+            error = str(data.get("error") or data.get("message") or data.get("detail") or "").strip()
+        if error:
+            return f"我刚才调用了摄像头，但没有拿到可用画面结果：{error}"
+        return "我刚才调用了摄像头，但没有拿到可描述的画面内容。请确认摄像头和视觉识别端已经正常回传结果。"
+
+    @classmethod
+    def _tool_result_spoken_fallback(cls, context: list[Message], results: list[Message]) -> str:
+        call_names = cls._tool_call_names_from_context(context)
+        for result in results:
+            summary = cls._extract_tool_summary(cls._parse_tool_content(str(result.get("content") or "")))
+            if summary:
+                name = call_names.get(str(result.get("tool_call_id") or ""), "")
+                if name == "camera":
+                    return f"我看到：{summary}"
+                return summary
+        return "工具已经返回，但没有给出可朗读的结果。"
+
+    @classmethod
+    def _parse_tool_content(cls, content: str) -> Any:
+        text = str(content or "").strip()
+        if not text:
+            return ""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+    @classmethod
+    def _extract_tool_summary(cls, value: Any) -> str:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            lowered = text.lower()
+            return "" if lowered in {"ok", "done", "completed", "success", "true", "null"} else text[:280]
+        if isinstance(value, list):
+            parts = [cls._extract_tool_summary(item) for item in value[:5]]
+            return "；".join(part for part in parts if part)[:280]
+        if isinstance(value, dict):
+            for key in ("description", "caption", "answer", "result", "text", "summary", "objects", "labels"):
+                if key in value:
+                    summary = cls._extract_tool_summary(value.get(key))
+                    if summary:
+                        return summary
+            return ""
+        return ""
+
+    @staticmethod
+    def _tool_payload_has_error(value: dict[str, Any]) -> bool:
+        status = str(value.get("status") or "").lower()
+        if status in {"error", "failed", "failure"}:
+            return True
+        ok = value.get("ok")
+        success = value.get("success")
+        return ok is False or success is False or bool(value.get("error"))
 
     @staticmethod
     def _tool_call_message(tool_call: ToolCall) -> dict[str, Any]:
@@ -1525,6 +1697,8 @@ class RealtimeSession:
             "只输出要被朗读的自然语言；不要输出 emoji、颜文字、舞台提示、括号里的情绪动作，"
             "也不要写音色、嗓音、语速、语调或口音描述。音色描述由 TTS 声音配置单独控制。"
             "如果工具已经转发给客户端执行，只需要自然回应用户，不要假装自己直接操作了硬件。"
+            "如果工具结果来自 camera、摄像头、vision 或 picture，必须直接回答画面里看到了什么；"
+            "如果工具结果没有 description/caption/objects/text 等可描述内容，要明确说明没有拿到可用画面结果，不能说“已完成”。"
             "如果工具结果包含 web search/search results/搜索结果，就必须基于这些结果直接回答用户；"
             "不要说“我再查查”“你可以自己查”“信息有点模糊”这类推脱话。"
             "天气、汇率、新闻等实时问题要给出简短结论，并说明依据来自搜索结果中的最相关信息。"
