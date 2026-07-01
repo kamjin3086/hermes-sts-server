@@ -2492,7 +2492,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(response_created_count, 2)
         self.assertEqual(len(done_transcripts), 2)
         self.assertEqual(sent_texts, ["好的"])
-        self.assertFalse(execute_called)
+        self.assertTrue(execute_called)
 
     def test_client_tool_followup_timeout_clears_pending_state(self) -> None:
         async def run() -> tuple[object, int]:

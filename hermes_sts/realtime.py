@@ -968,6 +968,7 @@ class RealtimeSession:
         sent_any = False
         pending = ""
         answer_parts: list[str] = []
+        tool_call_detected = False
         try:
             async for chunk in self.llm.stream_text(
                 transcript,
@@ -990,10 +991,8 @@ class RealtimeSession:
                     )
                     sent_any = True
         except LLMToolCallDetected:
-            if sent_any:
-                logger.warning("LLM stream switched to tool calls after speech started; ending partial spoken response")
-            else:
-                return False
+            logger.warning("LLM stream switched to tool calls after partial speech; ending partial spoken response")
+            tool_call_detected = True
         except Exception:
             if not sent_any:
                 raise
@@ -1006,13 +1005,22 @@ class RealtimeSession:
             if not created:
                 await self._send_response_created(response_id, item_id, metrics=metrics)
                 created = True
-            await self._send_text_segments(
-                pending,
-                response_id=response_id,
-                item_id=item_id,
-                metrics=metrics,
-                voice=voice,
-            )
+            if tool_call_detected:
+                await self._send_tts_segment(
+                    pending,
+                    response_id=response_id,
+                    item_id=item_id,
+                    metrics=metrics,
+                    voice=voice,
+                )
+            else:
+                await self._send_text_segments(
+                    pending,
+                    response_id=response_id,
+                    item_id=item_id,
+                    metrics=metrics,
+                    voice=voice,
+                )
             sent_any = True
         if not sent_any or not answer:
             return False
@@ -1023,8 +1031,26 @@ class RealtimeSession:
             (time.perf_counter() - started) * 1000,
             len(answer),
         )
-        self._fire_record_turn(transcript, answer)
         await self._send_response_done(response_id=response_id, item_id=item_id, transcript=answer)
+
+        if tool_call_detected:
+            try:
+                followup_resp_id = f"resp_{uuid.uuid4().hex}"
+                followup_item_id = f"item_{uuid.uuid4().hex}"
+                result = await self._ask_llm_with_tools(
+                    transcript,
+                    response_id=followup_resp_id,
+                    item_id=followup_item_id,
+                    instructions=instructions,
+                    prior_assistant_text=answer,
+                )
+                if result:
+                    await self._send_response(result, transcript=result, voice=voice)
+            except Exception:
+                logger.warning("Tool followup after partial speech failed", exc_info=True)
+            return True
+
+        self._fire_record_turn(transcript, answer)
         return True
 
     async def _ask_llm_with_tools(
@@ -1035,6 +1061,7 @@ class RealtimeSession:
         item_id: str,
         metrics: TurnMetrics | None = None,
         instructions: str | None = None,
+        prior_assistant_text: str | None = None,
     ) -> str | None:
         if instructions is None:
             instructions = self._effective_instructions()
@@ -1074,7 +1101,7 @@ class RealtimeSession:
             self._fire_record_turn(transcript, final_text)
             return final_text
 
-        messages = self._tool_followup_messages(transcript, response, instructions=instructions)
+        messages = self._tool_followup_messages(transcript, response, instructions=instructions, prior_assistant_text=prior_assistant_text)
         created_for_tools = False
         used_web_search = False
         for iteration in range(1, 4):
@@ -1185,14 +1212,18 @@ class RealtimeSession:
         response: LLMResponse,
         *,
         instructions: str | None = None,
+        prior_assistant_text: str | None = None,
     ) -> list[Message]:
         assistant_message: Message = {"role": "assistant", "content": response.text or ""}
         assistant_message["tool_calls"] = [self._tool_call_message(tool_call) for tool_call in response.tool_calls]
-        return [
+        msgs: list[Message] = [
             {"role": "system", "content": self._tool_system_prompt(instructions=instructions)},
             {"role": "user", "content": transcript},
-            assistant_message,
         ]
+        if prior_assistant_text:
+            msgs.append({"role": "assistant", "content": prior_assistant_text})
+        msgs.append(assistant_message)
+        return msgs
 
     @staticmethod
     def _append_assistant_tool_calls(messages: list[Message], response: LLMResponse) -> None:
