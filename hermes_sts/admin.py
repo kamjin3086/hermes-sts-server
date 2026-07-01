@@ -67,6 +67,7 @@ class PersonaPatch(BaseModel):
     prompt: str
     voice_engine: str = "qwen3tts"
     voice_mode: str = "default"
+    voice_identity: str = "young_female"
     voice_ref: str = ""
     voice_seed: int | None = None
     apply: bool = True
@@ -83,6 +84,7 @@ class CloneEncodeRequest(BaseModel):
 
 class SeedVoiceRequest(BaseModel):
     name: str = "收藏声线"
+    provider: str = "qwen3tts"
     seed: int
     tags: list[str] = Field(default_factory=list)
     note: str = ""
@@ -90,8 +92,36 @@ class SeedVoiceRequest(BaseModel):
 
 class DesignVoiceRequest(BaseModel):
     name: str = "描述造声音色"
+    provider: str = "qwen3tts"
     design_prompt: str
     tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class LockDesignVoiceRequest(BaseModel):
+    name: str = "锁定声线"
+    design_prompt: str
+    sample_text: str = "你好，我是 Reachy Mini。现在这条声线已经锁定，之后会保持同一个声音。"
+    seed: int | None = None
+    note: str = ""
+
+
+class PresetVoiceRequest(BaseModel):
+    name: str = "预设声线"
+    speaker: str
+    tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class KokoroVoiceRequest(BaseModel):
+    name: str = "Kokoro 声线"
+    voice_id: int
+    tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class VoiceMetadataPatch(BaseModel):
+    name: str
     note: str = ""
 
 
@@ -396,8 +426,11 @@ def create_admin_router(
             raise HTTPException(status_code=422, detail=f"unsupported qwen speaker: {payload.voice_ref}")
         profile = payload.model_dump()
         profile["voice_engine"] = voice_engine
+        profile["voice_identity"] = _normalize_voice_identity(profile.get("voice_identity"))
         profile.pop("apply", None)
-        store.upsert_persona(profile)
+        existing_profile = store.persona_profile(payload.id)
+        if not (payload.apply and existing_profile and _same_persona_profile(existing_profile, profile)):
+            store.upsert_persona(profile)
         logger.info(
             "DBG POST /api/personas id=%s apply=%s name=%s voice_engine=%s voice_mode=%s voice_ref=%s",
             payload.id, payload.apply, payload.name, voice_engine, payload.voice_mode, payload.voice_ref,
@@ -557,6 +590,8 @@ def create_admin_router(
     async def upload_clone(
         name: str = Form(...),
         reference_text: str = Form(""),
+        tags: str = Form(""),
+        note: str = Form(""),
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
         safe_id = f"voice_{uuid.uuid4().hex[:12]}"
@@ -574,6 +609,8 @@ def create_admin_router(
             "mode": "clone",
             "ref_wav": str(wav_path),
             "ref_text": str(text_path),
+            "tags": ",".join(_normalize_tags(tags)),
+            "note": note.strip()[:240],
         }
         store.upsert_voice(profile)
         return {"ok": True, "voice": store.voice_profile(safe_id), "state": await admin_state()}
@@ -656,13 +693,17 @@ def create_admin_router(
         store.upsert_voice(profile)
         return {"ok": True, "voice": store.voice_profile(payload.voice_id), "state": await admin_state()}
 
+    @router.post("/api/tts/voices/seed")
     @router.post("/api/qwen/voices/seed")
     async def save_seed_voice(payload: SeedVoiceRequest) -> dict[str, Any]:
         voice_id = f"seed_{uuid.uuid4().hex[:12]}"
+        provider = payload.provider.strip().lower()
+        if provider not in {"qwen3tts", "omnivoice"}:
+            raise HTTPException(status_code=422, detail=f"unsupported seed voice provider: {payload.provider}")
         profile = {
             "id": voice_id,
             "name": payload.name.strip() or f"Seed {payload.seed}",
-            "provider": "qwen3tts",
+            "provider": provider,
             "mode": "seed",
             "seed": int(payload.seed),
             "tags": ",".join(_normalize_tags(payload.tags)),
@@ -671,8 +712,12 @@ def create_admin_router(
         store.upsert_voice(profile)
         return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
 
+    @router.post("/api/tts/voices/design")
     @router.post("/api/qwen/voices/design")
     async def save_design_voice(payload: DesignVoiceRequest) -> dict[str, Any]:
+        provider = payload.provider.strip().lower()
+        if provider not in {"qwen3tts", "omnivoice"}:
+            raise HTTPException(status_code=422, detail=f"unsupported design voice provider: {payload.provider}")
         design_prompt = payload.design_prompt.strip()
         if not design_prompt:
             raise HTTPException(status_code=422, detail="design_prompt is required")
@@ -680,13 +725,134 @@ def create_admin_router(
         profile = {
             "id": voice_id,
             "name": payload.name.strip() or "描述造声音色",
-            "provider": "qwen3tts",
+            "provider": provider,
             "mode": "design",
             "design_prompt": design_prompt,
             "tags": ",".join(_normalize_tags(payload.tags)),
             "note": payload.note.strip()[:240],
         }
         store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
+
+    @router.post("/api/qwen/voices/design/lock")
+    async def lock_qwen_design_voice(payload: LockDesignVoiceRequest) -> dict[str, Any]:
+        current = refresh_settings()
+        design_prompt = payload.design_prompt.strip()
+        if not design_prompt:
+            raise HTTPException(status_code=422, detail="design_prompt is required")
+        if not current.qwentts_cpp_voicedesign_model or not Path(current.qwentts_cpp_voicedesign_model).exists():
+            raise HTTPException(status_code=422, detail="VoiceDesign model missing")
+        codec_bin = Path(current.qwentts_cpp_bin).with_name("qwen-codec")
+        if not codec_bin.exists():
+            raise HTTPException(status_code=422, detail=f"qwen-codec not found: {codec_bin}")
+        safe_id = f"locked_{uuid.uuid4().hex[:12]}"
+        voice_dir = current.data_dir / "voices" / safe_id
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = voice_dir / "reference.wav"
+        text_path = voice_dir / "reference.txt"
+        sample_text = payload.sample_text.strip() or LockDesignVoiceRequest().sample_text
+        lock_settings = replace(
+            current,
+            tts_provider="qwen3tts",
+            qwentts_cpp_voice_mode="design",
+            qwentts_cpp_model=current.qwentts_cpp_voicedesign_model,
+            qwentts_cpp_voice_design=design_prompt,
+            qwentts_cpp_instruct=design_prompt,
+            qwentts_cpp_speaker="",
+            qwentts_cpp_ref_wav="",
+            qwentts_cpp_ref_text="",
+            qwentts_cpp_ref_spk="",
+            qwentts_cpp_ref_rvq="",
+            qwentts_cpp_seed=int(payload.seed if payload.seed is not None else current.qwentts_cpp_seed),
+        )
+        voice = replace(
+            TtsVoice.from_settings(lock_settings),
+            mode="design",
+            speaker="",
+            instruct=design_prompt,
+            ref_wav="",
+            ref_text="",
+            ref_spk="",
+            ref_rvq="",
+            seed=lock_settings.qwentts_cpp_seed,
+        )
+        pcm = await build_tts(lock_settings).synthesize(sample_text, voice=voice)
+        wav_path.write_bytes(_pcm_to_wav_bytes(pcm, lock_settings.sample_rate))
+        text_path.write_text(sample_text, encoding="utf-8")
+        profile = {
+            "id": safe_id,
+            "name": payload.name.strip() or "锁定声线",
+            "provider": "qwen3tts",
+            "mode": "clone",
+            "seed": lock_settings.qwentts_cpp_seed,
+            "design_prompt": design_prompt,
+            "ref_wav": str(wav_path),
+            "ref_text": str(text_path),
+            "tags": "",
+            "note": (payload.note.strip() or "由描述造声锁定生成，日常使用预编码音色以保持一致。")[:240],
+        }
+        store.upsert_voice(profile)
+        encoded = await encode_clone(CloneEncodeRequest(voice_id=safe_id))
+        changed = store.set_settings(
+            {
+                "tts_provider": "qwen3tts",
+                "qwentts_cpp_voice_mode": "clone",
+                "qwentts_cpp_clone_voice_id": safe_id,
+                "tts_voice_source": "settings",
+            }
+        )
+        refresh_settings()
+        restart_scheduled = _restart_if_required(changed, "locked qwen design voice applied")
+        return {
+            "ok": True,
+            "voice": store.voice_profile(safe_id),
+            "encoded": encoded.get("ok", False),
+            "restart_scheduled": restart_scheduled,
+            "state": await admin_state(),
+        }
+
+    @router.post("/api/qwen/voices/preset")
+    async def save_preset_voice(payload: PresetVoiceRequest) -> dict[str, Any]:
+        speaker = payload.speaker.strip().lower()
+        if speaker not in QWEN_SPEAKERS:
+            raise HTTPException(status_code=422, detail=f"unsupported qwen speaker: {payload.speaker}")
+        voice_id = f"preset_{uuid.uuid4().hex[:12]}"
+        profile = {
+            "id": voice_id,
+            "name": payload.name.strip() or speaker,
+            "provider": "qwen3tts",
+            "mode": "preset",
+            "speaker": speaker,
+            "tags": ",".join(_normalize_tags(payload.tags)),
+            "note": payload.note.strip()[:240],
+        }
+        store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
+
+    @router.post("/api/tts/voices/kokoro")
+    async def save_kokoro_voice(payload: KokoroVoiceRequest) -> dict[str, Any]:
+        voice_id = f"kokoro_{uuid.uuid4().hex[:12]}"
+        profile = {
+            "id": voice_id,
+            "name": payload.name.strip() or f"Kokoro {payload.voice_id}",
+            "provider": "sherpa_kokoro",
+            "mode": "voice",
+            "speaker": str(int(payload.voice_id)),
+            "tags": ",".join(_normalize_tags(payload.tags)),
+            "note": payload.note.strip()[:240],
+        }
+        store.upsert_voice(profile)
+        return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
+
+    @router.patch("/api/tts/voices/{voice_id}")
+    async def update_voice_metadata(voice_id: str, payload: VoiceMetadataPatch) -> dict[str, Any]:
+        voice = store.voice_profile(voice_id)
+        if not voice:
+            raise HTTPException(status_code=404, detail="voice not found")
+        next_voice = dict(voice)
+        next_voice["name"] = payload.name.strip() or voice.get("name", "收藏声线")
+        next_voice["note"] = payload.note.strip()[:240]
+        store.upsert_voice(next_voice)
         return {"ok": True, "voice": store.voice_profile(voice_id), "state": await admin_state()}
 
     @router.post("/api/qwen/voices/apply")
@@ -1467,6 +1633,8 @@ def _settings_for_voice_profile(voice: dict[str, Any]) -> dict[str, Any]:
         if mode == "clone":
             return {"tts_provider": "omnivoice", "omnivoice_voice_mode": "clone", "omnivoice_clone_voice_id": voice.get("id", "")}
         return {"tts_provider": "omnivoice", "omnivoice_voice_mode": "auto", "omnivoice_seed": int(voice.get("seed") or 42)}
+    if provider == "sherpa_kokoro":
+        return {"tts_provider": "sherpa_kokoro", "sherpa_kokoro_voice": int(voice.get("speaker") or 0)}
     if mode == "seed":
         return {"tts_provider": "qwen3tts", "qwentts_cpp_voice_mode": "default", "qwentts_cpp_seed": int(voice.get("seed") or 42)}
     if mode == "preset":
@@ -1499,7 +1667,7 @@ def _settings_for_persona_voice(profile: dict[str, Any]) -> dict[str, Any]:
     if mode == "preset":
         values["qwentts_cpp_voice_preset"] = ref
     elif mode == "design":
-        values["qwentts_cpp_voice_design"] = ref
+        values["qwentts_cpp_voice_design"] = _build_voice_design_prompt(ref, profile.get("voice_identity"))
     elif mode == "clone":
         values["qwentts_cpp_clone_voice_id"] = ref
     if seed is not None:
@@ -1628,6 +1796,40 @@ def _confirmation_text(profile: dict[str, Any], effective_voice: dict[str, Any])
     return f"已应用：{persona} + {effective_voice.get('label') or '当前声音'}"
 
 
+def _same_persona_profile(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    keys = ("id", "name", "prompt", "voice_engine", "voice_mode", "voice_identity", "voice_ref")
+    if any(str(left.get(key) or "") != str(right.get(key) or "") for key in keys):
+        return False
+    left_seed = left.get("voice_seed")
+    right_seed = right.get("voice_seed")
+    return (None if left_seed is None else int(left_seed)) == (None if right_seed is None else int(right_seed))
+
+
+VOICE_IDENTITY_PROMPTS = {
+    "young_female": "single consistent young adult female Mandarin speaker identity",
+    "adult_female": "single consistent adult female Mandarin speaker identity",
+    "young_male": "single consistent young adult male Mandarin speaker identity",
+    "adult_male": "single consistent adult male Mandarin speaker identity",
+    "child": "single consistent child Mandarin speaker identity",
+    "elder": "single consistent elderly Mandarin speaker identity",
+}
+
+
+def _normalize_voice_identity(value: Any) -> str:
+    key = str(value or "young_female").strip().lower()
+    return key if key in VOICE_IDENTITY_PROMPTS else "young_female"
+
+
+def _build_voice_design_prompt(prompt: str, identity: Any = None) -> str:
+    base = str(prompt or "").strip()
+    if not base:
+        return ""
+    marker = VOICE_IDENTITY_PROMPTS[_normalize_voice_identity(identity)]
+    if marker.lower() in base.lower():
+        return base
+    return f"{base}, {marker}"
+
+
 async def _suggest_voice_with_llm(payload: WorkshopSuggestRequest, settings: Settings) -> dict[str, Any]:
     brief = payload.brief.strip()
     if not brief:
@@ -1644,7 +1846,8 @@ async def _suggest_voice_with_llm(payload: WorkshopSuggestRequest, settings: Set
                 "voice_mode 只能是 default 或 design。"
                 "当用户需要明确气质、角色感、播报感、甜度、冷感、性别、年龄、口音、节奏时，选择 design。"
                 "当用户只是在默认音色中探索稳定随机声线，或需求极简时，选择 default 并给 seed。"
-                "design_prompt 必须是英文短语，适合 Qwen3TTS VoiceDesign，包含 gender/age/pitch/tone/accent/pace/energy/texture 等要素，不要写模型名。"
+                "design_prompt 必须是英文短语，适合 Qwen3TTS VoiceDesign，必须明确且固定单一 gender 和 age，包含 pitch/tone/accent/pace/energy/texture 等要素，不要写模型名。"
+                "除非用户明确要求男声、老人或小孩，否则优先使用 young adult female Mandarin speaker identity，避免男女或年龄来回漂移。"
                 "seed 是 1 到 2147483647 的整数，用于 Base 默认音色微调。"
                 "persona_prompt 用中文，适合语音助手系统提示词，可以为空；不要夸张，不要二次元套话。"
                 "tags 是 2 到 4 个中文短标签，例如：沉稳、清晰、冷感、亲和、播报、低频、甜感、快答。"

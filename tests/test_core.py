@@ -17,11 +17,13 @@ from fastapi import HTTPException
 
 from hermes_sts.admin import (
     PreviewRequest,
+    _build_voice_design_prompt,
     _conversation_payload,
     _diagnostics_payload,
     _effective_voice_payload,
     _preview_voice,
     _requires_rebuild,
+    _same_persona_profile,
     _settings_for_voice_profile,
     _settings_payload,
     _validate_settings_patch,
@@ -610,6 +612,163 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "response.created")
         self.assertEqual(events[1]["type"], "response.function_call_arguments.done")
         self.assertEqual(events[1]["name"], "camera")
+
+    def test_direct_camera_command_routes_to_client_tool(self) -> None:
+        session = bare_session()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                }
+            ]
+        )
+
+        tool_call = session._direct_client_action_tool_call("帮我看前面是什么")
+
+        self.assertIsNotNone(tool_call)
+        self.assertEqual(tool_call.name, "camera")
+        self.assertEqual(json.loads(tool_call.arguments)["question"], "帮我看前面是什么")
+
+    def test_direct_camera_command_handles_common_deictic_phrases(self) -> None:
+        session = bare_session()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                }
+            ]
+        )
+        session.llm = types.SimpleNamespace(history=[])
+
+        self.assertEqual(session._direct_client_action_tool_call("你看一下这是什么").name, "camera")
+        self.assertEqual(session._direct_client_action_tool_call("看这里").name, "camera")
+
+    def test_direct_camera_followup_uses_recent_visual_context(self) -> None:
+        session = bare_session()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                }
+            ]
+        )
+        session.llm = types.SimpleNamespace(history=[])
+        session.llm.history = [
+            {"role": "user", "content": "你看一下这是什么"},
+            {"role": "assistant", "content": "我马上帮你拍照看看。"},
+        ]
+
+        tool_call = session._direct_client_action_tool_call("这是什么？")
+
+        self.assertIsNotNone(tool_call)
+        self.assertEqual(tool_call.name, "camera")
+
+    def test_empty_camera_result_does_not_claim_completed(self) -> None:
+        class FakeLlm:
+            async def chat(self, *args, **kwargs):
+                raise AssertionError("LLM should not be called when camera returns no visual content")
+
+            async def ensure_active_conversation(self) -> str:
+                return ""
+
+        session = bare_session()
+        session.llm = FakeLlm()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                }
+            ]
+        )
+        session.pending_tool_context = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "看前面是什么"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_camera",
+                        "type": "function",
+                        "function": {"name": "camera", "arguments": '{"question":"看前面是什么"}'},
+                    }
+                ],
+            },
+        ]
+        session.pending_tool_results = [
+            {"role": "tool", "tool_call_id": "call_camera", "content": '{"ok": true}'}
+        ]
+        sent = []
+
+        async def fake_send_response(self, text, *, transcript, metrics=None, voice=None):
+            sent.append(text)
+
+        session._send_response = types.MethodType(fake_send_response, session)
+        asyncio.run(session._process_tool_result_turn())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("没有拿到可描述的画面内容", sent[0])
+        self.assertNotIn("已完成", sent[0])
+
+    def test_camera_result_falls_back_to_visual_summary_when_llm_is_empty(self) -> None:
+        class FakeLlm:
+            async def chat(self, *args, **kwargs):
+                return LLMResponse(text="")
+
+            async def ensure_active_conversation(self) -> str:
+                return ""
+
+        session = bare_session()
+        session.llm = FakeLlm()
+        session.tools.set_client_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "camera",
+                    "description": "Take a picture with the camera and ask a question about it.",
+                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}},
+                }
+            ]
+        )
+        session.pending_tool_context = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "你看到了什么"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_camera",
+                        "type": "function",
+                        "function": {"name": "camera", "arguments": '{"question":"你看到了什么"}'},
+                    }
+                ],
+            },
+        ]
+        session.pending_tool_results = [
+            {"role": "tool", "tool_call_id": "call_camera", "content": '{"ok": true, "description": "前方有一张桌子和一台显示器。"}'}
+        ]
+        sent = []
+
+        async def fake_send_response(self, text, *, transcript, metrics=None, voice=None):
+            sent.append(text)
+
+        session._send_response = types.MethodType(fake_send_response, session)
+        asyncio.run(session._process_tool_result_turn())
+
+        self.assertEqual(sent, ["我看到：前方有一张桌子和一台显示器。"])
 
     def test_direct_dance_command_routes_to_client_tool_without_llm(self) -> None:
         class FakeLlm:
@@ -1995,6 +2154,56 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(settings.omnivoice_voice_design, "female, young adult, chinese accent, moderate pitch")
         self.assertEqual(settings.qwentts_cpp_voice_mode, "preset")
 
+    def test_saved_preset_and_omnivoice_seed_profiles_map_to_one_click_settings(self) -> None:
+        qwen_preset = {
+            "id": "preset_vivian",
+            "name": "常用 Vivian",
+            "provider": "qwen3tts",
+            "mode": "preset",
+            "speaker": "vivian",
+            "note": "日常快答更清晰",
+        }
+        omni_seed = {
+            "id": "omni_seed",
+            "name": "Omni 稳定 seed",
+            "provider": "omnivoice",
+            "mode": "seed",
+            "seed": 99,
+            "note": "播报感更稳",
+        }
+        kokoro_voice = {
+            "id": "kokoro_1",
+            "name": "Kokoro 备用",
+            "provider": "sherpa_kokoro",
+            "mode": "voice",
+            "speaker": "3",
+            "note": "低延迟备用",
+        }
+
+        self.assertEqual(
+            _settings_for_voice_profile(qwen_preset),
+            {
+                "tts_provider": "qwen3tts",
+                "qwentts_cpp_voice_mode": "preset",
+                "qwentts_cpp_voice_preset": "vivian",
+            },
+        )
+        self.assertEqual(
+            _settings_for_voice_profile(omni_seed),
+            {
+                "tts_provider": "omnivoice",
+                "omnivoice_voice_mode": "auto",
+                "omnivoice_seed": 99,
+            },
+        )
+        self.assertEqual(
+            _settings_for_voice_profile(kokoro_voice),
+            {
+                "tts_provider": "sherpa_kokoro",
+                "sherpa_kokoro_voice": 3,
+            },
+        )
+
     def test_preview_voice_preserves_qwen_settings_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2034,6 +2243,61 @@ class CoreTests(unittest.TestCase):
 
             self.assertIsNone(store.persona_profile("news_anchor"))
             self.assertGreaterEqual(len(store.persona_profiles()), 1)
+
+    def test_config_store_seeds_expressive_persona_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "settings.sqlite3")
+
+            personas = store.persona_profiles()
+            cat = store.persona_profile("cat_companion")
+            taiwan = store.persona_profile("taiwan_sweetheart")
+
+        identity_words = ("female", "male", "adult", "elderly", "child", "young")
+        for persona in personas:
+            if persona["voice_mode"] == "design":
+                self.assertIn(persona["voice_identity"], {"young_female", "adult_female", "young_male", "adult_male", "child", "elder"})
+                self.assertTrue(
+                    any(word in persona["voice_ref"].lower() for word in identity_words),
+                    persona["voice_ref"],
+                )
+        self.assertIsNotNone(cat)
+        self.assertEqual(cat["name"], "猫系小甜心")
+        self.assertEqual(cat["voice_mode"], "design")
+        self.assertIn("喵", cat["prompt"])
+        self.assertIsNotNone(taiwan)
+        self.assertEqual(taiwan["name"], "台湾甜妹")
+        self.assertEqual(taiwan["voice_mode"], "design")
+        self.assertIn("Taiwanese Mandarin", taiwan["voice_ref"])
+
+    def test_same_persona_profile_ignores_storage_metadata(self) -> None:
+        stored = {
+            "id": "field_operator",
+            "name": "快反执行",
+            "prompt": "短句执行",
+            "voice_engine": "qwen3tts",
+            "voice_mode": "design",
+            "voice_identity": "young_female",
+            "voice_ref": "confident voice",
+            "voice_seed": 42,
+            "updated_at": 100.0,
+        }
+        incoming = dict(stored)
+        incoming.pop("updated_at")
+
+        self.assertTrue(_same_persona_profile(stored, incoming))
+        self.assertFalse(_same_persona_profile(stored, {**incoming, "voice_ref": "other"}))
+        self.assertFalse(_same_persona_profile(stored, {**incoming, "voice_identity": "adult_male"}))
+
+    def test_voice_design_prompt_uses_structured_identity(self) -> None:
+        prompt = _build_voice_design_prompt("warm bright Mandarin voice", "young_male")
+
+        self.assertIn("warm bright Mandarin voice", prompt)
+        self.assertIn("young adult male Mandarin speaker identity", prompt)
+        self.assertEqual(_build_voice_design_prompt(prompt, "young_male"), prompt)
+        self.assertIn(
+            "young adult female Mandarin speaker identity",
+            _build_voice_design_prompt("warm bright Mandarin voice", "unsupported"),
+        )
 
     def test_config_store_seeds_kokoro_defaults_for_ui_switching(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

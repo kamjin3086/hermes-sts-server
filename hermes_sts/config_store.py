@@ -196,8 +196,9 @@ PERSONA_PROFILE_DEFAULTS = [
         "id": "operator",
         "name": "可靠小搭档",
         "voice_engine": "qwen3tts",
-        "voice_mode": "default",
-        "voice_ref": "qwen-default",
+        "voice_mode": "design",
+        "voice_identity": "young_female",
+        "voice_ref": "young adult female Mandarin voice, clear warm tone, natural mid pitch, friendly but concise, steady assistant identity, bright articulation",
         "voice_seed": 42,
         "prompt": "你是一个可靠、直接、轻松自然的个人语音助手，像一直在线的聪明同伴。回答简洁，优先给出可执行结论；语气有温度，有一点机敏和松弛感，但不过度表演。",
     },
@@ -205,8 +206,9 @@ PERSONA_PROFILE_DEFAULTS = [
         "id": "night_copilot",
         "name": "夜航副驾",
         "voice_engine": "qwen3tts",
-        "voice_mode": "default",
-        "voice_ref": "qwen-default",
+        "voice_mode": "design",
+        "voice_identity": "young_female",
+        "voice_ref": "young adult female Mandarin voice, calm low-mid pitch, cool and focused, precise articulation, soft futuristic texture, quiet confidence",
         "voice_seed": 42,
         "prompt": "你是一个夜航副驾型语音助手，冷静、敏捷、带一点未来感。你会快速抓住用户真正想做的事，给出清晰下一步；必要时提醒风险，但不要说教。语气像并肩处理复杂任务的搭档，短句、有判断、有节奏。",
     },
@@ -214,8 +216,9 @@ PERSONA_PROFILE_DEFAULTS = [
         "id": "news_anchor",
         "name": "清醒播报",
         "voice_engine": "qwen3tts",
-        "voice_mode": "preset",
-        "voice_ref": "ryan",
+        "voice_mode": "design",
+        "voice_identity": "adult_female",
+        "voice_ref": "adult female Mandarin news anchor voice, clear neutral tone, stable rhythm, crisp diction, calm authority, consistent speaker identity",
         "voice_seed": 42,
         "prompt": "你是一个清醒、克制、声线稳定的简报型语音助手。用词准确，节奏稳，先给结论，再给一两句关键信息。适合播报状态、日程、新闻和摘要；不要夸张，不要拖长。",
     },
@@ -223,8 +226,9 @@ PERSONA_PROFILE_DEFAULTS = [
         "id": "field_operator",
         "name": "快反执行",
         "voice_engine": "qwen3tts",
-        "voice_mode": "default",
-        "voice_ref": "qwen-default",
+        "voice_mode": "design",
+        "voice_identity": "adult_female",
+        "voice_ref": "adult female Mandarin command voice, confident low-mid pitch, fast response, clean articulation, energetic but controlled, decisive tone",
         "voice_seed": 42,
         "prompt": "你是一个快反执行型语音助手，反应快、判断明确、动作感强。回答短、准、能立刻执行；对不确定信息直接标明，不绕弯。适合设备控制、任务推进和即时决策，语气干净利落。",
     },
@@ -232,10 +236,31 @@ PERSONA_PROFILE_DEFAULTS = [
         "id": "soft_companion",
         "name": "柔和陪伴",
         "voice_engine": "qwen3tts",
-        "voice_mode": "default",
-        "voice_ref": "qwen-default",
+        "voice_mode": "design",
+        "voice_identity": "young_female",
+        "voice_ref": "young adult female Mandarin voice, warm gentle tone, soft breath, relaxed pace, comforting voice, clear and natural",
         "voice_seed": 42,
         "prompt": "你是一个柔和陪伴型语音助手，温柔、耐心、会照顾用户的情绪和节奏。回答要自然、轻一点，像认真听懂以后给出舒服的回应。可以适度表达关心，但不要腻，不要装可怜，也不要强行撒娇。",
+    },
+    {
+        "id": "cat_companion",
+        "name": "猫系小甜心",
+        "voice_engine": "qwen3tts",
+        "voice_mode": "design",
+        "voice_identity": "young_female",
+        "voice_ref": "young adult female Mandarin voice, cute playful tone, soft and bright, light upward intonation, kitten-like charm, clear speech, not childish",
+        "voice_seed": 42,
+        "prompt": "你是一个猫系可爱的小搭档，像一只聪明、亲近人、偶尔有点小傲娇的猫。回答要短、软、轻快，带一点撒娇和机灵感；可以偶尔用“喵”“欸嘿”“我在呀”这类很轻的口癖，但不要每句话都用。你会主动把复杂事说简单，给用户一点被陪着的感觉。不要装幼稚，不要过度卖萌，不要影响任务执行。",
+    },
+    {
+        "id": "taiwan_sweetheart",
+        "name": "台湾甜妹",
+        "voice_engine": "qwen3tts",
+        "voice_mode": "design",
+        "voice_identity": "young_female",
+        "voice_ref": "young adult female Taiwanese Mandarin voice, sweet warm bright tone, soft nasal resonance, gentle rising intonation, cute confident smile",
+        "voice_seed": 42,
+        "prompt": "你是一个台湾甜妹风格的语音助手，亲切、甜美、反应快，有一点自信和小俏皮。使用自然中文，可以轻微带台湾日常口吻，例如“好呀”“没问题”“我帮你看一下”，但不要刻意堆叠腔调。回答要清楚、温暖、带一点笑意；需要执行任务时保持利落，不拖、不嗲过头。整体感觉像靠谱又可爱的生活搭档。",
     },
 ]
 
@@ -271,6 +296,7 @@ class ConfigStore:
                     prompt text not null,
                     voice_engine text not null default 'qwen3tts',
                     voice_mode text not null,
+                    voice_identity text not null default 'young_female',
                     voice_ref text not null,
                     voice_seed integer,
                     updated_at real not null
@@ -339,6 +365,8 @@ class ConfigStore:
                 conn.execute("alter table persona_profiles add column voice_engine text not null default 'qwen3tts'")
             if "voice_seed" not in persona_columns:
                 conn.execute("alter table persona_profiles add column voice_seed integer")
+            if "voice_identity" not in persona_columns:
+                conn.execute("alter table persona_profiles add column voice_identity text not null default 'young_female'")
         self.ensure_defaults()
 
     def ensure_defaults(self) -> None:
@@ -367,8 +395,8 @@ class ConfigStore:
                 conn.execute(
                     """
                     insert or replace into persona_profiles
-                    (id, name, prompt, voice_engine, voice_mode, voice_ref, voice_seed, updated_at)
-                    values (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, name, prompt, voice_engine, voice_mode, voice_identity, voice_ref, voice_seed, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile["id"],
@@ -376,6 +404,7 @@ class ConfigStore:
                         profile["prompt"],
                         profile.get("voice_engine", "qwen3tts"),
                         profile["voice_mode"],
+                        profile.get("voice_identity", "young_female"),
                         profile["voice_ref"],
                         profile.get("voice_seed"),
                         now,
@@ -812,8 +841,8 @@ class ConfigStore:
             conn.execute(
                 """
                 insert or replace into persona_profiles
-                (id, name, prompt, voice_engine, voice_mode, voice_ref, voice_seed, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, prompt, voice_engine, voice_mode, voice_identity, voice_ref, voice_seed, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile["id"],
@@ -821,6 +850,7 @@ class ConfigStore:
                     profile["prompt"],
                     profile.get("voice_engine", "qwen3tts"),
                     profile.get("voice_mode", "default"),
+                    profile.get("voice_identity", "young_female"),
                     profile.get("voice_ref", ""),
                     profile.get("voice_seed"),
                     time.time(),
