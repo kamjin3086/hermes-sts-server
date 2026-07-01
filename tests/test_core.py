@@ -35,7 +35,7 @@ from hermes_sts.conversation_store import ConversationStore
 from hermes_sts.llm import BaseOpenAIChatProvider, HermesAgentProvider, LLMResponse, LLMToolCallDetected, ToolCall
 from hermes_sts.realtime import RealtimeSession, TurnMetrics
 from hermes_sts.tts import OmniVoiceEngine, QwenTtsCpp, TtsVoice, _stdin_text, build_tts
-from hermes_sts.tools import ToolRegistry, ToolSpec, register_default_local_tools
+from hermes_sts.tools import ToolRegistry, ToolSpec, ToolExecution, register_default_local_tools
 from hermes_sts.vad import EnergyVad, build_vad
 
 
@@ -2371,6 +2371,189 @@ class CoreTests(unittest.TestCase):
         self.assertIn("llm", diagnostics)
         self.assertIn("recent", diagnostics)
         self.assertIn("系统", diagnostics["tools"]["message"])
+
+    def test_streaming_tool_call_after_partial_speech_executes_tool(self) -> None:
+        class PartialThenToolLlm:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def stream_text(self, *args, **kwargs):
+                yield "让我帮你查"
+                raise LLMToolCallDetected("tool")
+
+            async def chat(self, *args, **kwargs):
+                self.chat_calls += 1
+                if self.chat_calls == 1:
+                    return LLMResponse(tool_calls=[ToolCall(id="call_1", name="noop", arguments="{}")])
+                return LLMResponse(text="查到了")
+
+        async def run() -> tuple[bool, int, list[str], list[str], bool]:
+            session = bare_session()
+            session.settings = Settings(llm_streaming_enabled=True)
+            session.llm = PartialThenToolLlm()
+            response_created_count = 0
+            done_transcripts: list[str] = []
+            sent_texts: list[str] = []
+            execute_called = [False]
+
+            async def fake_send_tts_segment(self, text, *, response_id, item_id, metrics=None, voice=None):
+                pass
+
+            async def fake_send_response_created(self, response_id, item_id, metrics=None):
+                nonlocal response_created_count
+                response_created_count += 1
+
+            async def fake_send_response_done(self, *, response_id, item_id, transcript):
+                done_transcripts.append(transcript)
+
+            async def fake_send_text_segments(self, text, *, response_id, item_id, metrics=None, voice=None):
+                sent_texts.append(text)
+
+            async def fake_execute(name, arguments):
+                execute_called[0] = True
+                return ToolExecution(name=name, arguments={}, result="noop completed", mode="local", forwarded=False)
+
+            session._send_tts_segment = types.MethodType(fake_send_tts_segment, session)
+            session._send_response_created = types.MethodType(fake_send_response_created, session)
+            session._send_response_done = types.MethodType(fake_send_response_done, session)
+            session._send_text_segments = types.MethodType(fake_send_text_segments, session)
+            session.tools.execute = fake_execute
+
+            result = await session._respond_with_llm_stream("查新闻", voice=TtsVoice(speaker="ui_voice"))
+            return result, response_created_count, done_transcripts, sent_texts, execute_called[0]
+
+        result, response_created_count, done_transcripts, sent_texts, execute_called = asyncio.run(run())
+
+        self.assertTrue(result)
+        self.assertEqual(response_created_count, 2)
+        self.assertEqual(len(done_transcripts), 2)
+        self.assertEqual(sent_texts, ["查到了"])
+        self.assertTrue(execute_called)
+
+    def test_streaming_tool_call_after_partial_speech_no_tool_calls_sends_followup_answer(self) -> None:
+        class PartialThenToolNoCallsLlm:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+
+            async def ensure_active_conversation(self) -> str:
+                return "conv"
+
+            async def stream_text(self, *args, **kwargs):
+                yield "让我帮你查"
+                raise LLMToolCallDetected("tool")
+
+            async def chat(self, *args, **kwargs):
+                self.chat_calls += 1
+                if self.chat_calls == 1:
+                    return LLMResponse(tool_calls=[ToolCall(id="call_1", name="noop", arguments="{}")])
+                return LLMResponse(text="好的", tool_calls=None)
+
+        async def run() -> tuple[bool, int, list[str], list[str], bool]:
+            session = bare_session()
+            session.settings = Settings(llm_streaming_enabled=True)
+            session.llm = PartialThenToolNoCallsLlm()
+            response_created_count = 0
+            done_transcripts: list[str] = []
+            sent_texts: list[str] = []
+            execute_called = [False]
+
+            async def fake_send_tts_segment(self, text, *, response_id, item_id, metrics=None, voice=None):
+                pass
+
+            async def fake_send_response_created(self, response_id, item_id, metrics=None):
+                nonlocal response_created_count
+                response_created_count += 1
+
+            async def fake_send_response_done(self, *, response_id, item_id, transcript):
+                done_transcripts.append(transcript)
+
+            async def fake_send_text_segments(self, text, *, response_id, item_id, metrics=None, voice=None):
+                sent_texts.append(text)
+
+            async def fake_execute(name, arguments):
+                execute_called[0] = True
+                return ToolExecution(name=name, arguments={}, result="noop completed", mode="local", forwarded=False)
+
+            session._send_tts_segment = types.MethodType(fake_send_tts_segment, session)
+            session._send_response_created = types.MethodType(fake_send_response_created, session)
+            session._send_response_done = types.MethodType(fake_send_response_done, session)
+            session._send_text_segments = types.MethodType(fake_send_text_segments, session)
+            session.tools.execute = fake_execute
+
+            result = await session._respond_with_llm_stream("查新闻", voice=TtsVoice(speaker="ui_voice"))
+            return result, response_created_count, done_transcripts, sent_texts, execute_called[0]
+
+        result, response_created_count, done_transcripts, sent_texts, execute_called = asyncio.run(run())
+
+        self.assertTrue(result)
+        self.assertEqual(response_created_count, 2)
+        self.assertEqual(len(done_transcripts), 2)
+        self.assertEqual(sent_texts, ["好的"])
+        self.assertFalse(execute_called)
+
+    def test_client_tool_followup_timeout_clears_pending_state(self) -> None:
+        async def run() -> tuple[object, int]:
+            session = bare_session()
+            session.settings = Settings(client_tool_followup_timeout_seconds=0.01)
+            session.pending_tool_context = [{"role": "user", "content": "摇头"}]
+            session.pending_tool_results = [{"role": "tool", "content": "done"}]
+            session.tool_followup_timer = None
+            await asyncio.sleep(0.05)
+            return session.pending_tool_context, len(session.pending_tool_results)
+
+        pending_context, pending_results_len = asyncio.run(run())
+
+        self.assertIsNone(pending_context)
+        self.assertEqual(pending_results_len, 0)
+
+    def test_client_tool_followup_timeout_cancelled_by_response(self) -> None:
+        session = bare_session()
+        session.settings = Settings(client_tool_followup_timeout_seconds=10.0)
+        session.pending_tool_context = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "摇头"},
+        ]
+        session.pending_tool_results = []
+        session.tool_followup_timer = None
+
+        session._handle_conversation_item(
+            {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+        )
+
+        self.assertEqual(len(session.pending_tool_results), 1)
+        self.assertIsNotNone(session.tool_followup_timer)
+
+    def test_client_tool_followup_timeout_cancelled_on_disconnect(self) -> None:
+        async def run() -> bool:
+            session = bare_session()
+            session.pending_tool_context = [{"role": "user", "content": "摇头"}]
+            session.pending_tool_results = [{"role": "tool", "content": "done"}]
+
+            async def dummy():
+                await asyncio.sleep(100)
+
+            timer_task = asyncio.create_task(dummy())
+            session.tool_followup_timer = timer_task
+
+            await session._cancel_processing(send_done=False)
+
+            timer_after = session.tool_followup_timer
+            cancelled = timer_after is None or timer_after.cancelled() or timer_after.done()
+
+            if timer_after and not timer_after.done():
+                timer_after.cancel()
+                try:
+                    await timer_after
+                except asyncio.CancelledError:
+                    pass
+
+            return cancelled
+
+        cancelled = asyncio.run(run())
+        self.assertTrue(cancelled)
 
 
 if __name__ == "__main__":
